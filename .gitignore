@@ -36,3 +36,7 @@ summary.json
 .vscode/
 *.swp
 *.tmp
+
+# Transfer archives are not part of this repository
+*.tar.gz
+*.bundle
