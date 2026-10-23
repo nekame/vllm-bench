@@ -3,21 +3,31 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import shlex
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import benchmark
 import prepare_checkpoint as extract
+import verify_checkpoint
 
 HERE = Path(__file__).resolve().parent
 
 
-def fake_checkpoint(root):
+def fake_checkpoint(root, mxfp8=False, architecture="OpenPanguV2ForCausalLM"):
     root.mkdir()
     cfg = json.loads((HERE / "reference_config-hf.json").read_text())
+    cfg["architectures"] = [architecture]
+    if mxfp8:
+        cfg["quantization_config"] = {
+            "quant_method": "mxfp8", "ignore": ["lm_head"],
+            "enable_mxfp8_comm_quant": True, "weight_block_size": [1, 32]}
     (root / "config.json").write_text(json.dumps(cfg))
     (root / "configuration_openpangu_v2.py").write_text("# synthetic asset\n")
     names = ["model.embed_tokens.weight", "lm_head.weight", "model.norm.weight",
@@ -25,14 +35,26 @@ def fake_checkpoint(root):
     names += [f"model.layers.{i}.self_attn.q_a_proj.weight" for i in range(53)]
     names += [f"model.layers.{i}.mlp.experts.0.gate_proj.weight" for i in range(3, 50)]
     payloads = {name: bytes([i % 256, (i + 1) % 256]) for i, name in enumerate(names)}
+    descriptors = {name: {"dtype": "BF16", "shape": [1]} for name in names}
+    if mxfp8:
+        for i, name in enumerate(list(names)):
+            if "q_a_proj" not in name and ".experts." not in name:
+                continue
+            payloads[name] = bytes((i + j) % 256 for j in range(64))
+            descriptors[name] = {"dtype": "F8_E4M3", "shape": [2, 32]}
+            scale = name.removesuffix(".weight") + ".weight_scale"
+            names.append(scale)
+            payloads[scale] = bytes([127, 128])
+            descriptors[scale] = {"dtype": "F8_E8M0" if i == 4 else "U8", "shape": [2, 1]}
     # Two input shards: verify extraction reads tensors from either source.
     index = {}
     for shard, subset in enumerate((names[::2], names[1::2])):
         header = {"__metadata__": {"format": "pt"}}
         cursor = 0
         for name in subset:
-            header[name] = {"dtype": "BF16", "shape": [1], "data_offsets": [cursor, cursor + 2]}
-            cursor += 2
+            size = len(payloads[name])
+            header[name] = {**descriptors[name], "data_offsets": [cursor, cursor + size]}
+            cursor += size
         raw = json.dumps(header).encode()
         raw += b" " * (-len(raw) % 8)
         filename = f"source-{shard}.safetensors"
@@ -43,6 +65,96 @@ def fake_checkpoint(root):
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_mxfp8_bytes_scales_config_and_hashes(self):
+        for architecture in ("OpenPanguV2ForCausalLM", "PanguUltraMoEForCausalLM"):
+            for override in (False, True):
+                with self.subTest(architecture=architecture, structural_override=override), tempfile.TemporaryDirectory() as tmp:
+                    source, output = Path(tmp) / "source", Path(tmp) / "output"
+                    payloads = fake_checkpoint(source, mxfp8=True, architecture=architecture)
+                    original = json.loads((source / "config.json").read_text())
+                    before = {p.name: p.read_bytes() for p in source.iterdir()}
+                    command = ["--source", str(source), "--output", str(output), "--hash-tensors"]
+                    if override:
+                        structural = {k: v for k, v in original.items() if k != "quantization_config"}
+                        path = Path(tmp) / "structural.json"
+                        path.write_text(json.dumps(structural))
+                        command += ["--config", str(path)]
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        extract.main(command)
+                    cfg = json.loads((output / "config.json").read_text())
+                    self.assertEqual(cfg["quantization_config"], original["quantization_config"])
+                    self.assertEqual(cfg["architectures"], [architecture])
+                    self.assertEqual(cfg["dtype"], "bfloat16")
+                    self.assertEqual(cfg["num_hidden_layers"], 12)
+                    self.assertEqual(cfg["num_nextn_predict_layers"], 0)
+                    original_tensors, actual = extract.discover(source), extract.discover(output)
+                    expected = {n for n in payloads if not n.startswith("model.layers.")
+                                or int(n.split(".")[2]) < 12}
+                    self.assertEqual(set(actual), expected)
+                    self.assertTrue(any(t["dtype"] == "F8_E4M3" for t in actual.values()))
+                    self.assertTrue(any(n.endswith(".weight_scale") for n in actual))
+                    for name, item in actual.items():
+                        self.assertEqual(item["dtype"], original_tensors[name]["dtype"])
+                        self.assertEqual(item["shape"], original_tensors[name]["shape"])
+                        a, b = item["data_offsets"]
+                        with item["source"].open("rb") as f:
+                            f.seek(item["start"] + a)
+                            self.assertEqual(f.read(b - a), payloads[name])
+                    self.assertEqual(before, {p.name: p.read_bytes() for p in source.iterdir()})
+                    with patch.object(sys, "argv", ["verify_checkpoint.py", str(output), "--hashes"]), contextlib.redirect_stdout(io.StringIO()):
+                        verify_checkpoint.main()
+
+    def test_unsupported_and_conflicting_quantization_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            fake_checkpoint(source, mxfp8=True)
+            original = json.loads((source / "config.json").read_text())
+            override = Path(tmp) / "override.json"
+            changed = json.loads(json.dumps(original))
+            changed["quantization_config"]["ignore"] = []
+            override.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "quantization_config disagrees"):
+                extract.resolve_config(source, override)
+            for method in ("compressed-tensors", "hifloat8", "w4a8_mxfp"):
+                with self.subTest(method=method), self.assertRaisesRegex(ValueError, "Supported checkpoint formats"):
+                    extract.reduced_config({**original, "quantization_config": {"quant_method": method}}, 12)
+
+    def test_fp8_without_metadata_is_not_mislabeled_bf16(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, output = Path(tmp) / "source", Path(tmp) / "output"
+            fake_checkpoint(source, mxfp8=True)
+            cfg = json.loads((source / "config.json").read_text())
+            cfg.pop("quantization_config")
+            (source / "config.json").write_text(json.dumps(cfg))
+            with self.assertRaisesRegex(ValueError, "original MXFP8 quantization_config"):
+                extract.main(["--source", str(source), "--output", str(output)])
+            self.assertFalse(output.exists())
+
+    def test_mxfp8_server_plan_uses_original_architecture(self):
+        for architecture in ("OpenPanguV2ForCausalLM", "PanguUltraMoEForCausalLM"):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as tmp:
+                model = Path(tmp) / "model"
+                fake_checkpoint(model, mxfp8=True, architecture=architecture)
+                cfg = extract.reduced_config(json.loads((model / "config.json").read_text()), 12)
+                (model / "config.json").write_text(json.dumps(cfg))
+                operator = Path(tmp) / "operators.json"
+                operator.write_text(json.dumps({"model_parallel_config": {}, "operator_optimization_config": {}}))
+                output = Path(tmp) / "server"
+                result = subprocess.run([sys.executable, str(HERE / "serve.py"), "--model", str(model),
+                                         "--operator-config", str(operator), "--output", str(output)],
+                                        capture_output=True, text=True, env={**{k: v for k, v in os.environ.items() if k != "OMNI_VLLM_PATCHES_DIR"}, "VLLM_PLUGINS": "existing_plugin"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("omni_custom_models", result.stdout)
+                self.assertIn("omni_npu_patches", result.stdout)
+                self.assertIn("omni-npu", result.stdout)
+                self.assertIn("existing_plugin", result.stdout)
+                expected = "high_throughout" if architecture.startswith("PanguUltra") else "low_latency"
+                self.assertIn(expected, result.stdout)
+                command = shlex.split(next(s.removeprefix("Command: ") for s in result.stdout.splitlines() if s.startswith("Command: ")))
+                self.assertEqual(command[command.index("--dtype") + 1], "bfloat16")
+                self.assertNotIn("--hf-overrides", command)
+                self.assertFalse(output.exists())
+
     def test_prefix_preserves_payloads_and_global_weights(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, output = Path(tmp) / "source", Path(tmp) / "output"

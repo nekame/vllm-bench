@@ -11,6 +11,8 @@ import shlex
 import subprocess
 import sys
 
+from prepare_checkpoint import SUPPORTED_ARCHITECTURES, quantization_method
+
 HERE = Path(__file__).resolve().parent
 RESET_ENV = ["OMNI_HYBRID_ALIGNED_DECODE", "OMNI_PD_BENCH_ALIGNED_DECODE_THRESHOLD",
              "OMNI_NPU_BENCH_ALIGNED_DECODE_THRESHOLD", "OMNI_DP_ROUND_ROBIN",
@@ -35,8 +37,8 @@ def main():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     p.add_argument("--kv-cache-memory-bytes", type=int)
     p.add_argument("--num-gpu-blocks-override", type=int)
-    p.add_argument("--patches", default=os.getenv("OMNI_VLLM_PATCHES_DIR", "low_latency"))
-    p.add_argument("--attention-backend", choices=["pangu", "deepseek"], default="pangu")
+    p.add_argument("--patches", help="Defaults to existing environment, then low_latency for V2 / high_throughout for Ultra")
+    p.add_argument("--attention-backend", choices=["auto", "pangu", "deepseek"], default="auto")
     p.add_argument("--enable-expert-parallel", action="store_true")
     p.add_argument("--enforce-eager", action="store_true")
     p.add_argument("--chunked-prefill", action=argparse.BooleanOptionalAction, default=True)
@@ -49,8 +51,16 @@ def main():
     a = p.parse_args()
     model, operator, output = a.model.resolve(), a.operator_config.resolve(), a.output.resolve()
     cfg = json.loads((model / "config.json").read_text())
-    if cfg.get("architectures") != ["OpenPanguV2ForCausalLM"] or cfg.get("num_nextn_predict_layers") != 0:
-        p.error("Expected an extracted V2 checkpoint with MTP disabled")
+    if cfg.get("architectures") not in SUPPORTED_ARCHITECTURES or cfg.get("num_nextn_predict_layers") != 0:
+        p.error("Expected an extracted V2 or Ultra checkpoint with MTP disabled")
+    quantization = quantization_method(cfg)
+    ultra = cfg["architectures"] == ["PanguUltraMoEForCausalLM"]
+    if a.attention_backend == "auto":
+        a.attention_backend = "deepseek" if ultra else "pangu"
+    if ultra and a.attention_backend == "pangu":
+        p.error("Ultra uses DSA/MLA attention; choose --attention-backend auto or deepseek")
+    if a.patches is None:
+        a.patches = os.getenv("OMNI_VLLM_PATCHES_DIR") or ("high_throughout" if ultra else "low_latency")
     if not operator.is_file():
         p.error("Operator config does not exist")
     # Check shape now, before asking vLLM to initialize distributed workers.
@@ -101,6 +111,13 @@ def main():
     settings = {"OMNI_VLLM_PATCHES_DIR": a.patches,
                 "OMNI_CUSTOM_MODEL_CONFIG_PATH": str(operator),
                 "OMNI_PANGU_V2_HIGH_THROUGHOUT": "1" if a.attention_backend == "deepseek" else "0"}
+    if quantization == "mxfp8":
+        # Mxfp8Config.get_quant_method explicitly requires this custom-model plugin.
+        plugins = [s.strip() for s in env.get("VLLM_PLUGINS", "").split(",") if s.strip()]
+        for required in ("omni-npu", "omni_npu_patches", "omni_custom_models"):
+            if required not in plugins:
+                plugins.append(required)
+        settings["VLLM_PLUGINS"] = ",".join(plugins)
     env.update(settings)
     if a.annotate_layers:
         env["PANGU12_ANNOTATE_LAYERS"] = "1"
@@ -110,7 +127,7 @@ def main():
     plan = {"created_utc": dt.datetime.now(dt.timezone.utc).isoformat(), "command": command,
             "settings": settings, "cleared_environment": RESET_ENV,
             "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
-            "model_config": cfg, "operator_config": opt,
+            "model_config": cfg, "operator_config": opt, "quantization": quantization,
             "annotation_overhead": a.annotate_layers}
     print("Environment:", json.dumps(settings, indent=2), flush=True)
     print("Command:", shlex.join(command), flush=True)

@@ -23,6 +23,44 @@ DTYPE_BYTES = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1,
                "F16": 2, "BF16": 2, "I32": 4, "U32": 4, "F32": 4,
                "I64": 8, "U64": 8, "F64": 8}
 MAX_HEADER = 100 * 1024 * 1024
+SUPPORTED_ARCHITECTURES = (["OpenPanguV2ForCausalLM"], ["PanguUltraMoEForCausalLM"])
+
+
+def quantization_method(config: dict):
+    quant = config.get("quantization_config")
+    if quant is None or quant == {}:
+        return None
+    if not isinstance(quant, dict) or quant.get("quant_method") != "mxfp8":
+        raise ValueError("Supported checkpoint formats: BF16 and quantization_config.quant_method='mxfp8'")
+    return "mxfp8"
+
+
+def resolve_config(source: Path, config_path: Path):
+    """Preserve source quantization even when an older structural override lacks it."""
+    raw = config_path.read_bytes()
+    config = json.loads(raw)
+    quantization_method(config)
+    source_path = source / "config.json"
+    inherited = False
+    if source_path.is_file():
+        source_config = json.loads(source_path.read_text())
+        source_quant = quantization_method(source_config)
+        keys = ("architectures", "num_hidden_layers", "hidden_size", "vocab_size",
+                "num_attention_heads", "n_routed_experts", "moe_intermediate_size",
+                "q_lora_rank", "kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+        different = [key for key in keys if key in source_config and source_config[key] != config.get(key)]
+        if different:
+            raise ValueError(f"Provided config disagrees with SOURCE/config.json: {different}. "
+                             "Use the source config, or an override with the same architecture and dimensions.")
+        if source_quant:
+            if config.get("quantization_config"):
+                if config["quantization_config"] != source_config["quantization_config"]:
+                    raise ValueError("Provided quantization_config disagrees with SOURCE/config.json; "
+                                     "the extractor does not change quantization")
+            else:
+                config["quantization_config"] = source_config["quantization_config"]
+                inherited = True
+    return config, raw, inherited
 
 
 def read_header(path: Path):
@@ -93,10 +131,9 @@ def discover(source: Path):
 def reduced_config(config: dict, layers: int):
     cfg = json.loads(json.dumps(config))
     original = cfg["num_hidden_layers"]
-    if cfg.get("architectures") != ["OpenPanguV2ForCausalLM"]:
-        raise ValueError("This bundle supports the supplied OpenPanguV2ForCausalLM architecture")
-    if cfg.get("quantization_config"):
-        raise ValueError("Quantized checkpoints require a separate validated extraction workflow")
+    if cfg.get("architectures") not in SUPPORTED_ARCHITECTURES:
+        raise ValueError("Supported architectures: OpenPanguV2ForCausalLM and PanguUltraMoEForCausalLM")
+    quantization_method(cfg)
     if not 3 < layers < original:
         raise ValueError(f"--layers must be between 4 and {original - 1}")
     if cfg.get("cla_explicit_mapping"):
@@ -225,19 +262,7 @@ def main(argv=None):
     if output.exists():
         parser.error("Output already exists; choose a new directory (no overwrite)")
     config_path = args.config or source / "config.json"
-    original_raw = config_path.read_bytes()
-    original = json.loads(original_raw)
-    source_config_path = source / "config.json"
-    if source_config_path.is_file():
-        source_config = json.loads(source_config_path.read_text())
-        if source_config.get("quantization_config"):
-            raise ValueError("Source checkpoint is quantized; a BF16 override does not convert weights")
-        keys = ("architectures", "num_hidden_layers", "hidden_size", "vocab_size",
-                "num_attention_heads", "n_routed_experts", "moe_intermediate_size",
-                "q_lora_rank", "kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
-        different = [key for key in keys if key in source_config and source_config[key] != original.get(key)]
-        if different:
-            raise ValueError(f"Provided config disagrees with SOURCE/config.json: {different}")
+    original, original_raw, inherited_quantization = resolve_config(source, config_path)
     config = reduced_config(original, args.layers)
     tensors = discover(source)
     layer_re = re.compile("^" + re.escape(args.layer_prefix) + r"(\d+)\.")
@@ -254,17 +279,24 @@ def main(argv=None):
         raise ValueError(f"Missing retained layers or wrong prefix: {sorted(found_layers)}")
     if not any("embed_tokens" in n for n in selected) or not any("lm_head" in n for n in selected):
         raise ValueError("Expected untied embedding and lm_head tensors are missing")
+    quantization = quantization_method(config)
+    weight_dtypes = {"BF16", "F32"}
+    if quantization == "mxfp8":
+        weight_dtypes.add("F8_E4M3")
     bad_weights = [n for n, item in selected.items()
-                   if n.endswith(".weight") and item["dtype"] not in {"BF16", "F32"}]
+                   if n.endswith(".weight") and item["dtype"] not in weight_dtypes]
     if bad_weights:
-        raise ValueError(f"Expected BF16/FP32 weights, found other dtypes: {bad_weights[:5]}")
+        raise ValueError(f"Weight dtype does not match quantization={quantization!r}: {bad_weights[:5]}. "
+                         "FP8 weights require the original MXFP8 quantization_config.")
     shards = plan_shards(selected, int(args.max_shard_gib * 1024**3))
     total = sum(x["data_offsets"][1] - x["data_offsets"][0] for x in selected.values())
     summary = {"source": str(source), "output": str(output), "layers": args.layers,
                "retained_tensors": len(selected), "discarded_tensors": len(tensors) - len(selected),
                "tensor_bytes": total, "tensor_gib": round(total / 1024**3, 3),
                "output_shards": len(shards), "dsa_layers": config["dsa_layers"],
-               "swa_layers": config["swa_layers"], "mtp_layers": 0}
+               "swa_layers": config["swa_layers"], "mtp_layers": 0,
+               "quantization": quantization, "inherited_source_quantization": inherited_quantization,
+               "tensor_dtypes": sorted({item["dtype"] for item in selected.values()})}
     print(json.dumps(summary, indent=2), flush=True)
     if args.dry_run:
         return 0
@@ -287,6 +319,8 @@ def main(argv=None):
             {"metadata": {"total_size": total}, "weight_map": weight_map}, indent=2) + "\n")
         manifest = {**summary, "original_config": original,
                     "original_config_sha256": hashlib.sha256(original_raw).hexdigest(),
+                    "config_file": str(config_path.resolve()),
+                    "effective_config_sha256": hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest(),
                     "retained_layer_mapping": {str(i): i for i in range(args.layers)},
                     "copied_assets": assets, "tensor_sha256": hashes,
                     "limitations": ["Synthetic profiling checkpoint; not for model quality evaluation",

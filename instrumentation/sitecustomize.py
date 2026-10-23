@@ -11,8 +11,9 @@ import sys
 
 
 class _Loader:
-    def __init__(self, original):
+    def __init__(self, original, class_name):
         self.original = original
+        self.class_name = class_name
 
     def create_module(self, spec):
         method = getattr(self.original, "create_module", None)
@@ -21,7 +22,7 @@ class _Loader:
     def exec_module(self, module):
         self.original.exec_module(module)
         import torch
-        cls = module.OpenPanguV2DecoderLayer
+        cls = getattr(module, self.class_name)
         for method in ("forward", "mhc_head"):
             original = getattr(cls, method)
             if getattr(original, "_pangu12_annotation", False):
@@ -45,11 +46,13 @@ class _Loader:
 
 class _Finder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname != "omni_npu.v1.models.pangu.pangu_v2_moe":
+        classes = {"omni_npu.v1.models.pangu.pangu_v2_moe": "OpenPanguV2DecoderLayer",
+                   "omni_npu.v1.models.pangu.pangu_ultra_moe": "OpenPanguDecoderLayer"}
+        if fullname not in classes:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec and spec.loader:
-            spec.loader = _Loader(spec.loader)
+            spec.loader = _Loader(spec.loader, classes[fullname])
         return spec
 
 
