@@ -1,0 +1,13 @@
+{
+  "description": "Closed-loop bursts. Benchmark prefill-dominated and generation workloads separately. No MTP or prefix cache.",
+  "cases": [
+    {"name": "prefill-1k-c1", "input_tokens": 1024, "output_tokens": 1, "concurrency": 1},
+    {"name": "prefill-8k-c1", "input_tokens": 8192, "output_tokens": 1, "concurrency": 1},
+    {"name": "prefill-8k-c8", "input_tokens": 8192, "output_tokens": 1, "concurrency": 8},
+    {"name": "prefill-32k-c1", "input_tokens": 32768, "output_tokens": 1, "concurrency": 1},
+    {"name": "decode-1k-c1", "input_tokens": 1024, "output_tokens": 128, "concurrency": 1},
+    {"name": "decode-8k-c1", "input_tokens": 8192, "output_tokens": 128, "concurrency": 1},
+    {"name": "decode-8k-c8", "input_tokens": 8192, "output_tokens": 128, "concurrency": 8},
+    {"name": "decode-32k-c1", "input_tokens": 32768, "output_tokens": 128, "concurrency": 1}
+  ]
+}

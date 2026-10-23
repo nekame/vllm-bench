@@ -1,0 +1,38 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Model weights and incomplete checkpoint exports
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.partial-*/
+checkpoints/
+models/
+
+# Benchmark outputs and profiler traces
+results/
+profile-results/
+traces/
+*_ascend_pt/
+ASCEND_PROFILER_OUTPUT/
+*.log
+requests.jsonl
+run_manifest.json
+server_manifest.json
+summary.csv
+summary.json
+
+# Local credentials and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.tmp
