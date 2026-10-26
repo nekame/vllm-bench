@@ -2,8 +2,8 @@
   "format": 1,
   "files": {
     ".gitignore": "a45da93488414748e0abcf83611fdbb9982854d659c0cf878b41d4b0f2005487",
-    "PANGU_505B_RU.md": "9881fcb3e4d6e252b397d96a1ea55918482281258cc24fe22455a6290b7de50f",
-    "README.md": "6ddaf9d1bcf29da27caa490c3d5f1e9251b3737876da17cc5b0170e053d9054c",
+    "PANGU_505B_RU.md": "913d004324053b53a97acb2d83b2cb150b5b89b0b015ef4b7b17fdca00044dd5",
+    "README.md": "3b7aed5f8ee2da4a4ae782bdbde78a5d3d72ca435a363579b0df589fa3cc9215",
     "analyze_trace.py": "0bfd684aafdcda779b1fdee5c9571ffaf14c4b72512dd1990209f934d8ccb8a5",
     "benchmark.py": "403c8a753b1c92df4b9a59c242461bea2ba4a5d05f87e7411733585130eb62db",
     "config-12layers.json": "0ff72a0de585124e7e112d35ef522af9a6b4d23015b455088c84be42292ebc4f",
