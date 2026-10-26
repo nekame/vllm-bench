@@ -182,7 +182,7 @@ TTFT измеряется до первого chunk с output token IDs. TPOT �
 
 ## Сбор NPU trace без повторной загрузки
 
-Тот же сервер уже запущен с `--profiler-config`, поэтому загрузка checkpoint повторно не нужна. Клиент сначала прогревает выбранный случай, затем вызывает `/start_profile`, отправляет одну волну и гарантированно пытается вызвать `/stop_profile` после неё.
+Тот же сервер уже запущен с `--profiler-config`, поэтому загрузка checkpoint повторно не нужна. Клиент сначала прогревает выбранный случай, затем вызывает `/start_profile`, отправляет `--profile-waves` волн (по умолчанию одну) и гарантированно пытается вызвать `/stop_profile` после них. Каждая волна полностью завершается перед следующей; при concurrency=1 это последовательные запросы в одном окне записи. `--measure-waves` действует только в режиме benchmark.
 
 Prefill с одним выходным токеном:
 
@@ -206,6 +206,20 @@ python benchmark.py \
 ```
 
 NPU traces находятся в `pangu12-server/traces`, клиентские результаты — в указанном output. Profiler собирает CPU и NPU на workers; frontend profiling выключен. Не отправляйте постороннюю нагрузку во время такого окна.
+
+Пять последовательных запросов: каждый с prefill на 8192 токена и генерацией 16 выходных токенов, все в одной записи:
+
+```bash
+python benchmark.py \
+  --model-dir /data/models/pangu505b-mxfp8-12layers \
+  --server-manifest /data/profile-results/pangu12-server/server_manifest.json \
+  --mode profile --profile-kind generation \
+  --select decode-8k-c1 --profile-tokens 16 --profile-waves 5 \
+  --warmup-waves 2 \
+  --output /data/profile-results/pangu12-trace-sequential
+```
+
+Прогрев выполняется вне записи. На timeline ожидается последовательность `prefill → generation → prefill → generation → …` с возможными промежутками HTTP/планировщика. Для одного prefill step на запрос запускайте сервер с `--max-num-batched-tokens 8192` или больше; при меньшем бюджете prefill делится на несколько steps. При C1, отключённых prefix cache и MTP один prefill step выдаёт первый выходной токен, затем следуют 15 decode steps. Следовательно, 16 выходных токенов означают 16 проходов модели на запрос при одном prefill step. Prefix cache наш `serve.py` отключает; на самостоятельно запущенном сервере также отключите его, чтобы каждый запрос действительно выполнял полный prefill. Изменение только числа волн и выходных токенов не требует перезапуска сервера; изменение серверного token budget требует. Окно `/start_profile`–`/stop_profile` охватывает все волны; убедитесь, что сторонние настройки профайлера не ограничивают число записываемых итераций.
 
 ### Если raw данные есть а trace нет
 

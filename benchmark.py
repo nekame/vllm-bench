@@ -224,6 +224,19 @@ def run_wave(args, case, config, number, wave, phase, corpus, sink):
     return rows
 
 
+def run_profile_waves(args, case, config, number, corpus, sink):
+    """Record fully drained waves inside one start/stop window."""
+    rows = []
+    api(args.base_url, "/start_profile", args.timeout, "POST")
+    try:
+        for wave in range(args.profile_waves):
+            rows += run_wave(args, case, config, number, wave, "profile", corpus, sink)
+            number += case["concurrency"]
+    finally:
+        api(args.base_url, "/stop_profile", args.timeout, "POST")
+    return rows, number
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base-url", default="http://127.0.0.1:8000", help="Server root, without /v1")
@@ -238,13 +251,15 @@ def main():
     p.add_argument("--profile-kind", choices=["prefill", "generation"], default="generation")
     p.add_argument("--profile-tokens", type=int, default=8,
                    help="Output length in generation trace; includes prefill and this short generation")
+    p.add_argument("--profile-waves", type=int, default=1,
+                   help="Fully drained waves in one trace; concurrency=1 gives sequential requests")
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--timeout", type=float, default=1800)
     p.add_argument("--prompts-jsonl", type=Path, help="Optional corpus: one {prompt_token_ids: [...]} per line")
     p.add_argument("--server-manifest", type=Path, help="serve.py manifest for engine-limit checks and reproducibility")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
-    if a.warmup_waves < 0 or a.measure_waves < 1 or a.profile_tokens < 1 or a.timeout <= 0:
+    if a.warmup_waves < 0 or a.measure_waves < 1 or a.profile_tokens < 1 or a.profile_waves < 1 or a.timeout <= 0:
         p.error("Invalid wave counts, profile tokens or timeout")
     cfg = json.loads((a.model_dir / "config.json").read_text())
     suite = json.loads(a.suite.read_text())
@@ -280,6 +295,7 @@ def main():
             "measure_waves": a.measure_waves, "seed": a.seed,
             "input_source": "corpus" if corpus else "synthetic_uniform_token_ids",
             "profile_window": a.profile_kind if a.mode == "profile" else None,
+            "profile_waves": a.profile_waves if a.mode == "profile" else None,
             "model_config": cfg, "server_manifest": server,
             "started_utc": dt.datetime.now(dt.timezone.utc).isoformat()}
     print(json.dumps({k: v for k, v in plan.items() if k not in {"model_config", "server_manifest"}}, indent=2), flush=True)
@@ -309,15 +325,10 @@ def main():
                 number += case["concurrency"]
             rows = []
             if a.mode == "profile":
-                api(a.base_url, "/start_profile", a.timeout, "POST")
-                try:
-                    rows = run_wave(a, case, cfg, number, 0, "profile", corpus, sink)
-                finally:
-                    api(a.base_url, "/stop_profile", a.timeout, "POST")
+                rows, number = run_profile_waves(a, case, cfg, number, corpus, sink)
                 print("Profile collection stopped. A successful /stop_profile does not prove trace export. "
                       "On the server, check the traces directory with export_profile.py; "
                       "daemon workers may require standalone offline export (--execute).", flush=True)
-                number += case["concurrency"]
             else:
                 for wave in range(a.measure_waves):
                     rows += run_wave(a, case, cfg, number, wave, "measurement", corpus, sink)

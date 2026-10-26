@@ -65,6 +65,36 @@ def fake_checkpoint(root, mxfp8=False, architecture="OpenPanguV2ForCausalLM"):
     return payloads
 
 
+class ProfileWindowTests(unittest.TestCase):
+    def test_sequential_waves_share_window_and_stop_on_failure(self):
+        from types import SimpleNamespace
+        args = SimpleNamespace(base_url="unused", timeout=5, profile_waves=3)
+        case = {"concurrency": 1}
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                events = []
+
+                def endpoint(base, path, timeout, method):
+                    events.append(path)
+
+                def wave(args, case, cfg, number, index, phase, corpus, sink):
+                    events.append((number, index, phase))
+                    if fail and index == 1:
+                        raise RuntimeError("request failed")
+                    return [{"number": number}]
+
+                with patch.object(benchmark, "api", side_effect=endpoint), patch.object(benchmark, "run_wave", side_effect=wave):
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "request failed"):
+                            benchmark.run_profile_waves(args, case, {}, 2, None, io.StringIO())
+                    else:
+                        rows, number = benchmark.run_profile_waves(args, case, {}, 2, None, io.StringIO())
+                        self.assertEqual(rows, [{"number": n} for n in (2, 3, 4)])
+                        self.assertEqual(number, 5)
+                count = 2 if fail else 3
+                self.assertEqual(events, ["/start_profile"] + [(2 + i, i, "profile") for i in range(count)] + ["/stop_profile"])
+
+
 class ExtractionTests(unittest.TestCase):
     def test_mxfp8_bytes_scales_config_and_hashes(self):
         for architecture in ("OpenPanguV2ForCausalLM", "PanguUltraMoEForCausalLM"):
