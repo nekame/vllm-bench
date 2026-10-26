@@ -3,21 +3,21 @@
   "files": {
     ".gitignore": "a45da93488414748e0abcf83611fdbb9982854d659c0cf878b41d4b0f2005487",
     "PANGU_505B_RU.md": "9881fcb3e4d6e252b397d96a1ea55918482281258cc24fe22455a6290b7de50f",
-    "README.md": "41b70290857d9189496d050325001cfd33a0514409f0153e288d70b118dfd791",
+    "README.md": "6ddaf9d1bcf29da27caa490c3d5f1e9251b3737876da17cc5b0170e053d9054c",
     "analyze_trace.py": "0bfd684aafdcda779b1fdee5c9571ffaf14c4b72512dd1990209f934d8ccb8a5",
     "benchmark.py": "403c8a753b1c92df4b9a59c242461bea2ba4a5d05f87e7411733585130eb62db",
     "config-12layers.json": "0ff72a0de585124e7e112d35ef522af9a6b4d23015b455088c84be42292ebc4f",
-    "export_profile.py": "e81bd5dc6d9e50ced130dccba172ed664b52b6cf32c8a460529d572882671674",
+    "export_profile.py": "f225f6ce9421a38909a0894eefa673c32506ecfc07717bb9cebab94265453b77",
     "instrumentation/sitecustomize.py": "c9b76350883badfb0c142d780933ae7d7a0fe6da99f205b0376328b67c479f36",
     "prepare_checkpoint.py": "6e0d9f4036acabadd16a8642496da210243d7d27318fb1a5414b1fc4ae0a71dc",
     "reference_config-hf.json": "d92e29c3542c93b0b22432d7c455ac19c7eeec6ec7ce0ed9d8c4508169421189",
     "serve.py": "2d184cb30ea7ccf9e0515a1d7e71c292ef2d68408a15e918f938cdf475ecb3ce",
     "suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
-    "test_cpu.py": "8aa00b2c8745ab7f6876eec3816c2f4b6ee5e2207e2e3483baa32b3f7f212849",
+    "test_cpu.py": "dc061e6504586be15eebe2752fc3e18266307ec80482e716339427263f8bccad",
     "verify_checkpoint.py": "6f37b69dff157099e01e8176691c6c69a98162060911a2817be8f6bcc4796d70"
   },
   "validation": {
-    "cpu_tests": 11,
+    "cpu_tests": 13,
     "cpu_tests_passed": true,
     "npu_execution_performed": false,
     "omniinfer_modified": false

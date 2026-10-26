@@ -242,6 +242,36 @@ class BenchmarkTests(unittest.TestCase):
 
 
 class ProfileExportTests(unittest.TestCase):
+    def test_analyse_in_implementation_module_not_reexported(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "worker_ascend_pt"
+            (session / "FRAMEWORK").mkdir(parents=True)
+            calls = []
+
+            def analyse(path, max_process_number=4, export_type=None):
+                calls.append((path, max_process_number, export_type))
+                output = Path(path) / "ASCEND_PROFILER_OUTPUT"
+                output.mkdir()
+                (output / "trace_view.json").write_text('{"traceEvents": []}')
+
+            modules = {"torch_npu.profiler": SimpleNamespace(),
+                       "torch_npu.profiler.profiler": SimpleNamespace(analyse=analyse)}
+            with patch.object(export_profile.importlib, "import_module", side_effect=modules.__getitem__) as importer, contextlib.redirect_stdout(io.StringIO()):
+                result = export_profile.export_sessions(session, execute=True)
+            self.assertEqual([call.args[0] for call in importer.call_args_list], list(modules))
+            self.assertEqual(result["analysis_api"], "torch_npu.profiler.profiler.analyse")
+            self.assertEqual(calls, [(str(session), 1, "text")])
+            self.assertEqual(len(result["sessions"][0]["trace_files"]), 1)
+
+    def test_missing_api_error_reports_checked_paths(self):
+        from types import SimpleNamespace
+        with patch.object(export_profile.importlib, "import_module", return_value=SimpleNamespace()), patch.object(export_profile.metadata, "version", return_value="test-version"):
+            with self.assertRaisesRegex(RuntimeError, "test-version") as error:
+                export_profile.resolve_analyse()
+        self.assertIn("torch_npu.profiler: no callable analyse", str(error.exception))
+        self.assertIn("torch_npu.profiler.profiler: no callable analyse", str(error.exception))
+
     def test_inspection_does_not_import_ml_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

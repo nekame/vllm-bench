@@ -9,10 +9,32 @@ from __future__ import annotations
 
 import argparse
 import importlib
+from importlib import metadata
 import inspect
 import json
 from pathlib import Path
 import sys
+
+
+def resolve_analyse():
+    """analyse is often defined in profiler.py but not re-exported by __init__."""
+    failures = []
+    for name in ("torch_npu.profiler", "torch_npu.profiler.profiler"):
+        try:
+            module = importlib.import_module(name)
+        except ImportError as error:
+            failures.append(f"{name}: {type(error).__name__}: {error}")
+            continue
+        analyse = getattr(module, "analyse", None)
+        if callable(analyse):
+            return analyse, name + ".analyse"
+        failures.append(f"{name}: no callable analyse")
+    try:
+        version = metadata.version("torch-npu")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+    raise RuntimeError(f"No offline analyse API found (torch_npu={version}, Python={sys.executable}). "
+                       + "; ".join(failures))
 
 
 def trace_files(root: Path):
@@ -65,10 +87,9 @@ def export_sessions(root: Path, execute=False, workers=1):
         print("All sessions already contain trace files; no re-export needed.")
         return report
     # Import only when explicitly executing, so inspection works on any CPU host.
-    profiler = importlib.import_module("torch_npu.profiler")
-    analyse = getattr(profiler, "analyse", None)
-    if not callable(analyse):
-        raise RuntimeError("Installed torch_npu.profiler has no offline analyse API")
+    analyse, api_name = resolve_analyse()
+    print(f"Offline analysis API: {api_name}", flush=True)
+    report["analysis_api"] = api_name
     parameters = inspect.signature(analyse).parameters
     accepts_kwargs = any(p.kind == p.VAR_KEYWORD for p in parameters.values())
     options = {}
