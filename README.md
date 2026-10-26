@@ -19,6 +19,7 @@
 | `suite.json` | Матрица 1K/8K/32K и concurrency 1/8, prefill и generation |
 | `instrumentation/sitecustomize.py` | Необязательные CPU ranges с номерами слоёв |
 | `analyze_trace.py` | Сводка CPU ranges из одного trace |
+| `export_profile.py` | Проверка сохранённых сессий и отдельный offline export trace из raw-данных |
 | `test_cpu.py` | CPU-проверки экстрактора и обработки потоковых ответов |
 | `bundle_manifest.json` | SHA256 файлов переносимого набора |
 
@@ -205,6 +206,34 @@ python benchmark.py \
 ```
 
 NPU traces находятся в `pangu12-server/traces`, клиентские результаты — в указанном output. Profiler собирает CPU и NPU на workers; frontend profiling выключен. Не отправляйте постороннюю нагрузку во время такого окна.
+
+### Если raw данные есть а trace нет
+
+Сохранение raw-данных и экспорт timeline — разные этапы. Успешный ответ `/stop_profile` не доказывает, что получен `trace_view.json`. В vLLM 0.25.1 multiprocessing workers создаются с `daemon=True`; в некоторых версиях torch_npu offline parser отказывается выполнять разбор в daemon-процессе. Характерное сообщение:
+
+```text
+The profiling data cannot be parsed during the daemon process
+```
+
+В таком случае могут сохраниться `FRAMEWORK`, `PROF_*`, `profiler_info*.json` и другие данные, но не готовая timeline. Это вероятная причина, которую нужно подтвердить логом; также возможны ошибки CANN/msprof, зависимостей или выбранный DB-only формат экспорта.
+
+Сначала выполнить read-only проверку сохранённых сессий:
+
+```bash
+python export_profile.py /data/profile-results/pangu12-server/traces
+```
+
+Команда без `--execute` не импортирует torch_npu, не запускает разбор и показывает найденные сессии, raw/framework/CANN files, базы и готовые trace. Для экспорта запустите отдельный обычный процесс в том же контейнере и окружении, где собирались данные:
+
+```bash
+python export_profile.py /data/profile-results/pangu12-server/traces --execute
+```
+
+Модель не загружается, новые запросы не отправляются. Скрипт вызывает официальный `torch_npu.profiler.analyse`, ограничивает разбор одним CPU-процессом на сессию и обрабатывает rank sessions последовательно. Если установленная версия API поддерживает `export_type`, запрашивается `text` для получения timeline, включая случай исходного DB-only экспорта. В старой версии без этого параметра используется сохранённый/default формат. После разбора проверяется появление trace: молча подавленная библиотекой ошибка не считается успехом, если файл не появился.
+
+Можно передать один каталог `*_ascend_pt` или общий каталог `traces`. Каталог `ASCEND_PROFILER_OUTPUT` без родительских raw-данных недостаточен для повторного разбора. Сессии с уже существующим непустым trace пропускаются. Не удаляйте raw-данные до успешного экспорта. Экспорт дописывает результаты рядом с существующим профилем; это не read-only операция, поэтому она требует явного `--execute`.
+
+Источники: [daemon worker vLLM 0.25.1](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/executor/multiproc_executor.py#L642), [проверка daemon в Ascend parser](https://github.com/Ascend/pytorch/blob/master/torch_npu/profiler/analysis/_npu_profiler.py#L21), [API offline analyse](https://github.com/Ascend/pytorch/blob/master/torch_npu/profiler/profiler.py). Ветка Ascend master объясняет механизм; поведение установленной версии нужно сверять с её логами.
 
 `generation` не называется чистым decode: сбор начинается перед запросами и включает их prefill, а с chunked prefill — несколько prefill steps. Decode нужно выделять на timeline. Кроме того, конкурентные HTTP-запросы не гарантируют неизменный active batch на каждом шаге: это проверяется по trace. Gates для формирования batch здесь не используются.
 

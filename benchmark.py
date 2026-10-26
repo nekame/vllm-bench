@@ -314,6 +314,9 @@ def main():
                     rows = run_wave(a, case, cfg, number, 0, "profile", corpus, sink)
                 finally:
                     api(a.base_url, "/stop_profile", a.timeout, "POST")
+                print("Profile collection stopped. A successful /stop_profile does not prove trace export. "
+                      "On the server, check the traces directory with export_profile.py; "
+                      "daemon workers may require standalone offline export (--execute).", flush=True)
                 number += case["concurrency"]
             else:
                 for wave in range(a.measure_waves):

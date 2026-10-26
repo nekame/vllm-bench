@@ -16,6 +16,7 @@ from unittest.mock import patch
 import benchmark
 import prepare_checkpoint as extract
 import verify_checkpoint
+import export_profile
 
 HERE = Path(__file__).resolve().parent
 
@@ -238,6 +239,52 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(len(a["prompt"]), 1024)
         self.assertFalse(set(a["prompt"]) & {cfg[k] for k in ("bos_token_id", "eos_token_id", "pad_token_id")})
+
+
+class ProfileExportTests(unittest.TestCase):
+    def test_inspection_does_not_import_ml_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = root / "worker_ascend_pt"
+            (session / "FRAMEWORK").mkdir(parents=True)
+            (session / "FRAMEWORK" / "torch.op_range").write_bytes(b"synthetic raw data")
+            (session / "PROF_001" / "device_0").mkdir(parents=True)
+            (session / "PROF_001" / "device_0" / "task.data").write_bytes(b"synthetic raw data")
+            with patch.object(export_profile.importlib, "import_module") as importer, contextlib.redirect_stdout(io.StringIO()):
+                result = export_profile.export_sessions(root)
+            importer.assert_not_called()
+            self.assertEqual(len(result["sessions"]), 1)
+            self.assertEqual(result["sessions"][0]["framework_files"], 1)
+            self.assertEqual(result["sessions"][0]["cann_files"], 1)
+            self.assertEqual(result["sessions"][0]["trace_files"], [])
+
+    def test_offline_export_requests_text_and_checks_the_result(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "worker_ascend_pt"
+            (session / "FRAMEWORK").mkdir(parents=True)
+            calls = []
+
+            def analyse(path, max_process_number=4, export_type=None):
+                calls.append((path, max_process_number, export_type))
+                target = Path(path) / "ASCEND_PROFILER_OUTPUT"
+                target.mkdir()
+                (target / "trace_view.json").write_text('{"traceEvents": []}')
+
+            with patch.object(export_profile.importlib, "import_module", return_value=SimpleNamespace(analyse=analyse)), contextlib.redirect_stdout(io.StringIO()):
+                result = export_profile.export_sessions(session, execute=True)
+            self.assertEqual(calls, [(str(session), 1, "text")])
+            self.assertEqual(len(result["sessions"][0]["trace_files"]), 1)
+
+    def test_silently_failed_analysis_is_not_reported_as_success(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "worker_ascend_pt"
+            (session / "FRAMEWORK").mkdir(parents=True)
+            def analyse(path):
+                pass
+            with patch.object(export_profile.importlib, "import_module", return_value=SimpleNamespace(analyse=analyse)), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "produced no trace"):
+                export_profile.export_sessions(session, execute=True)
 
 
 if __name__ == "__main__":
