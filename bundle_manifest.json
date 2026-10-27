@@ -2,8 +2,10 @@
   "format": 1,
   "files": {
     ".gitignore": "a45da93488414748e0abcf83611fdbb9982854d659c0cf878b41d4b0f2005487",
+    "COMPILATION_EAGER_RU.md": "f40fdc377631ddbde8b96dd74341d21ebe7835ec6a733ca0783dffb6e7495347",
+    "NPU_STREAMS_RU.md": "f229683c8329672ca21ccf251d664d59d373022585c24397a75171ad17d0a286",
     "PANGU_505B_RU.md": "913d004324053b53a97acb2d83b2cb150b5b89b0b015ef4b7b17fdca00044dd5",
-    "README.md": "8b7fe85c9296f67acb7b2e6d95baaced16424a71ee06da359f44d0db1f1a8b0c",
+    "README.md": "e6148373510cd669afbfe675550577023dd6d05935eafa545033ad244afc34ff",
     "analyze_trace.py": "0bfd684aafdcda779b1fdee5c9571ffaf14c4b72512dd1990209f934d8ccb8a5",
     "benchmark.py": "e64f4e6de2ab5b985afedf76723c7751bac0df5bc25cf5e01d87a17c7d2ccda1",
     "config-12layers.json": "0ff72a0de585124e7e112d35ef522af9a6b4d23015b455088c84be42292ebc4f",
