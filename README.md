@@ -6,6 +6,8 @@
 
 Отдельные заметки по профилированию: [hardware streams на NPU](./NPU_STREAMS_RU.md) и [компиляция, ACL Graph, eager и аннотации слоёв](./COMPILATION_EAGER_RU.md).
 
+Отдельный MTP-профайлер без HTTP-сервера и загрузки target model: [подготовка MTP checkpoint, synthetic, capture и replay](./MTP_PROFILING_RU.md). CPU-проверки выполнены; NPU runtime требует server smoke tests. Это отдельный инструмент, существующий 12-слойный benchmark не меняется.
+
 Подготовка checkpoint, клиент бенчмарка, проверка файлов и анализ trace требуют только Python 3.10+. Запуск сервера требует уже установленного рабочего окружения OmniInfer/vLLM/torch_npu на NPU-машине. Скрипты ничего не устанавливают.
 
 ## Файлы
