@@ -2,11 +2,11 @@
 
 Набор предназначен для Pangu 505B с 50 основными слоями, 3 MTP, 384 экспертами и top-8. Поддерживаются BF16 и MXFP8 checkpoint с архитектурой `OpenPanguV2ForCausalLM` или `PanguUltraMoEForCausalLM`; архитектура источника сохраняется. Приложенный reference config описывает исходный вариант V2/BF16, а quantization metadata берётся из настоящего checkpoint. Набор сохраняет настоящие слои 0–11 и позволяет запускать нагрузку и собирать NPU traces без изменения исходников OmniInfer. Целевой интерфейс сервера — vLLM 0.25.1 и просмотренный OmniInfer `4cd855b2`.
 
-Подробное описание архитектуры, конкретного HF config и режимов бенчмарков: [Pangu 505B на русском](./PANGU_505B_RU.md).
+Подробное описание архитектуры, конкретного HF config и режимов бенчмарков: [Pangu 505B на русском](../reference/PANGU_505B_RU.md).
 
-Отдельные заметки по профилированию: [hardware streams на NPU](./NPU_STREAMS_RU.md) и [компиляция, ACL Graph, eager и аннотации слоёв](./COMPILATION_EAGER_RU.md).
+Отдельные заметки по профилированию: [hardware streams на NPU](../reference/NPU_STREAMS_RU.md) и [компиляция, ACL Graph, eager и аннотации слоёв](../reference/COMPILATION_EAGER_RU.md).
 
-Отдельный MTP-профайлер без HTTP-сервера и загрузки target model: [подготовка MTP checkpoint, synthetic, capture и replay](./MTP_PROFILING_RU.md). CPU-проверки выполнены; NPU runtime требует server smoke tests. Это отдельный инструмент, существующий 12-слойный benchmark не меняется.
+Отдельный MTP-профайлер без HTTP-сервера и загрузки target model: [подготовка MTP checkpoint, synthetic, capture и replay](../mtp_profile/README.md). CPU-проверки выполнены; NPU runtime требует server smoke tests. Это отдельный инструмент, существующий 12-слойный benchmark не меняется.
 
 Подготовка checkpoint, клиент бенчмарка, проверка файлов и анализ trace требуют только Python 3.10+. Запуск сервера требует уже установленного рабочего окружения OmniInfer/vLLM/torch_npu на NPU-машине. Скрипты ничего не устанавливают.
 
@@ -14,26 +14,27 @@
 
 | Файл | Назначение |
 | --- | --- |
-| `prepare_checkpoint.py` | Потоковое копирование выбранных safetensors без загрузки модели |
-| `verify_checkpoint.py` | Проверка структуры, конфигурации и необязательных SHA256 тензоров |
-| `reference_config-hf.json` | Копия предоставленного исходного HF config |
-| `config-12layers.json` | Предварительный сокращённый config для просмотра; экстрактор также создаёт `OUTPUT/config.json` |
-| `serve.py` | План запуска или запуск постоянного сервера с NPU profiler |
-| `benchmark.py` | Прогрев, замеры нагрузки и отдельные запросы под profiler |
-| `suite.json` | Матрица 1K/8K/32K и concurrency 1/8, prefill и generation |
-| `instrumentation/sitecustomize.py` | Необязательные CPU ranges с номерами слоёв |
-| `analyze_trace.py` | Сводка CPU ranges из одного trace |
-| `export_profile.py` | Проверка сохранённых сессий и отдельный offline export trace из raw-данных |
-| `test_cpu.py` | CPU-проверки экстрактора и обработки потоковых ответов |
+| `src/vllm_bench/layer_profile/prepare_checkpoint.py` | Потоковое копирование выбранных safetensors без загрузки модели |
+| `src/vllm_bench/layer_profile/verify_checkpoint.py` | Проверка структуры, конфигурации и необязательных SHA256 тензоров |
+| `conf/common/reference_config-hf.json` | Копия предоставленного исходного HF config |
+| `conf/layer_profile/config-12layers.json` | Предварительный сокращённый config для просмотра; экстрактор также создаёт `OUTPUT/config.json` |
+| `src/vllm_bench/layer_profile/serve.py` | План запуска или запуск постоянного сервера с NPU profiler |
+| `src/vllm_bench/layer_profile/benchmark.py` | Прогрев, замеры нагрузки и отдельные запросы под profiler |
+| `conf/layer_profile/suite.json` | Матрица 1K/8K/32K и concurrency 1/8, prefill и generation |
+| `src/vllm_bench/layer_profile/instrumentation/sitecustomize.py` | Необязательные CPU ranges с номерами слоёв |
+| `src/vllm_bench/tools/analyze_trace.py` | Сводка CPU ranges из одного trace |
+| `src/vllm_bench/tools/export_profile.py` | Проверка сохранённых сессий и отдельный offline export trace из raw-данных |
+| `tests/test_cpu.py` | CPU-проверки экстрактора и обработки потоковых ответов |
 | `bundle_manifest.json` | SHA256 файлов переносимого набора |
 
-Переносить нужно всю эту папку. Каталог OmniInfer рядом со скриптами не требуется, но его установленный Python-пакет и нужные runtime libraries должны быть доступны серверу.
+Переносить нужно весь репозиторий: `src`, `conf` и `doc` сохраняют взаимное расположение. Все команды ниже выполняются из корня репозитория с настроенным `PYTHONPATH`. Каталог OmniInfer рядом со скриптами не требуется, но его установленный Python-пакет и нужные runtime libraries должны быть доступны серверу.
 
 Получить набор на сервере через GitHub:
 
 ```bash
 git clone https://github.com/nekame/vllm-bench.git
 cd vllm-bench
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
 ## Подготовка checkpoint
@@ -43,7 +44,7 @@ cd vllm-bench
 Сначала получить план без записи и без чтения tensor payload:
 
 ```bash
-python prepare_checkpoint.py \
+python -m vllm_bench.layer_profile.prepare_checkpoint \
   --source /data/models/pangu505b-mxfp8 \
   --output /data/models/pangu505b-mxfp8-12layers \
   --dry-run
@@ -52,7 +53,7 @@ python prepare_checkpoint.py \
 Затем сохранить checkpoint:
 
 ```bash
-python prepare_checkpoint.py \
+python -m vllm_bench.layer_profile.prepare_checkpoint \
   --source /data/models/pangu505b-mxfp8 \
   --output /data/models/pangu505b-mxfp8-12layers \
   --max-shard-gib 4 \
@@ -60,7 +61,7 @@ python prepare_checkpoint.py \
   --hash-tensors
 ```
 
-По умолчанию читается `SOURCE/config.json`; для MXFP8 рекомендуется именно этот вариант. Не подменяйте выходной config файлом `config-12layers.json`: это пример для старого reference V2/BF16.
+По умолчанию читается `SOURCE/config.json`; для MXFP8 рекомендуется именно этот вариант. Не подменяйте выходной config файлом `conf/layer_profile/config-12layers.json`: это пример для старого reference V2/BF16.
 
 Если нужен `--config`, размеры и архитектура должны совпадать с источником. Отсутствующая в таком файле `quantization_config` наследуется из `SOURCE/config.json`. Если quantization config есть в обоих файлах, она должна совпадать целиком, включая `ignore` и communication flags. Противоречия отклоняются: структурный override не служит командой переквантовать модель. Источник с Ultra нельзя подменять приложенным V2 config.
 
@@ -88,7 +89,7 @@ python prepare_checkpoint.py \
 `--hash-tensors` вычисляет SHA256 исходных payload во время копирования. После переноса можно повторно прочитать выход и проверить hashes:
 
 ```bash
-python verify_checkpoint.py /data/models/pangu505b-mxfp8-12layers --hashes
+python -m vllm_bench.layer_profile.verify_checkpoint /data/models/pangu505b-mxfp8-12layers --hashes
 ```
 
 Без `--hashes` проверяются заголовки, index, число тензоров, размеры файлов и сокращённый config без полного чтения весов. `extraction_manifest.json` сохраняет разрешённый исходный config, hashes файла config и эффективного config, mapping слоёв, quantization method, признак наследования quantization metadata и статистику извлечения.
@@ -102,7 +103,7 @@ python verify_checkpoint.py /data/models/pangu505b-mxfp8-12layers --hashes
 Пример для чистого TP8 с обычным V2 attention:
 
 ```bash
-python serve.py \
+python -m vllm_bench.layer_profile.serve \
   --model /data/models/pangu505b-mxfp8-12layers \
   --operator-config /data/profile-configs/pangu-target-operators.json \
   --output /data/profile-results/pangu12-server \
@@ -139,7 +140,7 @@ python serve.py \
 Оставьте сервер загруженным и в другом терминале запустите:
 
 ```bash
-python benchmark.py \
+python -m vllm_bench.layer_profile.benchmark \
   --model-dir /data/models/pangu505b-mxfp8-12layers \
   --base-url http://127.0.0.1:8000 \
   --server-manifest /data/profile-results/pangu12-server/server_manifest.json \
@@ -151,7 +152,7 @@ python benchmark.py \
 Для первого короткого прогона:
 
 ```bash
-python benchmark.py \
+python -m vllm_bench.layer_profile.benchmark \
   --model-dir /data/models/pangu505b-mxfp8-12layers \
   --server-manifest /data/profile-results/pangu12-server/server_manifest.json \
   --select prefill-1k-c1 decode-1k-c1 \
@@ -191,7 +192,7 @@ TTFT измеряется до первого chunk с output token IDs. TPOT �
 Prefill с одним выходным токеном:
 
 ```bash
-python benchmark.py \
+python -m vllm_bench.layer_profile.benchmark \
   --model-dir /data/models/pangu505b-mxfp8-12layers \
   --server-manifest /data/profile-results/pangu12-server/server_manifest.json \
   --mode profile --profile-kind prefill --select prefill-8k-c8 \
@@ -201,7 +202,7 @@ python benchmark.py \
 Короткий trace с prefill и последующим decode:
 
 ```bash
-python benchmark.py \
+python -m vllm_bench.layer_profile.benchmark \
   --model-dir /data/models/pangu505b-mxfp8-12layers \
   --server-manifest /data/profile-results/pangu12-server/server_manifest.json \
   --mode profile --profile-kind generation --profile-tokens 8 \
@@ -214,7 +215,7 @@ NPU traces находятся в `pangu12-server/traces`, клиентские �
 Пять последовательных запросов: каждый с prefill на 8192 токена и генерацией 16 выходных токенов, все в одной записи:
 
 ```bash
-python benchmark.py \
+python -m vllm_bench.layer_profile.benchmark \
   --model-dir /data/models/pangu505b-mxfp8-12layers \
   --server-manifest /data/profile-results/pangu12-server/server_manifest.json \
   --mode profile --profile-kind generation \
@@ -240,13 +241,13 @@ The profiling data cannot be parsed during the daemon process
 Сначала выполнить read-only проверку сохранённых сессий:
 
 ```bash
-python export_profile.py /data/profile-results/pangu12-server/traces
+python -m vllm_bench.tools.export_profile /data/profile-results/pangu12-server/traces
 ```
 
 Команда без `--execute` не импортирует torch_npu, не запускает разбор и показывает найденные сессии, raw/framework/CANN files, базы и готовые trace. Для экспорта запустите отдельный обычный процесс в том же контейнере и окружении, где собирались данные:
 
 ```bash
-python export_profile.py /data/profile-results/pangu12-server/traces --execute
+python -m vllm_bench.tools.export_profile /data/profile-results/pangu12-server/traces --execute
 ```
 
 Модель не загружается, новые запросы не отправляются. Скрипт ищет `analyse` сначала в `torch_npu.profiler`, затем в `torch_npu.profiler.profiler`: в ряде версий функция находится в файле реализации, но не экспортируется из публичного `__init__.py`. Выбранный путь API выводится в лог. Отсутствие функции только в первом модуле не означает отсутствие offline exporter. Если оба пути недоступны, ошибка показывает проверенные модули, версию пакета и Python interpreter.
@@ -263,12 +264,12 @@ python export_profile.py /data/profile-results/pangu12-server/traces --execute
 
 ## Метки слоёв и анализ
 
-Опциональный `serve.py --annotate-layers` поддерживает V2 и Ultra и добавляет через отдельный `sitecustomize.py` ranges `pangu12/layer_000/forward`, ..., `pangu12/layer_011/forward` и `mhc_head`. Он не меняет файлы OmniInfer. В stderr должно появиться `[pangu12] CPU layer annotations installed`.
+Опциональный `python -m vllm_bench.layer_profile.serve --annotate-layers` поддерживает V2 и Ultra и добавляет через отдельный `sitecustomize.py` ranges `pangu12/layer_000/forward`, ..., `pangu12/layer_011/forward` и `mhc_head`. Он не меняет файлы OmniInfer. В stderr должно появиться `[pangu12] CPU layer annotations installed`.
 
 Это дополнительная Python-инструментация: её overhead входит в измерения, а графы/компиляция могут менять видимость ranges. Для baseline performance оставьте её выключенной; для разбора слоёв при необходимости проведите отдельный annotated запуск. `--enforce-eager` может помочь диагностике, но eager-профиль нельзя выдавать за профиль целевого graph mode.
 
 ```bash
-python analyze_trace.py \
+python -m vllm_bench.tools.analyze_trace \
   /data/profile-results/pangu12-server/traces/WORKER/ASCEND_PROFILER_OUTPUT/trace_view.json \
   --output /data/profile-results/layer-cpu-ranges.json
 ```
@@ -286,7 +287,7 @@ python analyze_trace.py \
 ## CPU-проверки и источники
 
 ```bash
-python test_cpu.py
+python -m unittest discover -s tests
 ```
 
 Тесты используют маленькие синтетические BF16/MXFP8 safetensors checkpoint и SSE-ответы в памяти. Для MXFP8 проверяются обе архитектуры, побайтовая сохранность FP8-весов и scales, metadata, SHA256, наследование quantization config, отказ при конфликтующих/неподдерживаемых форматах и планы запуска без импорта ML runtime. Они проверяют сохранение tensor bytes, глобальных весов и исходных файлов, обрезку конфигурации, dry-run, точность подсчёта токенов и отказ при обрыве stream. Torch, модель, NPU и сетевые сокеты не используются.

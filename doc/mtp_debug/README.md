@@ -1,0 +1,85 @@
+# Отладка greedy MTP verification и MoME
+
+Этот сценарий подключает диагностику к существующему **полному** запуску Pangu с MTP. Он записывает draft tokens, target argmax, bonus token, результат acceptance и проверку относительно CPU-эталона greedy prefix acceptance. Дополнительный режим сохраняет target inputs и MoME metadata вокруг rejection.
+
+Для замеров времени standalone MTP используйте [профилирование MTP](../mtp_profile/README.md). Диагностические копии на CPU и синхронизации меняют тайминги и могут скрывать гонки; результаты этого запуска не являются baseline производительности.
+
+## Требования
+
+- Python 3.10+ и рабочее окружение OmniInfer/vLLM/torch_npu с V1 NPUModelRunner.
+- Полная модель с настроенными MTP и topology в вашем серверном launch script. Wrapper эти настройки не меняет.
+- Только greedy sampling (`all_greedy`); после включения записи другой sampling вызывает явную ошибку.
+- Для `--rejection-windows` необходимы eager (`--enforce-eager`), отключённый prefix caching (`--no-enable-prefix-caching`) и один активный запрос. Не посылайте постороннюю нагрузку.
+- Новая директория результатов. По умолчанию записывается rank 0; другой rank выбирается переменной `PANGU_SPEC_DEBUG_RANK`.
+
+Отдельных конфигов этого сценария пока нет. Используются настройки вашего полного запуска и параметры CLI. Исходники OmniInfer не изменяются. Не сочетайте wrapper с MTP recorder или `--annotate-layers`: каждый использует свой `sitecustomize.py`, конфликт отклоняется до старта.
+
+## План и запуск
+
+Из корня репозитория настройте путь:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+Сначала проверьте план без создания output и запуска модели:
+
+```bash
+python -m vllm_bench.mtp_debug.debug_spec \
+  --output /data/profile-results/mtp-debug \
+  --limit 1000 \
+  -- bash /data/scripts/launch-full-model.sh
+```
+
+Добавьте `--execute` перед `--`, чтобы запустить модель. В логе ожидается `[spec-debug] sampler hook installed`. Wrapper передаёт окружение дочерним workers, поэтому должен работать в том же контейнере, что и модель.
+
+После старта модели выполните прогрев. Затем в другом терминале разрешите запись:
+
+```bash
+printf '%s\n' 'request-1' > /data/profile-results/mtp-debug/LABEL
+touch /data/profile-results/mtp-debug/ARM
+```
+
+`LABEL` необязателен: его текст попадёт в события и поможет связать их с нагрузкой. Запись начинается только после появления `ARM`, ограничивается `--limit` вызовами sampler на выбранном rank и прекращается при удалении `ARM`. Лимит действует на время жизни процесса и не сбрасывается повторным созданием `ARM`.
+
+Теперь отправьте короткий greedy-запрос своим клиентом. Сначала проверьте обычную sampler-диагностику, затем включайте дополнительные снимки в новом запуске.
+
+## Rejection windows и fingerprints
+
+```bash
+python -m vllm_bench.mtp_debug.debug_spec \
+  --output /data/profile-results/mtp-rejections \
+  --limit 1000 \
+  --rejection-windows --mome-layers 0 \
+  --execute -- bash /data/scripts/launch-full-model-eager.sh
+```
+
+После прогрева создайте `ARM` в новом output и подавайте по одному запросу. В логе должен появиться `[spec-debug] target hook installed`.
+
+`--mome-layers` принимает индексы слоёв через запятую либо `all`. По умолчанию выбран слой 0. Флаг `--state-fingerprints` вместе с `--rejection-windows` добавляет хеширование активных MoME blocks до и после выбранных свёрток. Это дополнительные CPU copies и синхронизации; используйте их отдельным диагностическим запуском.
+
+## Результаты
+
+- `rank-R-pid-P.jsonl` — события verification, draft/target/bonus token IDs, accepted counts, top-2 logits и `matches_reference`.
+- `rejections/rank-R-pid-P/cycle-NNNNNN.json` — окна rejection с предыдущим, текущим и следующим verification и target/MoME metadata.
+- `hooks-pid-P.json` — перечень установленных target/MoME hooks и их ограничения.
+- `ARM` и `LABEL` — пользовательское управление записью и метка нагрузки.
+
+Окно может оставаться `awaiting_next_verification`, если следующего verification ещё нет, либо завершиться как `request_changed_before_next_verification` при смене запроса. Такие окна нельзя считать полным сопоставлением соседних шагов. После завершения сравнивайте `expected_next_runner_count` и фактические counts через сводку:
+
+```bash
+python -m vllm_bench.mtp_debug.summarize_rejections \
+  /data/profile-results/mtp-rejections --limit 20
+```
+
+`matches_reference=false` указывает на расхождение записанного greedy verification с CPU-эталоном. Поле `next_runner_count_matches_output=false` показывает расхождение counts следующего target шага с выходом sampler. Это диагностические признаки, требующие разбора конкретного окна, а не готовое доказательство причины ошибки.
+
+## Проверки и ограничения
+
+```bash
+python -m unittest discover -s tests
+```
+
+CPU-тесты проверяют greedy acceptance, arming/limit, сопоставление rejection windows, границы запросов и target/MoME hooks через mocks. Проверки структуры дополнительно проверяют импорт hooks из нового пакета и отказы при конфликте инструментаций. Реальный NPU-запуск диагностики после реорганизации здесь не выполнялся.
+
+Серверный smoke test: запустить полный V1 server, прогреть до `ARM`, подтвердить отсутствие записей до включения, получить события после включения и проверить лимит. Отдельно проверить eager rejection windows на одном запросе, сводку и fingerprints выбранного слоя. Сохранить версии окружения, команду запуска и логи рядом с результатами.

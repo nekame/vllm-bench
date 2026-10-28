@@ -1,8 +1,14 @@
 # Pangu 505B архитектура и реализация в OmniInfer
 
-Pangu 505B из предоставленного [config-hf.json](./reference_config-hf.json) — авторегрессионная языковая модель с 50 основными слоями, MLA attention, 384 routed experts в каждом MoE-слое и 8 выбираемыми экспертами на токен. Конфиг задаёт архитектуру `OpenPanguV2ForCausalLM`, BF16, MoME, четыре residual streams mHC и три MTP-слоя. Именно этот вариант является основным предметом описания; отличия от ранее рассмотренного Ultra-пути отмечены как следствия предоставленного конфига.
+Все команды ниже выполняются из корня `vllm-bench` после настройки:
 
-Описание относится к локальному снимку OmniInfer `4cd855b29b5eb0a78bca645fad39e3181c35d099` от 16 октября 2026 года. Ссылки на реализацию ведут в репозиторий Gitee `huting233/omniinfer` на указанный коммит; номера строк заданы якорями `#L`. Для открытия исходников нужен доступ к этому репозиторию. Копия предоставленного `config-hf.json` сохранена рядом как `reference_config-hf.json`. Название Python-пакета в импортах — `omni_npu`, каталог исходников в репозитории — `omni`.
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+Pangu 505B из предоставленного [config-hf.json](../../conf/common/reference_config-hf.json) — авторегрессионная языковая модель с 50 основными слоями, MLA attention, 384 routed experts в каждом MoE-слое и 8 выбираемыми экспертами на токен. Конфиг задаёт архитектуру `OpenPanguV2ForCausalLM`, BF16, MoME, четыре residual streams mHC и три MTP-слоя. Именно этот вариант является основным предметом описания; отличия от ранее рассмотренного Ultra-пути отмечены как следствия предоставленного конфига.
+
+Описание относится к локальному снимку OmniInfer `4cd855b29b5eb0a78bca645fad39e3181c35d099` от 16 октября 2026 года. Ссылки на реализацию ведут в репозиторий Gitee `huting233/omniinfer` на указанный коммит; номера строк заданы якорями `#L`. Для открытия исходников нужен доступ к этому репозиторию. Копия предоставленного `config-hf.json` сохранена рядом как `conf/common/reference_config-hf.json`. Название Python-пакета в импортах — `omni_npu`, каталог исходников в репозитории — `omni`.
 
 ## Имена модели и выбор реализации
 
@@ -21,13 +27,13 @@ Pangu 505B из предоставленного [config-hf.json](./reference_co
 
 Внутри V2 есть ещё один выбор: по умолчанию используется `NPUPanguSparseAttention`; переменная `OMNI_PANGU_V2_HIGH_THROUGHOUT=1` переключает attention на `NPUDeepseekSparseAttention` и `NPUDeepseekMLAAttention`, сохраняя V2-класс модели. Значение этой переменной по умолчанию — false. Сам HF JSON переменную не задаёт. Переход к Ultra требует отдельного изменения `architectures`, например HF override, и не следует из одного выбора режима high throughput.
 
-Источники: [architectures в конфиге](./reference_config-hf.json#L2), [выбор attention V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1497), [значение переменной по умолчанию](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/envs.py#L381).
+Источники: [architectures в конфиге](../../conf/common/reference_config-hf.json#L2), [выбор attention V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1497), [значение переменной по умолчанию](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/envs.py#L381).
 
 Отдельные записи `openpangu_v2_vl_505B` описывают мультимодальные модели. Этот JSON задаёт текстовую модель и не содержит параметров визуального энкодера.
 
 ## Размерности и параметры checkpoint
 
-Значения ниже взяты из [предоставленного конфига](./reference_config-hf.json). Нумерация слоёв начинается с нуля.
+Значения ниже взяты из [предоставленного конфига](../../conf/common/reference_config-hf.json). Нумерация слоёв начинается с нуля.
 
 | Параметр | Значение | Следствие |
 | --- | --- | --- |
@@ -69,7 +75,7 @@ Embedding и LM head у этого варианта не связаны по у�
 
 В JSON нет готового словаря `rope_parameters`, `rope_scaling` и коэффициента расширения контекста. V2 вызывает нормализацию параметров после создания HF config; точный результат зависит и от `OpenPanguV2Config`, указанного в `auto_map`. Поэтому из `max_position_embeddings=524288` нельзя вывести дополнительный коэффициент YaRN. Функция нормализации меняет `rope_type="default"` на `deepseek_yarn` с defaults, только если `rope_parameters` уже существует как словарь.
 
-Источники: [поля позиций и токенов](./reference_config-hf.json#L21), [подготовка RoPE в V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1568), [нормализация RoPE](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/utils.py#L477), [создание LM head](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L2559).
+Источники: [поля позиций и токенов](../../conf/common/reference_config-hf.json#L21), [подготовка RoPE в V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1568), [нормализация RoPE](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/utils.py#L477), [создание LM head](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L2559).
 
 ### Отличия от ранее рассмотренного варианта
 
@@ -123,7 +129,7 @@ flowchart TD
 
 Q проходит через `q_a_proj`, RMSNorm и повышающую проекцию. KV формируется через `kv_a_proj_with_mqa` со сжатой частью 512 и RoPE-частью 64. В absorb-пути используются производные матрицы `W_UK_T` и `W_UV`, чтобы attention работал со сжатым KV. Это отличается от хранения полного K и V для каждой из 64 голов.
 
-Источники: [размерности в конфиге](./reference_config-hf.json#L20), [MLA-веса V2 attention](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L915), [общий MLA absorb](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_mla.py#L188).
+Источники: [размерности в конфиге](../../conf/common/reference_config-hf.json#L20), [MLA-веса V2 attention](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L915), [общий MLA absorb](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_mla.py#L188).
 
 ### Распределение DSA и SWA
 
@@ -139,7 +145,7 @@ Q проходит через `q_a_proj`, RMSNorm и повышающую про
 
 По умолчанию V2 создаёт единый класс `NPUPanguSparseAttention`, который определяет SWA по `swa_layers`, MTP по индексу и DSA для оставшихся слоёв при положительном `index_topk`. С переключателем `OMNI_PANGU_V2_HIGH_THROUGHOUT=1` DSA выбирается по `dsa_layers`, а остальным слоям назначается MLA с локальным окном. Для данного JSON обе классификации совпадают.
 
-Источники: [dsa_layers](./reference_config-hf.json#L10), [окна SWA](./reference_config-hf.json#L46), [классификация V2 attention](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L720), [выбор high throughput backend](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1501), [окна MLA](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_mla.py#L760).
+Источники: [dsa_layers](../../conf/common/reference_config-hf.json#L10), [окна SWA](../../conf/common/reference_config-hf.json#L46), [классификация V2 attention](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L720), [выбор high throughput backend](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1501), [окна MLA](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_mla.py#L760).
 
 ### Indexer и выбор позиций контекста
 
@@ -147,7 +153,7 @@ DSA indexer выбирает позиции контекста для разре
 
 В стандартном V2-пути используется `NPUPanguIndexer`; в альтернативном DSA-пути — `Indexer` из `npu_dsa.py`. Оба содержат проекции Q, K и весов indexer; Pangu-ветка нормализует K через RMSNorm. Комментарий с примером 64 indexer heads в общем `Indexer` не относится к данному JSON: **именно конфиг задаёт 32**.
 
-Источники: [параметры indexer](./reference_config-hf.json#L16), [NPUPanguIndexer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L197), [общий Indexer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_dsa.py#L131).
+Источники: [параметры indexer](../../conf/common/reference_config-hf.json#L16), [NPUPanguIndexer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L197), [общий Indexer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_dsa.py#L131).
 
 ### Общий indexer и CLA
 
@@ -163,7 +169,7 @@ DSA indexer выбирает позиции контекста для разре
 
 `param_sink_number=128` включает параметризованные sink-представления. В стандартном V2 attention создаются `param_sink_compressed_kv` размером `[128, 512]` и `param_sink_k_pe` размером `[128, 64]`. Это обучаемые параметры attention; они не означают сохранение первых 128 токенов запроса без преобразования. В конфиге не указан `use_gpt_oss_sink`, поэтому отдельный GPT-OSS sink-механизм этим файлом не включён.
 
-Источники: [число sinks](./reference_config-hf.json#L35), [создание sink-параметров](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L1114).
+Источники: [число sinks](../../conf/common/reference_config-hf.json#L35), [создание sink-параметров](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L1114).
 
 ## MoE и вычисление экспертов
 
@@ -203,7 +209,7 @@ FFN(x) = down_proj(SiLU(gate_proj(x)) * up_proj(x))
 
 В стандартном V2-пути создаются `qa_conv`, `compresskv_conv` и `o_conv` класса `ColumnParallelMOME`, а управление состояниями выполняет `MomeAttention`. Размеры каналов — 1536 для Q, 512 для KV, 8192 для полного выхода attention. Q/KV-свёртки создаются с `disable_tp=true`; разбиение O зависит от настроек исполнения. Состояния в этом backend объявлены BF16. Ширина 3 соответствует поддерживаемому ограничению класса свёртки; сама свёртка неквантованная.
 
-Источники: [MoME в конфиге](./reference_config-hf.json#L44), [формы состояний](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L1384), [создание свёрток V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L1501), [ColumnParallelMOME](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/layers/mome/npu_mome.py#L35).
+Источники: [MoME в конфиге](../../conf/common/reference_config-hf.json#L44), [формы состояний](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L1384), [создание свёрток V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py#L1501), [ColumnParallelMOME](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/layers/mome/npu_mome.py#L35).
 
 `OpenPanguV2ForCausalLM` реализует `IsHybrid` и поддержку mamba prefix caching для управления состояниями MoME. Его интерфейс оценки состояния возвращает три формы: `(2 + S, 1536)`, `(2 + S, 512)`, `(2 + S, 8192)`, где S — `num_speculative_tokens` из настроек сервера. Это интерфейсная оценка до конкретного layout и распределения по устройствам, а не итоговый объём кеша. В HF JSON значение S не задано. Дополнительный резерв возможен и для PD transfer.
 
@@ -227,7 +233,7 @@ FFN(x) = down_proj(SiLU(gate_proj(x)) * up_proj(x))
 
 Из-за `sandwich_norm=true` нормализации стоят до и после attention и FFN. Дополнительная `block_post_layernorm` применяется на слоях 0, 4, 9, 14, 19, 24, 29, 34, 39, 44 — всего 10. Она нормализует объединённое представление ширины 20480. Используется `rms_norm_eps=1e-5`.
 
-Источники: [индексы block post norm](./reference_config-hf.json#L8), [создание нормализаций V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1668), [применение block post norm](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L2190).
+Источники: [индексы block post norm](../../conf/common/reference_config-hf.json#L8), [создание нормализаций V2](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L1668), [применение block post norm](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py#L2190).
 
 В V2 есть слитые переходы mHC и нормализаций, а также перекрытие Sinkhorn с вычислениями. Их применение зависит от operator config, размера batch и backend attention. У общего DSA/MLA нет `pre_epilog_callback`, используемого некоторыми оптимизациями стандартного V2 attention. HF JSON эти runtime-флаги не задаёт.
 
@@ -239,13 +245,13 @@ FFN(x) = down_proj(SiLU(gate_proj(x)) * up_proj(x))
 
 **Расхождение из-за архитектуры в конфиге:** при speculative configuration для `OpenPanguV2ForCausalLM` базовый patch выбирает `model_type="mtp"` и `architectures=["OpenPanguV2MTPModel"]`. Этот класс зарегистрирован на `OpenPanguV2MTP` из `pangu_v2_moe_mtp.py`. Ветка `OpenPanguMTPModel` из Ultra относится к другому значению `architectures`.
 
-Источники: [количество MTP-слоёв](./reference_config-hf.json#L33), [развилка speculative config](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/vllm_patches/patches/models/pangu_v2_base/patch_speculative.py#L89), [регистрация V2 MTP](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/__init__.py#L9).
+Источники: [количество MTP-слоёв](../../conf/common/reference_config-hf.json#L33), [развилка speculative config](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/vllm_patches/patches/models/pangu_v2_base/patch_speculative.py#L89), [регистрация V2 MTP](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/__init__.py#L9).
 
 `OpenPanguV2MultiTokenPredictorLayer` нормализует embedding токена через `enorm`, предыдущее скрытое состояние через `hnorm`, объединяет их в представление ширины 10240 и проецирует через `eh_proj` в 5120. Затем выполняет `OpenPanguV2DecoderLayer`. Для logits используются `SharedHead`, RMSNorm и `NPUParallelLMHead`; есть механизм привязки embedding и LM head к целевой модели.
 
 Predictor выбирает слой по `spec_step_idx % 3`, то есть циклически использует индексы 50, 51, 52. Это позволяет отличать число обученных predictor layers от числа speculative tokens в настройках сервера. Последнее данным JSON не задано. Имя deployment template `mtp7` не меняет число MTP-слоёв в этом конфиге на семь.
 
-Уточнение для полного proposer в просмотренном commit: multi-MTP с передачей `spec_step_idx` используется только при числе speculative tokens не больше `n_predict`. При depth=3 и трёх predictor-слоях это 50/51/52; при depth=7 proposer выбирает обычную ветку и не передаёт индекс, поэтому predictor использует слой 50 на всех семи шагах. Это ограничение пути исполнения, а не изменение числа слоёв в HF config. Подробности и отдельный инструмент профилирования: [MTP без target model](./MTP_PROFILING_RU.md); условие выбора ветки — [patch_eagle.py](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/vllm_patches/patches/common/patch_eagle.py#L843).
+Уточнение для полного proposer в просмотренном commit: multi-MTP с передачей `spec_step_idx` используется только при числе speculative tokens не больше `n_predict`. При depth=3 и трёх predictor-слоях это 50/51/52; при depth=7 proposer выбирает обычную ветку и не передаёт индекс, поэтому predictor использует слой 50 на всех семи шагах. Это ограничение пути исполнения, а не изменение числа слоёв в HF config. Подробности и отдельный инструмент профилирования: [MTP без target model](../mtp_profile/README.md); условие выбора ветки — [patch_eagle.py](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/vllm_patches/patches/common/patch_eagle.py#L843).
 
 Источники: [V2 predictor layer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py#L90), [создание трёх слоёв](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py#L147), [выбор predictor layer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py#L197), [привязка общих весов](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py#L413).
 
@@ -571,15 +577,15 @@ unset USE_MOE_FORCE_LOAD_BALANCE
 
 ### Подтверждённый экспорт трасс на сервере
 
-26 октября 2026 года пользователь подтвердил, что трассы появились после отдельного offline export сохранённых profiler-данных с помощью [export_profile.py](./export_profile.py):
+26 октября 2026 года пользователь подтвердил, что трассы появились после отдельного offline export сохранённых profiler-данных с помощью [export_profile.py](../../src/vllm_bench/tools/export_profile.py):
 
 ```bash
-python export_profile.py /путь/к/traces --execute
+python -m vllm_bench.tools.export_profile /путь/к/traces --execute
 ```
 
 В данном окружении потребовался поиск функции в `torch_npu.profiler.profiler.analyse`: проверка только `torch_npu.profiler.analyse` ошибочно сообщала об отсутствии API. Экспорт выполняется из обычного отдельного процесса, без повторной загрузки модели. Успешное получение трасс подтверждено пользователем на сервере; локальные проверки скриптов остаются CPU-only. Причина первоначального отсутствия автоматического экспорта внутри worker без его логов не подтверждена.
 
-Порядок сбора и экспорта, расположение raw-данных и ограничения описаны в [инструкции профилирования](./README.md).
+Порядок сбора и экспорта, расположение raw-данных и ограничения описаны в [инструкции профилирования](../layer_profile/README.md).
 
 ## Карта исходников
 
@@ -587,7 +593,7 @@ python export_profile.py /путь/к/traces --execute
 | --- | --- |
 | Распознавание 505B | [match_hf_configs.json](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/model_config/configs/match_hf_configs.json#L287) |
 | Регистрация в vLLM | [models/__init__.py](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/__init__.py#L5) |
-| Конкретный HF config | [config-hf.json](./reference_config-hf.json) |
+| Конкретный HF config | [config-hf.json](../../conf/common/reference_config-hf.json) |
 | Основная V2-архитектура и decoder layers | [pangu_v2_moe.py](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe.py) |
 | Альтернативный Ultra-путь | [pangu_ultra_moe.py](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_ultra_moe.py) |
 | Стандартный V2 attention и indexer | [npu_pangu.py](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/layers/attention/npu_pangu.py) |

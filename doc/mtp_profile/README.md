@@ -1,5 +1,11 @@
 # Отдельное профилирование MTP Pangu 505B
 
+Все команды ниже выполняются из корня `vllm-bench` после настройки:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
 ## Что реализовано и что проверено
 
 Инструмент запускает отдельный `torchrun` job на восьми NPU, загружая MTP и необходимые общие веса. HTTP, EngineCore, scheduler и основная 50-слойная модель не запускаются. Используются библиотеки vLLM и OmniInfer: это не независимый перенос модели на чистый PyTorch.
@@ -39,7 +45,7 @@
 Источником должен быть **полный исходный checkpoint** с MTP, а не наши первые 12 слоёв: из последних MTP уже удалён.
 
 ```bash
-python prepare_mtp_checkpoint.py \
+python -m vllm_bench.mtp_profile.prepare_mtp_checkpoint \
   --source /data/models/pangu505b-mxfp8 \
   --output /data/models/pangu505b-mxfp8-mtp \
   --hash-tensors --dry-run
@@ -48,7 +54,7 @@ python prepare_mtp_checkpoint.py \
 Для копирования повторите команду без `--dry-run`. Экстрактор не импортирует torch, не выделяет tensor buffers модели и копирует payloads побайтно, включая MXFP8 scales. По умолчанию shard до 4 GiB, копирующий buffer 16 MiB. Уже существующий output не перезаписывается.
 
 ```bash
-python verify_mtp_checkpoint.py /data/models/pangu505b-mxfp8-mtp --hash-tensors
+python -m vllm_bench.mtp_profile.verify_mtp_checkpoint /data/models/pangu505b-mxfp8-mtp --hash-tensors
 ```
 
 Сохраняются исходные имена/индексы 50–52, predictor-specific нормы/проекции и global embedding/lm_head. Исходный `num_hidden_layers=50` сохраняется как начало диапазона MTP. **Этот каталог нельзя запускать как обычную target model через `vllm serve`**: standalone loader явно конструирует только MTP.
@@ -60,7 +66,7 @@ python verify_mtp_checkpoint.py /data/models/pangu505b-mxfp8-mtp --hash-tensors
 Сначала проверьте план — по умолчанию модели и NPU не инициализируются, output не создаётся:
 
 ```bash
-python profile_mtp.py \
+python -m vllm_bench.mtp_profile.profile_mtp \
   --model /data/models/pangu505b-mxfp8-mtp \
   --operator-config /data/config/operators-dp8-ep8.json \
   --topology dp8-ep8 \
@@ -76,7 +82,7 @@ python profile_mtp.py \
 В режиме `compiled` компиляция сохраняется, а `cudagraph_mode` становится `NONE`. В `graph` используется `FULL` и реальные `ACLGraphWrapper` для predictor-слоёв. Передать целевые настройки можно через `--compilation-config /data/config/compilation.json`; содержимое — JSON object vLLM CompilationConfig. При необходимости передайте также исходный `--additional-config` и `--patches`.
 
 ```bash
-python profile_mtp.py \
+python -m vllm_bench.mtp_profile.profile_mtp \
   --model /data/models/pangu505b-mxfp8-mtp \
   --operator-config /data/config/operators-dp8-ep8.json \
   --topology dp8-ep8 --depths 3 7 \
@@ -84,7 +90,7 @@ python profile_mtp.py \
   --output /data/profile-results/mtp-dp8-graph --execute
 ```
 
-Eager выключает компиляцию и графы, а также дополнительные оптимизации через штатный eager config OmniInfer. Сравнение режимов описано в [COMPILATION_EAGER_RU.md](./COMPILATION_EAGER_RU.md).
+Eager выключает компиляцию и графы, а также дополнительные оптимизации через штатный eager config OmniInfer. Сравнение режимов описано в [COMPILATION_EAGER_RU.md](../reference/COMPILATION_EAGER_RU.md).
 
 ## Реальные входы: запись полного запуска
 
@@ -93,7 +99,7 @@ Recorder подключается только по явному запросу 
 Запускайте wrapper в том же контейнере/окружении, где запускается модель, чтобы пути `PYTHONPATH` были доступны worker-процессам:
 
 ```bash
-python record_mtp.py \
+python -m vllm_bench.mtp_profile.record_mtp \
   --output /data/mtp-capture --skip 2 --count 1 \
   --max-gib-per-snapshot 8 --execute \
   -- bash /data/scripts/launch-full-model.sh
@@ -125,7 +131,7 @@ Recorder добавляет synchronization и CPU copies: времена это
 ## Replay без target model
 
 ```bash
-python profile_mtp.py \
+python -m vllm_bench.mtp_profile.profile_mtp \
   --model /data/models/pangu505b-mxfp8-mtp \
   --operator-config /data/config/operators-dp8-ep8.json \
   --topology dp8-ep8 --input replay \
@@ -162,15 +168,15 @@ Trace собирается отдельным повтором, чтобы profi
 Для offline export используйте существующий инструмент:
 
 ```bash
-python export_profile.py /data/profile-results/mtp-dp8-graph --execute
+python -m vllm_bench.tools.export_profile /data/profile-results/mtp-dp8-graph --execute
 ```
 
 `depth-D/failure-rank-N.json` и traceback содержат диагностику ошибки; такой запуск не считать валидным результатом. Acceptance rate и выигрыш end-to-end speculative decoding этот инструмент не измеряет.
 
 ## Проверка на сервере
 
-CPU-проверки запускаются командой `python3 -m unittest test_cpu.py test_mtp_cpu.py`. Они проверяют файлы, CLI, сериализацию/восстановление через mocks и изоляцию ML imports, но не исполнение модели.
+CPU-проверки запускаются командой `python3 -m unittest discover -s tests`. Они проверяют файлы, CLI, сериализацию/восстановление через mocks и изоляцию ML imports, но не исполнение модели.
 
 Порядок server smoke tests: проверить extracted checkpoint; выполнить synthetic eager depth=1, затем 3/7 на TP8 и DP8/EP8; проверить compiled и graph с целевыми configs; получить небольшую реальную запись; подтвердить numerical replay в исходной topology; проверить непустые NPU traces и отсутствие повторного capture в timing window. Зафиксировать версии и фактическое потребление памяти. До прохождения этих шагов runtime остаётся аппаратно непроверенным.
 
-Основные реализации: [standalone runtime](./mtp_runtime.py), [recorder](./mtp_capture.py), [V2 predictor](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py), [Ultra predictor](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_ultra_moe_mtp.py), [Omni proposer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/vllm_patches/patches/common/patch_eagle.py), [native graph wrapping](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/worker/npu_model_runner.py#L694).
+Основные реализации: [standalone runtime](../../src/vllm_bench/mtp_profile/mtp_runtime.py), [recorder](../../src/vllm_bench/mtp_profile/mtp_capture.py), [V2 predictor](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py), [Ultra predictor](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_ultra_moe_mtp.py), [Omni proposer](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/vllm_patches/patches/common/patch_eagle.py), [native graph wrapping](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/worker/npu_model_runner.py#L694).
