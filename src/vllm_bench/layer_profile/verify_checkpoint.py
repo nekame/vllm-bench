@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 import sys
 
-from prepare_checkpoint import discover, reduced_config
+from vllm_bench.common.checkpoint import discover
+from vllm_bench.layer_profile.prepare_checkpoint import reduced_config
 
 
 def main():

@@ -24,7 +24,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-HERE = Path(__file__).resolve().parent
+from vllm_bench.common.paths import CONF_ROOT
 
 
 def connection(base, timeout):
@@ -242,7 +242,7 @@ def main():
     p.add_argument("--base-url", default="http://127.0.0.1:8000", help="Server root, without /v1")
     p.add_argument("--model", default="pangu12")
     p.add_argument("--model-dir", type=Path, required=True)
-    p.add_argument("--suite", type=Path, default=HERE / "suite.json")
+    p.add_argument("--suite", type=Path, default=CONF_ROOT / "layer_profile/suite.json")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--mode", choices=["benchmark", "profile"], default="benchmark")
     p.add_argument("--select", nargs="+", help="Case names to run; default all in benchmark mode")
@@ -256,7 +256,7 @@ def main():
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--timeout", type=float, default=1800)
     p.add_argument("--prompts-jsonl", type=Path, help="Optional corpus: one {prompt_token_ids: [...]} per line")
-    p.add_argument("--server-manifest", type=Path, help="serve.py manifest for engine-limit checks and reproducibility")
+    p.add_argument("--server-manifest", type=Path, help="layer_profile.serve manifest for engine-limit checks and reproducibility")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
     if a.warmup_waves < 0 or a.measure_waves < 1 or a.profile_tokens < 1 or a.profile_waves < 1 or a.timeout <= 0:
@@ -327,7 +327,7 @@ def main():
             if a.mode == "profile":
                 rows, number = run_profile_waves(a, case, cfg, number, corpus, sink)
                 print("Profile collection stopped. A successful /stop_profile does not prove trace export. "
-                      "On the server, check the traces directory with export_profile.py; "
+                      "On the server, check the traces directory with python -m vllm_bench.tools.export_profile; "
                       "daemon workers may require standalone offline export (--execute).", flush=True)
             else:
                 for wave in range(a.measure_waves):

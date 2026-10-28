@@ -13,17 +13,17 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import benchmark
-import prepare_checkpoint as extract
-import verify_checkpoint
-import export_profile
+from vllm_bench.layer_profile import benchmark
+from vllm_bench.layer_profile import prepare_checkpoint as extract
+from vllm_bench.layer_profile import verify_checkpoint
+from vllm_bench.tools import export_profile
 
 HERE = Path(__file__).resolve().parent
 
 
 def fake_checkpoint(root, mxfp8=False, architecture="OpenPanguV2ForCausalLM"):
     root.mkdir()
-    cfg = json.loads((HERE / "reference_config-hf.json").read_text())
+    cfg = json.loads((HERE.parent / "conf/common/reference_config-hf.json").read_text())
     cfg["architectures"] = [architecture]
     if mxfp8:
         cfg["quantization_config"] = {
@@ -171,7 +171,7 @@ class ExtractionTests(unittest.TestCase):
                 operator = Path(tmp) / "operators.json"
                 operator.write_text(json.dumps({"model_parallel_config": {}, "operator_optimization_config": {}}))
                 output = Path(tmp) / "server"
-                result = subprocess.run([sys.executable, str(HERE / "serve.py"), "--model", str(model),
+                result = subprocess.run([sys.executable, "-m", "vllm_bench.layer_profile.serve", "--model", str(model),
                                          "--operator-config", str(operator), "--output", str(output)],
                                         capture_output=True, text=True, env={**{k: v for k, v in os.environ.items() if k != "OMNI_VLLM_PATCHES_DIR"}, "VLLM_PLUGINS": "existing_plugin"})
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -262,7 +262,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertFalse(bad["success"])
 
     def test_payload_has_exact_lengths_and_no_special_tokens(self):
-        cfg = json.loads((HERE / "reference_config-hf.json").read_text())
+        cfg = json.loads((HERE.parent / "conf/common/reference_config-hf.json").read_text())
         case = {"input_tokens": 1024, "output_tokens": 128}
         a = benchmark.make_payload(case, "pangu12", cfg, 123, 0)
         b = benchmark.make_payload(case, "pangu12", cfg, 123, 0)

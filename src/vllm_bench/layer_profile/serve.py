@@ -11,14 +11,8 @@ import shlex
 import subprocess
 import sys
 
-from prepare_checkpoint import SUPPORTED_ARCHITECTURES, quantization_method
-
-HERE = Path(__file__).resolve().parent
-RESET_ENV = ["OMNI_HYBRID_ALIGNED_DECODE", "OMNI_PD_BENCH_ALIGNED_DECODE_THRESHOLD",
-             "OMNI_NPU_BENCH_ALIGNED_DECODE_THRESHOLD", "OMNI_DP_ROUND_ROBIN",
-             "USE_MOE_FORCE_LOAD_BALANCE", "OMNI_PROFILE_TOKEN_THRESHOLD",
-             "PROFILER_TOKEN_THRESHOLD", "OMNI_ENABLE_PREFILL_PROFILER",
-             "ENABLE_PREFILL_PROFILER"]
+from vllm_bench.common.checkpoint import SUPPORTED_ARCHITECTURES, quantization_method
+from vllm_bench.common.runtime_env import RESET_ENV, instrumentation_pythonpath, source_pythonpath
 
 
 def main():
@@ -106,6 +100,13 @@ def main():
             p.error("Extra CLI arguments cannot replace architecture, parallelism, cache or profiler settings")
         command += extra
     env = os.environ.copy()
+    if a.annotate_layers:
+        try:
+            env["PYTHONPATH"] = instrumentation_pythonpath(env, "layer_profile")
+        except ValueError as error:
+            p.error(str(error))
+    else:
+        env["PYTHONPATH"] = source_pythonpath(env)
     for key in RESET_ENV:
         env.pop(key, None)
     settings = {"OMNI_VLLM_PATCHES_DIR": a.patches,
@@ -121,7 +122,6 @@ def main():
     env.update(settings)
     if a.annotate_layers:
         env["PANGU12_ANNOTATE_LAYERS"] = "1"
-        env["PYTHONPATH"] = str(HERE / "instrumentation") + os.pathsep + env.get("PYTHONPATH", "")
     else:
         env.pop("PANGU12_ANNOTATE_LAYERS", None)
     plan = {"created_utc": dt.datetime.now(dt.timezone.utc).isoformat(), "command": command,

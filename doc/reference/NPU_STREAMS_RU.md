@@ -1,5 +1,11 @@
 # Hardware streams при профилировании Pangu 505B
 
+Все команды ниже выполняются из корня `vllm-bench` после настройки:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
 Документ описывает дорожки `Stream …` на NPU timeline, а не CPU threads. Основан на OmniInfer `4cd855b29b5eb0a78bca645fad39e3181c35d099`. На этой машине NPU-запуск не выполнялся; конкретное назначение дорожек пользовательской трассы без самой трассы не установлено.
 
 ## Что означают несколько streams
@@ -59,8 +65,8 @@ Stream задаёт последовательность device-задач. Не
 
 ## Что не является числом hardware streams
 
-`mhc_num_stream: 4` в [reference config](./reference_config-hf.json) задаёт число residual streams архитектуры mHC. Это размерность представления модели, а не количество device queues. Для уменьшения числа дорожек на trace менять его нельзя.
+`mhc_num_stream: 4` в [reference config](../../conf/common/reference_config-hf.json) задаёт число residual streams архитектуры mHC. Это размерность представления модели, а не количество device queues. Для уменьшения числа дорожек на trace менять его нельзя.
 
 Также вызов `set_stream_limit` в [limit_core_num](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/utils.py#L112) ограничивает доступные stream вычислительные ресурсы Cube/Vector; это не лимит количества streams.
 
-Влияние графов и eager описано отдельно: [компиляция, ACL Graph и eager](./COMPILATION_EAGER_RU.md).
+Влияние графов и eager описано отдельно: [компиляция, ACL Graph и eager](COMPILATION_EAGER_RU.md).

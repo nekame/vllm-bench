@@ -1,5 +1,11 @@
 # Компиляция, ACL Graph и eager при профилировании Pangu 505B
 
+Все команды ниже выполняются из корня `vllm-bench` после настройки:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
 Документ фиксирует обсуждённое поведение для целевого интерфейса vLLM 0.25.1 и OmniInfer `4cd855b29b5eb0a78bca645fad39e3181c35d099`. Проверялись исходники; NPU-запуски на этой машине не выполнялись. Эффективный режим конкретного сервера нужно сверять с его логами и итоговой конфигурацией.
 
 ## Компиляция и replay графа — разные механизмы
@@ -24,7 +30,7 @@
 
 ## Почему метки слоёв могут быть только на prefill
 
-Наш [sitecustomize.py](./instrumentation/sitecustomize.py) оборачивает Python-методы слоёв `forward` и `mhc_head` в `torch.autograd.profiler.record_function`. Метки `pangu12/layer_…` показывают CPU-диапазоны вызовов Python, а не длительность NPU-вычислений слоя.
+Наш [sitecustomize.py](../../src/vllm_bench/layer_profile/instrumentation/sitecustomize.py) оборачивает Python-методы слоёв `forward` и `mhc_head` в `torch.autograd.profiler.record_function`. Метки `pangu12/layer_…` показывают CPU-диапазоны вызовов Python, а не длительность NPU-вычислений слоя.
 
 Если prefill вызывает эти обёртки, метки появляются. При replay записанного графа Python-код слоёв повторно не выполняется: [ACLGraphWrapper вызывает `entry.aclgraph.replay()`](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/compilation/acl_graph.py#L387). NPU выполняет вычисления, но наши Python-метки заново не создаются. Компиляция также может менять их видимость.
 
@@ -49,7 +55,7 @@ compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 --annotate-layers --enforce-eager
 ```
 
-Наш [serve.py](./serve.py) передаёт `--enforce-eager` в vLLM. Для фактического запуска по-прежнему нужен `--execute`. Изменение режима требует перезапуска сервера; запускать заново подготовку checkpoint не требуется.
+Наш [serve.py](../../src/vllm_bench/layer_profile/serve.py) передаёт `--enforce-eager` в vLLM. Для фактического запуска по-прежнему нужен `--execute`. Изменение режима требует перезапуска сервера; запускать заново подготовку checkpoint не требуется.
 
 В eager Python-метки должны быть видны при вызове обёрнутых методов. Их накладные расходы входят в профиль. Времена eager-запуска нельзя переносить на рабочий graph mode.
 
@@ -82,4 +88,4 @@ compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
 При сравнении сохраняйте checkpoint, TP/DP/EP, operator config, входные токены, длину генерации, concurrency и прогрев. Серверный manifest содержит исходную команду, но не заменяет лог итоговой конфигурации.
 
-Связанные документы: [hardware streams](./NPU_STREAMS_RU.md), [запуск и сбор последовательных запросов](./README.md).
+Связанные документы: [hardware streams](NPU_STREAMS_RU.md), [запуск и сбор последовательных запросов](../layer_profile/README.md).
