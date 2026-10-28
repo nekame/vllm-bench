@@ -16,8 +16,12 @@ class Loader:
 
     def exec_module(self, module):
         self.original.exec_module(module)
-        from spec_debug import patch_sampler
-        patch_sampler(module)
+        if module.__name__ == "omni_npu.sample.rejection_sampler":
+            from spec_debug import patch_sampler
+            patch_sampler(module)
+        else:
+            from spec_rejection import patch_runner
+            patch_runner(module)
 
     def __getattr__(self, name):
         return getattr(self.original, name)
@@ -25,7 +29,10 @@ class Loader:
 
 class Finder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname != "omni_npu.sample.rejection_sampler":
+        targets = {"omni_npu.sample.rejection_sampler"}
+        if os.environ.get("PANGU_SPEC_DEBUG_REJECTIONS") == "1":
+            targets.add("omni_npu.worker.npu_model_runner")
+        if fullname not in targets:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec and spec.loader:

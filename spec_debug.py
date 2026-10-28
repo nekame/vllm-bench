@@ -121,6 +121,11 @@ def patch_sampler(module):
                  "raw_bonus_top2": top2(logits[metadata.bonus_logits_indices])}
         label = output / "LABEL"
         event["label"] = label.read_text().strip() if label.exists() else None
+        rejection_recorder = None
+        if os.environ.get("PANGU_SPEC_DEBUG_REJECTIONS") == "1":
+            from spec_rejection import recorder
+            rejection_recorder = recorder()
+            rejection_recorder.attach(event)
         token = ACTIVE.set(event)
         try:
             result = original_forward(self, *args, **kwargs)
@@ -131,6 +136,8 @@ def patch_sampler(module):
             raise
         finally:
             ACTIVE.reset(token)
+            if rejection_recorder is not None:
+                rejection_recorder.record(event)
             with (output / f"rank-{rank}-pid-{os.getpid()}.jsonl").open("a") as stream:
                 stream.write(json.dumps(event, ensure_ascii=False) + "\n")
             captured += 1
