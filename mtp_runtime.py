@@ -40,8 +40,10 @@ def install_standalone_loader(config):
     start = config["num_hidden_layers"]
 
     class StandaloneMTP(Base):
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
+        # vLLM initialize_model inspects these exact parameter names to select
+        # the new-style constructor. **kwargs alone triggers its legacy path.
+        def __init__(self, *, vllm_config, prefix=""):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
             layers = list(self.model.layers.values())
             head = layers[0].shared_head.head
             for layer in layers[1:]:

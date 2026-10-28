@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import importlib.abc
 import io
+import inspect
 import json
 from pathlib import Path
 import struct
@@ -334,7 +335,9 @@ class LoaderAdapterTests(unittest.TestCase):
         registered = {}
 
         class Base:
-            def __init__(self, **kwargs):
+            def __init__(self, *, vllm_config, prefix=""):
+                self.received_config = vllm_config
+                self.received_prefix = prefix
                 self.model = SimpleNamespace(layers={str(i): SimpleNamespace(
                     shared_head=SimpleNamespace(head=object())) for i in (50, 51, 52)})
 
@@ -359,7 +362,15 @@ class LoaderAdapterTests(unittest.TestCase):
                                        ("PanguUltraMoEForCausalLM", "OpenPanguMTPModel")):
             with self.subTest(arch=arch), patch.dict(sys.modules, modules):
                 mtp_runtime.install_standalone_loader({"architectures": [arch], "num_hidden_layers": 50})
-                model = registered[registered_name]()
+                cls = registered[registered_name]
+                # Exercise vLLM's signature-based argument selection, rather
+                # than directly supplying kwargs the real loader might omit.
+                parameters = inspect.signature(cls.__init__).parameters
+                config, prefix = object(), "draft"
+                kwargs = {"vllm_config": config, "prefix": prefix} if {"vllm_config", "prefix"} <= parameters.keys() else {}
+                model = cls(**kwargs)
+                self.assertIs(model.received_config, config)
+                self.assertEqual(model.received_prefix, prefix)
                 heads = [layer.shared_head.head for layer in model.model.layers.values()]
                 self.assertTrue(all(head is heads[0] for head in heads))
                 head, embedding, scale, local = object(), object(), object(), object()

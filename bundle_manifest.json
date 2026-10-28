@@ -15,7 +15,7 @@
     "mtp_capture.py": "0911596f106c589fd7b39cc08ed3b954915962e6a5e2667a6aa3e73dfd7b4329",
     "mtp_common.py": "e71212b4fa5c2062afb2be3c3986f34af44b2b259fbf67d7913587b8ae9d60b6",
     "mtp_instrumentation/sitecustomize.py": "be7c73bb41c2ef893e0e7943bd42898858f23ad391fe4b13da8b248065a483c0",
-    "mtp_runtime.py": "52e628879b2734b6688a8afe6002e44df56ee8f8b47b3b5a422ef070239d84fa",
+    "mtp_runtime.py": "ab31e7236560621f75b6de5ce8701f94e401c65add796f435897f8f5a3fe798d",
     "mtp_state.py": "2adbf59752c12138904afa242faa71c04bc2f1f633e2ca7a6470a526d103b929",
     "prepare_checkpoint.py": "6e0d9f4036acabadd16a8642496da210243d7d27318fb1a5414b1fc4ae0a71dc",
     "prepare_mtp_checkpoint.py": "4907996c3214842b0abc902195a9dbc374f78361c7a085702f0bef04515c6d04",
@@ -25,7 +25,7 @@
     "serve.py": "2d184cb30ea7ccf9e0515a1d7e71c292ef2d68408a15e918f938cdf475ecb3ce",
     "suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
     "test_cpu.py": "9ddf2be457a229f3e55734c0a46910696591a6f7c85bd2b588d4900e7c785694",
-    "test_mtp_cpu.py": "4bb4a939c02c2289219920119ee965e65f2aee3dc8395453f93e573b8eeac9e1",
+    "test_mtp_cpu.py": "546ce7b733832215ad8ea235095c722b7d1896e2b95fa0da32bc22f2e7093f23",
     "verify_checkpoint.py": "6f37b69dff157099e01e8176691c6c69a98162060911a2817be8f6bcc4796d70",
     "verify_mtp_checkpoint.py": "ce60d4bf579a0a76b8dff20586b587d02664a4a75f8b55057069012a59b8d987"
   },
