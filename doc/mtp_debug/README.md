@@ -108,7 +108,29 @@ python -m vllm_bench.mtp_debug.compare_rejections \
 
 Logit deltas вычисляются только для одинаковых token IDs, присутствующих в обеих top-2. Строки, обусловленные различающимися draft-префиксами, пропускаются. Допуски `--atol` и `--rtol` по умолчанию равны `1e-5`; они фильтруют численные отличия logits, но не различия token IDs или точных SHA256.
 
+`top1_changed` сохранён для совместимости и означает изменение первого ID из `topk(2)`, а не обязательно фактического выбора sampler. При равных максимальных logits порядок top-2 может меняться при неизменном `argmax`. Поля `left_actual_choice`, `right_actual_choice`, `actual_choice_changed` берутся из `verify.target_argmax` или `verify.bonus_ids`; `top2_has_tie` отмечает нулевой margin. При отсутствии фактического выбора в записи значение `actual_choice_changed` равно `null`.
+
 Ограничения: prompt и история до начала записи отсутствуют, их одинаковость остаётся внешним условием теста. При разных начальных позициях записи, пробеле в известном префиксе или отсутствии общего target-прохода инструмент не подтверждает равенство контекста и отражает это в `skipped`/`unmatched_forward_positions`. При `matched_forwards=0` сравнение неинформативно. Обрезанные target inputs/positions отклоняются; обрезанная metadata отмечается отдельно. Новые вызовы модели или повторное снятие данных для анализа существующей записи не нужны.
+
+## Поиск события, выдавшего конкретный токен
+
+Число из `first_observed_token_difference.path` — абсолютная позиция выданного токена, а не token ID и не начало target-прохода. Для поиска соответствующего события используйте:
+
+```bash
+python -m vllm_bench.mtp_debug.locate_output \
+  /data/profile-results/mtp-rejections \
+  --position 8210 --output /data/profile-results/token-8210.json
+```
+
+По умолчанию проверяются все записанные запросы. Для одного запроса добавьте `--label request-1` или `--request REQUEST_ID`. Принимается также отдельный JSONL или JSON окна. Повторные копии события удаляются; упоминания позиции в input/metadata не считаются выдачей токена. Если выдающий проход отсутствует в записи, запрос попадает в `not_found_in_recorded_outputs`.
+
+Краткая сводка показывает запрос, фактический `token_id`, `cycle`, `source`, `source_row`, accepted count и `output_matches_selection`. Полный JSON дополнительно сохраняет relevant top-2 logits, target inputs/positions, MoME metadata/fingerprints и описание предыдущего записанного verification. Источники:
+
+- `accepted_draft` — принятый draft-токен; дополнительно проверяется совпадение с target argmax;
+- `target_correction` — target argmax первой отклонённой позиции;
+- `bonus` — дополнительный токен после принятия всего draft.
+
+Для depth=1 проход с первым input на позиции P может выдать токены P+1 и P+2. Инструмент вычисляет нужный offset по фактической длине выхода и accepted count, а не ищет число по тексту файла. `raw_top2_has_tie` и `processed_top2_has_tie` относятся к relevant строке; реальный выбор берётся из verifier inputs. Processed bonus logits текущая инструментация не снимает, поэтому для bonus доступна только raw top-2. Полный MoME-блок по-прежнему включает speculative/неиспользуемые слоты: разные SHA256 не являются самостоятельным доказательством ошибки.
 
 ## Проверки и ограничения
 

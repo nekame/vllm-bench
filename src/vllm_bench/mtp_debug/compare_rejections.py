@@ -181,9 +181,24 @@ def logits_differences(left, right, atol, rtol):
             common = scores_a.keys() & scores_b.keys()
             deltas = {str(token): scores_b[token] - scores_a[token] for token in common}
             if u["ids"] != v["ids"] or any(not close(scores_a[t], scores_b[t], atol, rtol) for t in common):
+                choice_field = "bonus_ids" if field == "raw_bonus_top2" else "target_argmax"
+                choice_row = 0 if choice_field == "bonus_ids" else row
+                actual_a = a.get("verify", {}).get(choice_field, [])
+                actual_b = b.get("verify", {}).get(choice_field, [])
+                selected_a = actual_a[choice_row] if choice_row < len(actual_a) else None
+                selected_b = actual_b[choice_row] if choice_row < len(actual_b) else None
+                if isinstance(selected_a, list):
+                    selected_a = selected_a[0]
+                if isinstance(selected_b, list):
+                    selected_b = selected_b[0]
                 result.append({"field": field, "row": row, "left": u, "right": v,
                                "common_token_logit_deltas": deltas,
-                               "top1_changed": u["ids"][0] != v["ids"][0]})
+                               "top1_changed": u["ids"][0] != v["ids"][0],
+                               "top1_changed_means": "topk_first_id_changed_not_actual_argmax",
+                               "left_actual_choice": selected_a, "right_actual_choice": selected_b,
+                               "actual_choice_changed": selected_a != selected_b
+                               if selected_a is not None and selected_b is not None else None,
+                               "top2_has_tie": {"left": u["margin"] == 0, "right": v["margin"] == 0}})
     return result
 
 
