@@ -132,6 +132,12 @@ python -m vllm_bench.mtp_debug.locate_output \
 
 Для depth=1 проход с первым input на позиции P может выдать токены P+1 и P+2. Инструмент вычисляет нужный offset по фактической длине выхода и accepted count, а не ищет число по тексту файла. `raw_top2_has_tie` и `processed_top2_has_tie` относятся к relevant строке; реальный выбор берётся из verifier inputs. Processed bonus logits текущая инструментация не снимает, поэтому для bonus доступна только raw top-2. Полный MoME-блок по-прежнему включает speculative/неиспользуемые слоты: разные SHA256 не являются самостоятельным доказательством ошибки.
 
+Краткую выборку полей для разбора решений target можно вывести сохранённой командой (нужен `jq`). Из корня репозитория:
+
+```bash
+bash doc/mtp_debug/extract_token_choices.sh /path/to/token-8210.json
+```
+
 ## Проверки и ограничения
 
 ```bash

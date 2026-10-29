@@ -62,7 +62,7 @@ paths = [root / '.gitignore', root / 'README.md']
 for directory in ('src', 'conf', 'doc', 'tests'):
     paths.extend(path for path in (root / directory).rglob('*')
                  if path.is_file() and '__pycache__' not in path.parts
-                 and path.suffix in {'.py', '.json', '.md'})
+                 and path.suffix in {'.py', '.json', '.md', '.sh'})
 manifest_path = root / 'bundle_manifest.json'
 manifest = json.loads(manifest_path.read_text())
 manifest['files'] = {path.relative_to(root).as_posix():
