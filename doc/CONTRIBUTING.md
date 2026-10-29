@@ -59,7 +59,7 @@ from pathlib import Path
 
 root = Path.cwd()
 paths = [root / '.gitignore', root / 'README.md']
-for directory in ('src', 'conf', 'doc', 'tests'):
+for directory in ('src', 'conf', 'doc', 'tests', 'scripts'):
     paths.extend(path for path in (root / directory).rglob('*')
                  if path.is_file() and '__pycache__' not in path.parts
                  and path.suffix in {'.py', '.json', '.md', '.sh'})

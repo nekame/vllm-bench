@@ -135,7 +135,7 @@ python -m vllm_bench.mtp_debug.locate_output \
 Краткую выборку полей для разбора решений target можно вывести сохранённой командой (нужен `jq`). Из корня репозитория:
 
 ```bash
-bash doc/mtp_debug/extract_token_choices.sh /path/to/token-8210.json
+bash scripts/extract_token_choices.sh /path/to/token-8210.json
 ```
 
 ## Автоматический поиск первого расхождения
@@ -143,7 +143,7 @@ bash doc/mtp_debug/extract_token_choices.sh /path/to/token-8210.json
 Чтобы не двигаться по позициям вручную, запустите сохранённый скрипт:
 
 ```bash
-bash doc/mtp_debug/find_first_difference.sh /path/to/capture --output first-difference.json
+bash scripts/find_first_difference.sh /path/to/capture --output first-difference.json
 ```
 
 Скрипт сам добавляет абсолютный путь к `src` в `PYTHONPATH` и запускает `vllm_bench.mtp_debug.find_divergence`. По умолчанию выбираются `request-01` и `request-02`; selector может быть как `LABEL`, так и request ID. Другую пару задайте через `--left NAME --right NAME`. Каждый selector должен однозначно выбирать один запрос того же rank.
