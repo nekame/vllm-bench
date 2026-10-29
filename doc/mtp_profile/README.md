@@ -169,6 +169,8 @@ Trace собирается отдельным повтором, чтобы profi
 - `depth-D/rank-NNN/traces/` — данные torch_npu profiler.
 - `summary.json`/`summary.csv` — median critical-path latency и суммарные proposed tokens/s. Critical path определяется максимумом времени по ranks для каждого повтора.
 
+В диагностическом `effective_config.json` значения `torch.dtype` и `torch.device` записываются строками (например, `torch.bfloat16` и `npu:0`), enum — своим значением. Числа и булевы настройки сохраняют типы JSON. Это представление для отчёта; форматы tensors/capture и вычисление hashes checkpoint не меняются.
+
 Для offline export используйте существующий инструмент:
 
 ```bash

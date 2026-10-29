@@ -1,5 +1,7 @@
 """Standalone MTP CPU checks: no torch, vLLM, torch_npu or hardware imports."""
 import contextlib
+from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import importlib.abc
 import io
@@ -393,6 +395,57 @@ class SyntheticBufferTests(unittest.TestCase):
                 else:
                     runner._make_buffer.assert_not_called()
                     self.assertFalse(hasattr(runner, "cu_num_draft_tokens"))
+
+
+class DiagnosticConfigTests(unittest.TestCase):
+    def test_effective_config_writes_dtype_device_and_nested_dataclasses(self):
+        class Dtype:
+            def __str__(self):
+                return "torch.bfloat16"
+
+            def __deepcopy__(self, memo):
+                raise AssertionError("Diagnostic serialization must not deepcopy runtime objects")
+
+        class Device:
+            def __str__(self):
+                return "npu:3"
+
+        class Mode(Enum):
+            EAGER = "eager"
+
+        @dataclass
+        class Nested:
+            device: object
+            enabled: bool = False
+            count: int = 3
+
+        @dataclass
+        class Config:
+            dtype: object
+            operator_opt_config: object
+
+        dtype = Dtype()
+        config = Config(dtype, {"nested": Nested(Device()), "values": (Mode.EAGER, 0.5, None), "path": Path("config.json")})
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"torch": SimpleNamespace(dtype=Dtype, device=Device)}):
+            value = {"operator_config": mtp_runtime.diagnostic_config(config)}
+            path = Path(tmp) / "effective_config.json"
+            mtp_common.write_json(path, value)
+            restored = json.loads(path.read_text())
+        self.assertEqual(restored, {"operator_config": {"dtype": "torch.bfloat16",
+                         "operator_opt_config": {"nested": {"device": "npu:3", "enabled": False, "count": 3},
+                                                 "values": ["eager", 0.5, None], "path": "config.json"}}})
+        self.assertIs(config.dtype, dtype)
+
+    def test_unknown_objects_and_strict_json_paths_still_fail(self):
+        with self.assertRaisesRegex(TypeError, "Unsupported effective-config value"):
+            mtp_runtime.diagnostic_config(object())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "strict.json"
+            with self.assertRaises(TypeError):
+                mtp_common.write_json(path, {"unsupported": object()})
+            self.assertFalse(path.exists())
+        with self.assertRaises(TypeError):
+            mtp_common.digest({"unsupported": object()})
 
 
 class LoaderAdapterTests(unittest.TestCase):

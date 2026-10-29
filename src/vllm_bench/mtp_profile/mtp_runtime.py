@@ -11,16 +11,46 @@ from contextlib import contextmanager
 from copy import deepcopy
 import csv
 import dataclasses
+from enum import Enum
 import json
 import math
 import os
 from pathlib import Path
 import statistics
+import sys
 import time
 
 from vllm_bench.mtp_profile.mtp_common import layer_sequence, proposer_globals, validate_record, write_json
 from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, ensure_draft_token_buffer,
                        load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
+
+
+def diagnostic_config(value):
+    """JSON values for effective-config reporting, without importing ML packages.
+
+    This is intentionally separate from checkpoint/capture serialization and
+    hashing. Unknown objects (including tensors) must not be silently stringified.
+    """
+    if isinstance(value, Enum):
+        return diagnostic_config(value.value)
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: diagnostic_config(getattr(value, field.name))
+                for field in dataclasses.fields(value)}
+    if isinstance(value, dict):
+        return {key: diagnostic_config(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [diagnostic_config(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        scalar_types = tuple(cls for name in ("dtype", "device")
+                             if isinstance(cls := getattr(torch, name, None), type))
+        if scalar_types and isinstance(value, scalar_types):
+            return str(value)
+    raise TypeError(f"Unsupported effective-config value: {type(value).__module__}.{type(value).__qualname__}")
 
 
 def install_standalone_loader(config):
@@ -461,7 +491,7 @@ def run(plan):
                          "attention_layers": proposer.attn_layer_names,
                          "target_weights_loaded": False, "npu_validation": "executing"}
             from omni_npu.model_config.config_loader.loader import model_extra_config
-            effective["operator_config"] = dataclasses.asdict(model_extra_config)
+            effective["operator_config"] = diagnostic_config(model_extra_config)
             write_json(output / "effective_config.json", effective)
             for depth in a["depths"]:
                 if record:
