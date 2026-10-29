@@ -8,7 +8,7 @@
     "conf/layer_profile/suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
     "doc/CONTRIBUTING.md": "e7c9859b1bb1c162f607e41879483a759398764cfe1e3697a291a43601b0db7f",
     "doc/layer_profile/README.md": "00d918301f9546ee5ec225465139762e47927ec4be60a34de1e18c78c3897a24",
-    "doc/mtp_debug/README.md": "ffb13a2d234267556101eb59167f13a6d68b33c0495c8ec16bc35fdfa2d33914",
+    "doc/mtp_debug/README.md": "7fa7fdb80d557d472feaf4334da2296359d0203772de07298d8a1a36c856286d",
     "doc/mtp_profile/README.md": "0786195165dc5bf39325e598f61d04e0cfb55ac8987a5fa983bf4e4070fc4401",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
@@ -25,6 +25,7 @@
     "src/vllm_bench/layer_profile/serve.py": "9b5e1258caee27a09870d9285c1820f6b9fe2c071d553d8e43b5b89575e657ab",
     "src/vllm_bench/layer_profile/verify_checkpoint.py": "0987bdd5125bbc69bd30d283c83fd70a532dd76fcf41c2be37634c880a50b314",
     "src/vllm_bench/mtp_debug/__init__.py": "a06b936959bfe6b6da8d66dc0110bfb0ec7ac3ff1648473f7d7451a3146e198d",
+    "src/vllm_bench/mtp_debug/compare_rejections.py": "313b024a940a22f66a80385270f8a1fe589d7e6bad51156c7c29bcc005ca0e70",
     "src/vllm_bench/mtp_debug/debug_spec.py": "dad3995bcac8116c648758ae802ecd298ddfcfcecc4ed14c4d77ab9c8b449d64",
     "src/vllm_bench/mtp_debug/instrumentation/sitecustomize.py": "6e33c2b351a48660d77715aff1d102dac5cf6ae37b0950dbe9886d127370957b",
     "src/vllm_bench/mtp_debug/spec_debug.py": "909662bac9ca014296a0414726442d8de1bfbf86d7cb3f6de6d29d5059e991bd",
@@ -43,6 +44,7 @@
     "src/vllm_bench/tools/__init__.py": "1a5a2cd0ec11b59a55eddd3c78db9300a20103ef6385e2915a50d5b9a237fe85",
     "src/vllm_bench/tools/analyze_trace.py": "0bfd684aafdcda779b1fdee5c9571ffaf14c4b72512dd1990209f934d8ccb8a5",
     "src/vllm_bench/tools/export_profile.py": "f225f6ce9421a38909a0894eefa673c32506ecfc07717bb9cebab94265453b77",
+    "tests/test_compare_rejections_cpu.py": "161d32da8ad796b562ec23c60ccdd3b2452d7668cef3e1f9e7c88febeb0adda0",
     "tests/test_cpu.py": "d2e3c60c87ca05d76d6610cb620f9a1c3b8731c920c8024cae7230be12a5ac9c",
     "tests/test_layout_cpu.py": "e9dedc355ce1a5e122e62a96e71b6f4d11a53a8d91ab99fc26f0c47cd9af5a8c",
     "tests/test_mtp_cpu.py": "f3a5458ac6215eb402d1e71e8f002643df7d601677a2d159534407a5d3eb0e8d",
@@ -50,13 +52,14 @@
     "tests/test_spec_rejection_cpu.py": "9e180edd4d2e85dd8ae490df50d70cdce25df4a5fef0b5ae3645fe4b206a290d"
   },
   "validation": {
-    "cpu_tests": 46,
+    "cpu_tests": 58,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python3 -m unittest discover -s tests",
     "npu_execution_performed": false,
     "omniinfer_modified": false,
     "mtp_npu_validation": "pending server smoke tests",
     "mtp_debug_npu_validation": "pending server smoke tests",
-    "layout_npu_validation": "pending server smoke tests"
+    "layout_npu_validation": "pending server smoke tests",
+    "mtp_comparison_validation": "CPU fixtures: prefix/position alignment, gaps, deduplication, fingerprints, CLI; server captures not available locally"
   }
 }
