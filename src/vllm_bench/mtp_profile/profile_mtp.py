@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, checkpoint_config, layer_sequence, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, checkpoint_config, layer_sequence, topology_world_size, validate_record, write_json
 from vllm_bench.common.runtime_env import RESET_ENV, instrumentation_pythonpath
 
 
@@ -22,7 +22,7 @@ def main(argv=None):
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--topology", choices=TOPOLOGIES, required=True)
     p.add_argument("--input", choices=("synthetic", "replay"), default="synthetic")
-    p.add_argument("--capture", type=Path, help="One complete capture directory, containing all eight ranks")
+    p.add_argument("--capture", type=Path, help="Complete capture directory containing every rank of the selected topology")
     p.add_argument("--context-length", type=int, default=8192)
     p.add_argument("--batch-per-dp-rank", type=int, default=1)
     p.add_argument("--depths", type=int, nargs="+", help="Defaults to 3 7; replay uses captured depth")
@@ -40,6 +40,7 @@ def main(argv=None):
     p.add_argument("--patches")
     p.add_argument("--execute", action="store_true")
     a = p.parse_args(argv)
+    world_size = topology_world_size(TOPOLOGIES[a.topology])
     a.depths = a.depths or ([3, 7] if a.input == "synthetic" else [])
     if min(a.context_length, a.batch_per_dp_rank, a.repeats, a.prefill_chunk, *a.depths) < 1 or a.warmup < 1:
         p.error("Lengths, depths, repeats and warmup must be positive")
@@ -57,11 +58,11 @@ def main(argv=None):
     additional = json.loads(a.additional_config.read_text()) if a.additional_config else {}
     replay_meta = None
     if a.input == "replay":
-        for rank in range(8):
+        for rank in range(world_size):
             meta = json.loads((a.capture / f"rank-{rank:03d}" / "capture.json").read_text())
             validate_record(meta, topology=a.topology, config=config)
-            if not meta.get("complete") or meta["rank"] != rank or meta["world_size"] != 8:
-                p.error("Capture must contain eight complete rank records")
+            if not meta.get("complete") or meta["rank"] != rank or meta["world_size"] != world_size:
+                p.error(f"Capture must contain {world_size} complete rank records for {a.topology}")
             if meta["operator_config"] != operator:
                 p.error("Operator config differs from capture")
             if replay_meta and any(meta[k] != replay_meta[k] for k in ("depth", "versions", "runtime_limits", "additional_config", "input_tokens", "batch_per_dp_rank", "padded_tokens")):
@@ -103,6 +104,7 @@ def main(argv=None):
     if forbidden & set(patches.split(",")):
         p.error("Remove benchmark gates and profiler-sync patches")
     plan = {"format": "pangu-mtp-run-v1", "options": options, "topology": TOPOLOGIES[a.topology],
+            "world_size": world_size,
             "config": config, "checkpoint_manifest": manifest, "operator_config": operator,
             "compilation_config": compilation, "additional_config": additional, "patches": patches,
             "expected_layers": {str(d): layer_sequence(config, d) for d in a.depths},
@@ -157,7 +159,7 @@ def main(argv=None):
         path = folder / "launch_plan.json"
         write_json(path, child)
         command = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1",
-                   "--nproc-per-node=8", "--module", "vllm_bench.mtp_profile.mtp_runtime", "--plan", str(path)]
+                   f"--nproc-per-node={world_size}", "--module", "vllm_bench.mtp_profile.mtp_runtime", "--plan", str(path)]
         commands.append(command)
         write_json(output / "command.json", commands)
         status = subprocess.run(command, env=env, check=False).returncode

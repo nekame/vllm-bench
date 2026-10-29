@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 
-from vllm_bench.mtp_profile.mtp_common import layer_sequence, proposer_globals, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_common import layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
 from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, ensure_draft_token_buffer,
                        load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
 
@@ -134,8 +134,9 @@ def create_runtime(plan, record=None):
 
     a, topology = plan["options"], plan["topology"]
     rank, local_rank = int(os.environ["RANK"]), int(os.environ["LOCAL_RANK"])
-    if int(os.environ["WORLD_SIZE"]) != 8:
-        raise ValueError("Exactly eight torchrun ranks required")
+    world_size = topology_world_size(topology)
+    if int(os.environ["WORLD_SIZE"]) != world_size:
+        raise ValueError(f"Topology {a['topology']} requires {world_size} torchrun ranks")
     device = torch.device(f"npu:{local_rank}")
     torch.npu.set_device(device)
     _patch_npu_triton_capabilities()
@@ -590,7 +591,8 @@ def run(plan):
 def aggregate(plan):
     a = plan["options"]
     output = Path(a["output"])
-    ranks = [json.loads((output / f"rank-{i:03d}" / "results.json").read_text()) for i in range(8)]
+    ranks = [json.loads((output / f"rank-{i:03d}" / "results.json").read_text())
+             for i in range(topology_world_size(plan["topology"]))]
     summary = []
     for index, depth in enumerate(a["depths"]):
         critical = [max(rank[index]["latencies_s"][j] for rank in ranks) for j in range(a["repeats"])]

@@ -159,6 +159,7 @@ class PlanningTests(unittest.TestCase):
                     run.assert_not_called()
                     self.assertFalse(output.exists())
                     plan = json.loads(stream.getvalue())
+                    self.assertEqual(plan["world_size"], 1 if topology == "tp1" else 8)
                     self.assertEqual(plan["total_sequences"], 8 if topology == "dp8-ep8" else 1)
                     self.assertEqual(plan["expected_layers"]["7"], [50] * 7)
                     self.assertFalse(plan["target_weights_loaded"])
@@ -258,6 +259,74 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
 '''
         result = subprocess.run([sys.executable, "-c", code], cwd=HERE, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_tp1_launches_one_worker_without_expert_parallel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+
+            def launch(command, **kwargs):
+                self.assertIn("--nproc-per-node=1", command)
+                plan = json.loads(Path(command[-1]).read_text())
+                self.assertEqual(plan["topology"], {"tp": 1, "dp": 1, "ep": False})
+                self.assertEqual(plan["total_sequences"], 1)
+                self.assertEqual(plan["world_size"], 1)
+                row = {"depth": 3, "critical_path_median_s": 0.1,
+                       "total_sequences": 1, "proposed_tokens_per_s": 30}
+                (Path(plan["options"]["output"]) / "summary.json").write_text(json.dumps([row]))
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(subprocess, "run", side_effect=launch) as execute, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(profile_mtp.main(["--model", str(model), "--operator-config", str(operator),
+                                                  "--topology", "tp1", "--depths", "3", "--execute",
+                                                  "--output", str(root / "result")]), 0)
+            execute.assert_called_once()
+
+    def test_tp1_replay_uses_one_rank_and_rejects_wrong_world_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg, model, operator = self.prepare(root)
+            folder = root / "capture/rank-000"
+            folder.mkdir(parents=True)
+            meta = {"format": "pangu-mtp-capture-v1", "topology": "tp1", "rank": 0,
+                    "world_size": 1, "complete": True, "depth": 3,
+                    "config_sha256": mtp_common.digest(cfg), "versions": {}, "runtime_limits": {},
+                    "additional_config": {}, "input_tokens": 1, "batch_per_dp_rank": 1, "padded_tokens": 1,
+                    "compilation_options": {"mode": 3, "cudagraph_mode": "FULL"},
+                    "operator_config": json.loads(operator.read_text())}
+            path = folder / "capture.json"
+            path.write_text(json.dumps(meta))
+            args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp1",
+                    "--input", "replay", "--capture", str(folder.parent), "--output", str(root / "result")]
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                profile_mtp.main(args)
+            self.assertEqual(json.loads(stream.getvalue())["options"]["depths"], [3])
+            meta["world_size"] = 8
+            path.write_text(json.dumps(meta))
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                profile_mtp.main(args)
+
+    def test_recorder_topology_detection_and_summary_rank_count(self):
+        for name, settings in mtp_common.TOPOLOGIES.items():
+            with self.subTest(topology=name), tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mtp_common.topology_name(**settings), name)
+                size = 1 if name == "tp1" else 8
+                root = Path(tmp)
+                for rank in range(size):
+                    folder = root / f"rank-{rank:03d}"
+                    folder.mkdir()
+                    (folder / "results.json").write_text(json.dumps([{
+                        "latencies_s": [1 + rank, 3 + rank], "median_s": 2 + rank}]))
+                sequences = settings["dp"]
+                mtp_runtime.aggregate({"topology": settings, "total_sequences": sequences,
+                                       "options": {"output": str(root), "depths": [3], "repeats": 2}})
+                summary = json.loads((root / "summary.json").read_text())[0]
+                self.assertEqual(summary["critical_path_median_s"], size + 1)
+                self.assertEqual(len(summary["per_rank_median_s"]), size)
+                self.assertAlmostEqual(summary["proposed_tokens_per_s"], sequences * 3 / (size + 1))
+        with self.assertRaisesRegex(ValueError, "Unsupported MTP topology"):
+            mtp_common.topology_name(1, 1, True)
 
 
 class StateTests(unittest.TestCase):

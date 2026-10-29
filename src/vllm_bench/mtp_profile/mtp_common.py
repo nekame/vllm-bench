@@ -6,8 +6,20 @@ import inspect
 import json
 from pathlib import Path
 
-TOPOLOGIES = {"tp8": {"tp": 8, "dp": 1, "ep": False},
+TOPOLOGIES = {"tp1": {"tp": 1, "dp": 1, "ep": False},
+              "tp8": {"tp": 8, "dp": 1, "ep": False},
               "dp8-ep8": {"tp": 1, "dp": 8, "ep": True}}
+
+
+def topology_world_size(topology):
+    return topology["tp"] * topology["dp"]
+
+
+def topology_name(tp, dp, ep):
+    for name, settings in TOPOLOGIES.items():
+        if settings == {"tp": tp, "dp": dp, "ep": ep}:
+            return name
+    raise ValueError(f"Unsupported MTP topology TP={tp}, DP={dp}, EP={ep}; expected one of {list(TOPOLOGIES)}")
 
 
 def digest(value):

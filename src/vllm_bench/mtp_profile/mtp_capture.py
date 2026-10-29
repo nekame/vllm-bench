@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 
-from vllm_bench.mtp_profile.mtp_common import digest, proposer_globals, write_json
+from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, digest, proposer_globals, topology_name, topology_world_size, write_json
 from vllm_bench.mtp_profile.mtp_state import cache_views, runner_state, save_state, versions
 
 
@@ -65,12 +65,9 @@ def attach(runner):
         raise ValueError("Invalid capture limits")
     rank = torch.distributed.get_rank()
     parallel = proposer.vllm_config.parallel_config
-    if parallel.tensor_parallel_size == 8 and parallel.data_parallel_size == 1 and not parallel.enable_expert_parallel:
-        topology = "tp8"
-    elif parallel.tensor_parallel_size == 1 and parallel.data_parallel_size == 8 and parallel.enable_expert_parallel:
-        topology = "dp8-ep8"
-    else:
-        raise ValueError("Recorder supports TP8/DP1 or TP1/DP8/EP8 only")
+    topology = topology_name(parallel.tensor_parallel_size, parallel.data_parallel_size, parallel.enable_expert_parallel)
+    if torch.distributed.get_world_size() != topology_world_size(TOPOLOGIES[topology]):
+        raise ValueError(f"Recorder world size differs from topology {topology}; extra parallel dimensions are unsupported")
 
     @functools.wraps(original)
     def record(*args, **kwargs):
