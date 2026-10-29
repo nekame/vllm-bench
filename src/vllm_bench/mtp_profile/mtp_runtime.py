@@ -44,6 +44,17 @@ def install_standalone_loader(config):
         # the new-style constructor. **kwargs alone triggers its legacy path.
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
+            if ultra:
+                # Full Ultra inference replaces draft's plain embedding through
+                # set_shared_weight(target). Reproduce that module type before
+                # loading the target-shared payload, including its SP interface.
+                from omni_npu.v1.layers.vocab_parallel_embedding import NPUVocabParallelEmbedding
+                hf_config = vllm_config.model_config.hf_config
+                embedding_prefix = f"{prefix}.model.embed_tokens" if prefix else "model.embed_tokens"
+                self.model.embed_tokens = NPUVocabParallelEmbedding(
+                    hf_config.vocab_size, hf_config.hidden_size,
+                    params_dtype=self.model.embed_tokens.weight.dtype,
+                    quant_config=vllm_config.quant_config, prefix=embedding_prefix)
             layers = list(self.model.layers.values())
             head = layers[0].shared_head.head
             for layer in layers[1:]:

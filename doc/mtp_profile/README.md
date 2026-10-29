@@ -63,6 +63,8 @@ python -m vllm_bench.mtp_profile.verify_mtp_checkpoint /data/models/pangu505b-mx
 
 В полном запуске [set_shared_weight](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py#L413) привязывает общие веса target. В standalone используются извлечённые target embedding/lm_head, даже если в checkpoint присутствуют predictor-local дубликаты. Все три predictor head используют один объект общей выходной головы; собственные head norms остаются раздельными. Переименование входных ключей делает локальный adapter загрузчика, исходные файлы OmniInfer не меняются.
 
+Для Ultra standalone также заменяет исходный plain `VocabParallelEmbedding` predictor на `NPUVocabParallelEmbedding` до загрузки весов: в полном запуске такой модуль приходит из target через `set_shared_weight`. Это сохраняет поддержку `enable_scatter` и штатный reduce-scatter при sequence parallelism; параметр не удаляется и не игнорируется. V2 использует свой исходный NPU embedding.
+
 ## Синтетический запуск
 
 Сначала проверьте план — по умолчанию модели и NPU не инициализируются, output не создаётся:

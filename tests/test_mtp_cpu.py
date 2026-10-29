@@ -399,12 +399,28 @@ class LoaderAdapterTests(unittest.TestCase):
     def test_shared_weights_use_target_globals_and_head_is_tied(self):
         registered = {}
 
+        class PlainEmbedding:
+            weight = SimpleNamespace(dtype="bf16")
+
+            def __call__(self, input_ids):
+                return input_ids
+
+        class NPUEmbedding:
+            def __init__(self, num_embeddings, embedding_dim, *, params_dtype, quant_config, prefix):
+                self.settings = (num_embeddings, embedding_dim, params_dtype, quant_config, prefix)
+                self.calls = []
+
+            def __call__(self, input_ids, enable_scatter=False):
+                self.calls.append(enable_scatter)
+                return input_ids
+
         class Base:
             def __init__(self, *, vllm_config, prefix=""):
                 self.received_config = vllm_config
                 self.received_prefix = prefix
                 self.model = SimpleNamespace(layers={str(i): SimpleNamespace(
                     shared_head=SimpleNamespace(head=object())) for i in (50, 51, 52)})
+                self.model.embed_tokens = self.original_embedding = PlainEmbedding()
 
             def load_weights(self, weights):
                 self.loaded = dict(weights)
@@ -412,7 +428,8 @@ class LoaderAdapterTests(unittest.TestCase):
 
         modules = {}
         for path in ("vllm.model_executor.models", "omni_npu.v1.models.pangu.pangu_v2_moe_mtp",
-                     "omni_npu.v1.models.pangu.pangu_ultra_moe_mtp"):
+                     "omni_npu.v1.models.pangu.pangu_ultra_moe_mtp",
+                     "omni_npu.v1.layers.vocab_parallel_embedding"):
             parts = path.split(".")
             for i in range(1, len(parts) + 1):
                 name = ".".join(parts[:i])
@@ -423,6 +440,7 @@ class LoaderAdapterTests(unittest.TestCase):
             register_model=lambda arch, cls: registered.update({arch: cls}))
         modules["omni_npu.v1.models.pangu.pangu_v2_moe_mtp"].OpenPanguV2MTP = Base
         modules["omni_npu.v1.models.pangu.pangu_ultra_moe_mtp"].OpenPanguMTP = Base
+        modules["omni_npu.v1.layers.vocab_parallel_embedding"].NPUVocabParallelEmbedding = NPUEmbedding
         for arch, registered_name in (("OpenPanguV2ForCausalLM", "OpenPanguV2MTPModel"),
                                        ("PanguUltraMoEForCausalLM", "OpenPanguMTPModel")):
             with self.subTest(arch=arch), patch.dict(sys.modules, modules):
@@ -431,11 +449,25 @@ class LoaderAdapterTests(unittest.TestCase):
                 # Exercise vLLM's signature-based argument selection, rather
                 # than directly supplying kwargs the real loader might omit.
                 parameters = inspect.signature(cls.__init__).parameters
-                config, prefix = object(), "draft"
+                config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(vocab_size=8, hidden_size=4)),
+                                         quant_config=object())
+                prefix = "draft"
                 kwargs = {"vllm_config": config, "prefix": prefix} if {"vllm_config", "prefix"} <= parameters.keys() else {}
                 model = cls(**kwargs)
                 self.assertIs(model.received_config, config)
                 self.assertEqual(model.received_prefix, prefix)
+                if arch == "PanguUltraMoEForCausalLM":
+                    self.assertIsInstance(model.model.embed_tokens, NPUEmbedding)
+                    self.assertEqual(model.model.embed_tokens.settings,
+                                     (8, 4, "bf16", config.quant_config, "draft.model.embed_tokens"))
+                    for scatter in (False, True):
+                        tokens = [1, 2]
+                        self.assertIs(model.model.embed_tokens(tokens, enable_scatter=scatter), tokens)
+                    self.assertEqual(model.model.embed_tokens.calls, [False, True])
+                    with self.assertRaises(TypeError):
+                        model.original_embedding([1], enable_scatter=False)
+                else:
+                    self.assertIs(model.model.embed_tokens, model.original_embedding)
                 heads = [layer.shared_head.head for layer in model.model.layers.values()]
                 self.assertTrue(all(head is heads[0] for head in heads))
                 head, embedding, scale, local = object(), object(), object(), object()
