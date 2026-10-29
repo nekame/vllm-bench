@@ -19,8 +19,8 @@ import statistics
 import time
 
 from vllm_bench.mtp_profile.mtp_common import layer_sequence, proposer_globals, validate_record, write_json
-from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, load_state, restore_runner,
-                       runner_state, save_state, versions)
+from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, ensure_draft_token_buffer,
+                       load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
 
 
 def install_standalone_loader(config):
@@ -263,8 +263,9 @@ def initialize_synthetic(runner, proposer, a):
         for row in range(batch):
             runner.input_batch.block_table[gid].add_row(list(range(1 + row * count, 1 + (row + 1) * count)), row)
         runner.input_batch.block_table[gid].commit_block_table(batch)
-    for name in ("num_prompt_tokens", "num_accepted_tokens", "cu_num_draft_tokens"):
-        buf = getattr(runner, name)
+    if proposer.fix_multi_mtp_kvcache:
+        ensure_draft_token_buffer(runner)
+    for name, buf in runner_buffers(runner):
         buf.cpu.zero_()
         buf.cpu[:batch].fill_(a["context_length"] if name == "num_prompt_tokens" else 1 if name == "num_accepted_tokens" else 0)
         buf.copy_to_gpu()

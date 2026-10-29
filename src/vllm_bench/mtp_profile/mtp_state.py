@@ -181,11 +181,36 @@ def copy_tree(destination, source):
         raise ValueError("Cache scalar state mismatch")
 
 
+def ensure_draft_token_buffer(runner, *, dtype=None, size=None):
+    """Standalone initialization/replay only; never invent state in a recorder."""
+    buf = getattr(runner, "cu_num_draft_tokens", None)
+    if buf is None:
+        if dtype is None:
+            import torch
+            dtype = torch.int32
+        buf = runner._make_buffer(runner.max_num_reqs if size is None else size, dtype=dtype)
+        buf.cpu.zero_()
+        buf.copy_to_gpu()
+        runner.cu_num_draft_tokens = buf
+    return buf
+
+
+def runner_buffers(runner):
+    """Required buffers plus the optional multi-MTP cumulative draft counts."""
+    for name in ("num_accepted_tokens", "num_prompt_tokens"):
+        yield name, getattr(runner, name)
+    buf = getattr(runner, "cu_num_draft_tokens", None)
+    if buf is not None:
+        yield "cu_num_draft_tokens", buf
+
+
 def runner_state(runner, group_ids):
     """Mutable runner buffers consumed by patched EagleProposer."""
     result = {"buffers": {}, "block_tables": []}
-    for name in ("num_accepted_tokens", "num_prompt_tokens", "cu_num_draft_tokens"):
-        buf = getattr(runner, name)
+    if (getattr(runner.drafter, "fix_multi_mtp_kvcache", False)
+            and getattr(runner, "cu_num_draft_tokens", None) is None):
+        raise ValueError("fix_multi_mtp_kvcache requires cu_num_draft_tokens before capturing runner state")
+    for name, buf in runner_buffers(runner):
         result["buffers"][name] = {"gpu": buf.gpu, "cpu": buf.cpu}
     for gid in group_ids:
         table = runner.input_batch.block_table[gid]
@@ -203,8 +228,12 @@ def runner_state(runner, group_ids):
 def restore_runner(runner, state):
     import numpy as np
     for name, values in state["buffers"].items():
-        copy_tree(getattr(runner, name).gpu, values["gpu"])
-        copy_tree(getattr(runner, name).cpu, values["cpu"])
+        if name == "cu_num_draft_tokens":
+            buf = ensure_draft_token_buffer(runner, dtype=values["gpu"].dtype, size=values["gpu"].shape[0])
+        else:
+            buf = getattr(runner, name)
+        copy_tree(buf.gpu, values["gpu"])
+        copy_tree(buf.cpu, values["cpu"])
     for gid, values in enumerate(state["block_tables"]):
         table = runner.input_batch.block_table[gid]
         for key, dst in (("gpu", table.block_table.gpu), ("cpu", table.block_table.cpu),

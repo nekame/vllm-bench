@@ -14,6 +14,8 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 Для bootstrap используется HCCL world с отдельными CPU gloo groups, `VLLM_DISTRIBUTED_USE_SPLIT_GROUP=0`: это обходит CUDA-specific требования split-PG validator vLLM к внешнему launcher. Такой вариант инициализации групп нужно учитывать при сравнении с окружением, где split-PG включён.
 
+Буфер `cu_num_draft_tokens` не считается обязательным атрибутом V1 runner. При выключенном `fix_multi_mtp_kvcache` synthetic и snapshot работают без него. Если этот путь включён, standalone создаёт zero-initialized CPU/NPU buffer через `_make_buffer`; replay при необходимости создаёт его и восстанавливает записанные counts. Recorder полного запуска не подставляет нули вместо отсутствующего обязательного состояния.
+
 **На машине разработки выполнены только CPU-проверки. NPU bootstrap, реальная загрузка MXFP8, распределённые collectives, capture/replay и численная эквивалентность ещё требуют server smoke tests.** Наличие реализации этих путей не означает, что они уже прошли аппаратную проверку. При ошибке адаптер прекращает выполнение; dummy attention, случайные веса вместо checkpoint и незаметный переход на eager не используются.
 
 ## Параллелизм и нагрузка

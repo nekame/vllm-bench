@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace, ModuleType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vllm_bench.mtp_profile import mtp_common
 from vllm_bench.layer_profile import prepare_checkpoint
@@ -285,6 +285,9 @@ class StateTests(unittest.TestCase):
         def copy_(self, other):
             self.data[:] = other.data
 
+        def zero_(self):
+            self.data[:] = [0] * len(self.data)
+
     def modules(self):
         class Placeholder:
             pass
@@ -333,6 +336,63 @@ class StateTests(unittest.TestCase):
                 mtp_state.Codec().encode(SimpleNamespace(callback="unserializable"))
         with self.assertRaisesRegex(ValueError, "Unsupported state type"):
             mtp_state.Codec.resolve("os:system")
+
+    def test_snapshot_without_optional_buffer_and_reject_missing_required_state(self):
+        buf = SimpleNamespace(cpu=self.Tensor([1]), gpu=self.Tensor([1]))
+        runner = SimpleNamespace(num_accepted_tokens=buf, num_prompt_tokens=buf,
+                                 drafter=SimpleNamespace(fix_multi_mtp_kvcache=False))
+        state = mtp_state.runner_state(runner, [])
+        self.assertEqual(set(state["buffers"]), {"num_accepted_tokens", "num_prompt_tokens"})
+        runner.drafter.fix_multi_mtp_kvcache = True
+        with self.assertRaisesRegex(ValueError, "requires cu_num_draft_tokens"):
+            mtp_state.runner_state(runner, [])
+
+    def test_replay_allocates_missing_optional_buffer_and_restores_counts(self):
+        buf = SimpleNamespace(cpu=self.Tensor([0, 0], dtype="int32"),
+                              gpu=self.Tensor([0, 0], dtype="int32"))
+        buf.copy_to_gpu = lambda: buf.gpu.copy_(buf.cpu)
+        runner = SimpleNamespace(max_num_reqs=8, _make_buffer=MagicMock(return_value=buf))
+        state = {"buffers": {"cu_num_draft_tokens": {"gpu": self.Tensor([3, 6], dtype="int32"),
+                                                       "cpu": self.Tensor([3, 6], dtype="int32")}},
+                 "block_tables": []}
+        with patch.dict(sys.modules, self.modules()):
+            mtp_state.restore_runner(runner, state)
+        runner._make_buffer.assert_called_once_with(2, dtype="int32")
+        self.assertEqual(runner.cu_num_draft_tokens.gpu.data, [3, 6])
+        self.assertEqual(runner.cu_num_draft_tokens.cpu.data, [3, 6])
+        self.assertIs(mtp_state.ensure_draft_token_buffer(runner), buf)
+        self.assertEqual(runner._make_buffer.call_count, 1)
+
+
+class SyntheticBufferTests(unittest.TestCase):
+    def test_synthetic_bootstrap_with_and_without_multi_mtp_cache_fix(self):
+        for enabled in (False, True):
+            with self.subTest(fix_multi_mtp_kvcache=enabled):
+                proposer = SimpleNamespace(fix_multi_mtp_kvcache=enabled, n_predict=3)
+                optional = SimpleNamespace(cpu=MagicMock(), gpu=MagicMock(), copy_to_gpu=MagicMock())
+                runner = SimpleNamespace(max_model_len=64, max_num_reqs=2,
+                                         kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+                                         num_prompt_tokens=SimpleNamespace(cpu=MagicMock(), copy_to_gpu=MagicMock()),
+                                         num_accepted_tokens=SimpleNamespace(cpu=MagicMock(), copy_to_gpu=MagicMock()),
+                                         input_batch=SimpleNamespace(target_token_ids_cache=MagicMock(),
+                                                                     target_model_hidden_states_cache=MagicMock()),
+                                         _make_buffer=MagicMock(return_value=optional))
+                torch = SimpleNamespace(int32="int32", npu=SimpleNamespace(synchronize=MagicMock()))
+                modules = {"torch": torch, "vllm": ModuleType("vllm"),
+                           "vllm.v1": ModuleType("vllm.v1"),
+                           "vllm.v1.kv_cache_interface": SimpleNamespace(MambaSpec=type("MambaSpec", (), {}))}
+                args = {"batch_per_dp_rank": 1, "context_length": 4, "prefill_chunk": 4, "seed": 1}
+                with patch.dict(sys.modules, modules), patch.object(mtp_runtime, "cache_views", return_value={}), \
+                        patch.object(mtp_runtime, "synthetic_inputs", return_value={}), patch.object(mtp_runtime, "execute") as execute:
+                    mtp_runtime.initialize_synthetic(runner, proposer, args)
+                execute.assert_called_once()
+                if enabled:
+                    runner._make_buffer.assert_called_once_with(2, dtype="int32")
+                    self.assertIs(runner.cu_num_draft_tokens, optional)
+                    optional.cpu.__getitem__.return_value.fill_.assert_called_with(0)
+                else:
+                    runner._make_buffer.assert_not_called()
+                    self.assertFalse(hasattr(runner, "cu_num_draft_tokens"))
 
 
 class LoaderAdapterTests(unittest.TestCase):
