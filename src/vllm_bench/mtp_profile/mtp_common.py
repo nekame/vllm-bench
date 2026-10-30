@@ -30,6 +30,19 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def compilation_input_options(options):
+    """Turn internal PassConfig unset sentinels back into constructor defaults.
+
+    vLLM has bool-annotated pass flags whose defaults are None, but rejects
+    explicit JSON null for some of those fields. Preserve explicit values.
+    """
+    result = dict(options)
+    passes = result.get("pass_config")
+    if isinstance(passes, dict):
+        result["pass_config"] = {key: value for key, value in passes.items() if value is not None}
+    return result
+
+
 def layer_sequence(config, depth):
     start, count = config["num_hidden_layers"], config["num_nextn_predict_layers"]
     if count < 1 or depth < 1:

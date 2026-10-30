@@ -215,7 +215,8 @@ class PlanningTests(unittest.TestCase):
                         "world_size": 8, "complete": True, "depth": 7,
                         "config_sha256": mtp_common.digest(cfg), "versions": {}, "runtime_limits": {},
                         "additional_config": {}, "input_tokens": 1, "batch_per_dp_rank": 1, "padded_tokens": 1,
-                        "compilation_options": {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"},
+                        "compilation_options": {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY",
+                                                "pass_config": {"enable_qk_norm_rope_fusion": None, "enable_sp": False}},
                         "operator_config": json.loads(operator.read_text())}
                 (path / "capture.json").write_text(json.dumps(meta))
             args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp8",
@@ -226,6 +227,8 @@ class PlanningTests(unittest.TestCase):
                 profile_mtp.main(args)
             self.assertEqual(json.loads(stream.getvalue())["options"]["depths"], [7])
             self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["cudagraph_mode"], "FULL_DECODE_ONLY")
+            self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["pass_config"], {"enable_sp": False})
+            self.assertEqual(json.loads(stream.getvalue())["compilation_pass_defaults"], ["enable_qk_norm_rope_fusion"])
             (folder / "rank-007" / "capture.json").unlink()
             with self.assertRaises(OSError):
                 profile_mtp.main(args)
@@ -394,6 +397,37 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
                 self.assertAlmostEqual(summary["proposed_tokens_per_s"], sequences * 3 / (size + 1))
         with self.assertRaisesRegex(ValueError, "Unsupported MTP topology"):
             mtp_common.topology_name(1, 1, True)
+
+
+class CompilationOptionsTests(unittest.TestCase):
+    def test_unset_pass_defaults_are_omitted_without_mutating_source_or_explicit_values(self):
+        passes = {"enable_qk_norm_rope_fusion": None, "enable_sp": False,
+                  "fuse_norm_quant": True, "threshold": 0}
+        original = {"pass_config": passes, "compile_sizes": None,
+                    "inductor_compile_config": {"nullable_option": None}}
+        converted = mtp_common.compilation_input_options(original)
+        self.assertEqual(converted["pass_config"], {"enable_sp": False, "fuse_norm_quant": True, "threshold": 0})
+        self.assertIsNone(passes["enable_qk_norm_rope_fusion"])
+        self.assertIsNone(converted["compile_sizes"])
+        self.assertEqual(converted["inductor_compile_config"], {"nullable_option": None})
+        self.assertEqual(mtp_common.compilation_input_options(converted), converted)
+
+    def test_recorder_exports_constructor_safe_pass_config(self):
+        @dataclass
+        class PassConfig:
+            enable_qk_norm_rope_fusion: bool = None
+            enable_sp: bool = False
+            fuse_norm_quant: bool = True
+
+        cfg = SimpleNamespace(mode=3, cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
+                              backend="inductor", custom_ops=[], splitting_ops=[], compile_sizes=None,
+                              pass_config=PassConfig(), cudagraph_capture_sizes=[8],
+                              cudagraph_num_of_warmups=2, max_cudagraph_capture_size=8,
+                              inductor_compile_config={})
+        result = mtp_capture.compilation_options(cfg)
+        self.assertEqual(result["pass_config"], {"enable_sp": False, "fuse_norm_quant": True})
+        self.assertIsNone(cfg.pass_config.enable_qk_norm_rope_fusion)
+        self.assertEqual(result["cudagraph_mode"], "FULL_DECODE_ONLY")
 
 
 class SharedCacheTests(unittest.TestCase):

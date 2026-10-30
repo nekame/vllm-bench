@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 
-from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, compilation_input_options, layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
 from vllm_bench.mtp_profile.mtp_state import (bind_sampling_runtime, cache_views, copy_tree, ensure_draft_token_buffer,
                        load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
 
@@ -171,7 +171,7 @@ def create_runtime(plan, record=None):
                       enforce_eager=a["execution"] == "eager",
                       enable_chunked_prefill=True,
                       speculative_config=speculative,
-                      compilation_config=plan["compilation_config"],
+                      compilation_config=compilation_input_options(plan["compilation_config"]),
                       additional_config=plan["additional_config"], **limits, **extra_cache)
     cfg = args.create_engine_config()
     if cfg.use_v2_model_runner:

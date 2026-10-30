@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 
-from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, digest, proposer_globals, topology_name, topology_world_size, write_json
+from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, compilation_input_options, digest, proposer_globals, topology_name, topology_world_size, write_json
 from vllm_bench.mtp_profile.mtp_state import recordable_inputs, runner_state, save_state, snapshot_cache_blocks, versions
 
 
@@ -22,7 +22,7 @@ def compilation_options(config):
         value = getattr(config, key)
         result[key] = dataclasses.asdict(value) if dataclasses.is_dataclass(value) else value
     json.dumps(result)  # Reject non-JSON custom compiler callbacks explicitly.
-    return result
+    return compilation_input_options(result)
 
 
 def draft_cache_config(proposer):

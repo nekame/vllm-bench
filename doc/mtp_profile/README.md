@@ -189,6 +189,8 @@ python -m vllm_bench.mtp_profile.profile_mtp \
 
 Topology, HF config, operator config и версии пакетов должны совпадать. Runtime limits, cache settings, sampling options и часть draft environment восстанавливаются из capture. Compilation options и additional config по умолчанию также берутся из записи; можно явно передать отдельную compilation config для сравнения режима исполнения. Eager/compiled/graph применяют свои правила отключения графов поверх этих настроек. Произвольные compiler callbacks в capture не поддержаны.
 
+При экспорте/чтении `pass_config` поля со значением `None` опускаются: некоторые поля vLLM, например `enable_qk_norm_rope_fusion`, имеют внутренний default `None`, но аннотацию `bool`, поэтому повторная передача явного JSON `null` вызывает ошибку Pydantic. Пропуск поля оставляет его штатному механизму defaults; это не принудительное отключение fusion. Явные `true`, `false`, нули и прочие значения сохраняются. Нормализация применяется только к непосредственным полям `pass_config`, не к произвольным вложенным словарям. Launcher обрабатывает и старые capture с `null`; повторная запись не нужна. В launch plan список `compilation_pass_defaults` показывает опущенные поля исходного конфига. Runtime повторяет нормализацию перед `EngineArgs` для совместимости со старыми планами; новые записи сразу экспортируются в этом формате.
+
 Перед таймингами выполняется отдельная численная проверка hidden states/logits и совпадения предложенных tokens. Допуски `--atol` и `--rtol` по умолчанию равны 0.05; для вашей точности/backend их нужно оценить по `comparison-DEPTH.json`. Это не гарантия побитового совпадения MXFP8. При провале проверки timing-прогон прекращается.
 
 ## Границы измерений и результаты
