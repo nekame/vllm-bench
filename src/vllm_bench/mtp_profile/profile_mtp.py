@@ -97,8 +97,8 @@ def main(argv=None):
     else:
         compilation.setdefault("mode", 3)
         compilation.setdefault("cudagraph_mode", "FULL")
-        if compilation["cudagraph_mode"] != "FULL":
-            p.error("Standalone graph mode currently requires cudagraph_mode=FULL")
+        if compilation["cudagraph_mode"] not in ("FULL", "FULL_DECODE_ONLY"):
+            p.error("Standalone graph mode requires cudagraph_mode=FULL or FULL_DECODE_ONLY")
     if a.execution != "eager" and compilation.get("mode") in (0, "NONE", "none"):
         p.error("Compiled/graph execution requires compilation enabled")
     options = vars(a).copy()

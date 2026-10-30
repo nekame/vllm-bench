@@ -115,6 +115,13 @@ def install_standalone_loader(config):
     ModelRegistry.register_model(architecture, StandaloneMTP)
 
 
+def require_full_decode_graph(cfg, stage):
+    from vllm.config import CUDAGraphMode
+    mode = cfg.compilation_config.cudagraph_mode
+    if mode.decode_mode() != CUDAGraphMode.FULL:
+        raise ValueError(f"{stage}: FULL decode graphs required; effective cudagraph_mode={mode}")
+
+
 def create_runtime(plan, record=None):
     import torch
     import torch_npu  # noqa: F401
@@ -177,8 +184,8 @@ def create_runtime(plan, record=None):
         raise ValueError("Draft architecture is not the expected MTP class; refusing model construction")
     if a["execution"] != "eager" and cfg.compilation_config.mode == CompilationMode.NONE:
         raise ValueError("Compilation was disabled by effective platform config")
-    if a["execution"] == "graph" and cfg.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
-        raise ValueError("Effective runtime config does not support requested FULL graph mode")
+    if a["execution"] == "graph":
+        require_full_decode_graph(cfg, "Effective runtime config")
     context = set_current_vllm_config(cfg)
     context.__enter__()
     # torch's world is initialized above, so this only creates vLLM groups and
@@ -229,8 +236,8 @@ def create_runtime(plan, record=None):
         kv_config = synthetic_cache_config(runner, limits, a["batch_per_dp_rank"], max(a["depths"]))
     runner.initialize_kv_cache(kv_config)
     proposer.initialize_attn_backend(kv_config, runner._kernel_block_sizes)
-    if a["execution"] == "graph" and cfg.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
-        raise ValueError("Attention backend downgraded FULL graph mode")
+    if a["execution"] == "graph":
+        require_full_decode_graph(cfg, "Attention backend graph configuration")
     if not proposer.draft_attn_groups:
         raise ValueError("No draft attention groups initialized")
     return runner, proposer, cfg, context

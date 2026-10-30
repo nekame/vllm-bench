@@ -215,15 +215,17 @@ class PlanningTests(unittest.TestCase):
                         "world_size": 8, "complete": True, "depth": 7,
                         "config_sha256": mtp_common.digest(cfg), "versions": {}, "runtime_limits": {},
                         "additional_config": {}, "input_tokens": 1, "batch_per_dp_rank": 1, "padded_tokens": 1,
-                        "compilation_options": {"mode": 3, "cudagraph_mode": "FULL"},
+                        "compilation_options": {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"},
                         "operator_config": json.loads(operator.read_text())}
                 (path / "capture.json").write_text(json.dumps(meta))
             args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp8",
-                    "--input", "replay", "--capture", str(folder), "--output", str(root / "result")]
+                    "--input", "replay", "--capture", str(folder), "--output", str(root / "result"),
+                    "--execution", "graph"]
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
                 profile_mtp.main(args)
             self.assertEqual(json.loads(stream.getvalue())["options"]["depths"], [7])
+            self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["cudagraph_mode"], "FULL_DECODE_ONLY")
             (folder / "rank-007" / "capture.json").unlink()
             with self.assertRaises(OSError):
                 profile_mtp.main(args)
@@ -242,6 +244,26 @@ class PlanningTests(unittest.TestCase):
             with contextlib.redirect_stdout(stream):
                 profile_mtp.main(args + ["--execution", "eager"])
             self.assertEqual(json.loads(stream.getvalue())["compilation_config"], {"mode": 0, "cudagraph_mode": "NONE"})
+
+    def test_graph_config_accepts_full_decode_only_without_rewriting_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+            config = root / "compilation.json"
+            args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp8",
+                    "--compilation-config", str(config), "--output", str(root / "result"), "--execution", "graph"]
+            for mode in ("FULL", "FULL_DECODE_ONLY"):
+                config.write_text(json.dumps({"mode": 3, "cudagraph_mode": mode, "cudagraph_capture_sizes": [8]}))
+                stream = io.StringIO()
+                with contextlib.redirect_stdout(stream):
+                    profile_mtp.main(args)
+                compilation = json.loads(stream.getvalue())["compilation_config"]
+                self.assertEqual(compilation["cudagraph_mode"], mode)
+                self.assertEqual(compilation["cudagraph_capture_sizes"], [8])
+            for mode in ("NONE", "PIECEWISE", "FULL_AND_PIECEWISE"):
+                config.write_text(json.dumps({"mode": 3, "cudagraph_mode": mode}))
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    profile_mtp.main(args)
 
     def test_depths_launch_as_separate_jobs_and_failure_stops_sequence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -754,6 +776,29 @@ class SyntheticBufferTests(unittest.TestCase):
 
 
 class GraphWarmupTests(unittest.TestCase):
+    def test_effective_decode_policy_allows_decode_only_and_rejects_downgrade(self):
+        class Mode(Enum):
+            NONE = 0
+            PIECEWISE = 1
+            FULL = 2
+            FULL_DECODE_ONLY = (2, 0)
+
+            def decode_mode(self):
+                return Mode(self.value[0]) if isinstance(self.value, tuple) else self
+
+        config = ModuleType("vllm.config")
+        config.CUDAGraphMode = Mode
+        cfg = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=Mode.FULL))
+        with patch.dict(sys.modules, {"vllm.config": config}):
+            for mode in (Mode.FULL, Mode.FULL_DECODE_ONLY):
+                cfg.compilation_config.cudagraph_mode = mode
+                mtp_runtime.require_full_decode_graph(cfg, "Effective config")
+                self.assertIs(cfg.compilation_config.cudagraph_mode, mode)
+            for mode in (Mode.NONE, Mode.PIECEWISE):
+                cfg.compilation_config.cudagraph_mode = mode
+                with self.assertRaisesRegex(ValueError, "Attention backend.*FULL decode"):
+                    mtp_runtime.require_full_decode_graph(cfg, "Attention backend")
+
     def test_compilation_precedes_capture_and_every_call_restores_state(self):
         events = []
         wrapped = False
