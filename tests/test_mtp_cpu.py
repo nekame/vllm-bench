@@ -537,6 +537,61 @@ class StateTests(unittest.TestCase):
         self.assertIs(restored["inputs"][0], restored["inputs"][1])
         self.assertEqual(restored["metadata"], (7, None))
 
+    def metadata_module(self):
+        module = ModuleType("vllm.test_mtp_codec")
+        exec("class Metadata:\n"
+             "    def __init__(self):\n"
+             "        self.value = 7\n"
+             "        self.cached = self.compute\n"
+             "        self.factory = self.default\n"
+             "        self.owner = self\n"
+             "    def compute(self):\n"
+             "        return self.value + 1\n"
+             "    @classmethod\n"
+             "    def default(cls):\n"
+             "        return cls.__name__\n", module.__dict__)
+        return module
+
+    def test_bound_methods_self_references_and_shared_objects_roundtrip(self):
+        module = self.metadata_module()
+        value = module.Metadata()
+        with patch.dict(sys.modules, {**self.modules(), module.__name__: module}):
+            encoder = mtp_state.Codec()
+            tree = encoder.encode({"metadata": value, "same": value})
+            restored = mtp_state.Codec(encoder.tensors).decode(json.loads(json.dumps(tree)))
+        metadata = restored["metadata"]
+        self.assertIs(metadata, restored["same"])
+        self.assertIs(metadata.owner, metadata)
+        self.assertIs(metadata.cached.__self__, metadata)
+        self.assertIsNot(metadata.cached.__self__, value)
+        self.assertEqual(metadata.cached(), 8)
+        metadata.value = 20
+        self.assertEqual(metadata.cached(), 21)
+        self.assertEqual(value.cached(), 8)
+        self.assertEqual(metadata.factory(), "Metadata")
+
+    def test_unrecorded_callback_owners_functions_and_overrides_rejected_with_path(self):
+        module = self.metadata_module()
+        value = module.Metadata()
+        other = module.Metadata()
+        callbacks = [other.compute, lambda: 0]
+        def injected(self):
+            return 0
+        from types import MethodType
+        callbacks.append(MethodType(injected, value))
+        with patch.dict(sys.modules, self.modules()):
+            for callback in callbacks:
+                value.cached = callback
+                with self.assertRaisesRegex(TypeError, r"at \$\['inputs'\]\['sampling_metadata'\]\['cached'\]"):
+                    mtp_state.Codec().encode({"inputs": {"sampling_metadata": value}})
+
+    def test_legacy_object_tree_without_ids_still_decodes(self):
+        module = self.metadata_module()
+        tree = {"$object": module.__name__ + ":Metadata", "state": {"$dict": [["value", 9]]}}
+        with patch.dict(sys.modules, {**self.modules(), module.__name__: module}):
+            restored = mtp_state.Codec().decode(tree)
+        self.assertEqual(restored.compute(), 10)
+
     def test_cache_restore_keeps_destination_and_rejects_layout_changes(self):
         destination, source = self.Tensor([0, 0], device="npu:0"), self.Tensor([1, 2])
         with patch.dict(sys.modules, self.modules()):

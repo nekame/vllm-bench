@@ -8,6 +8,7 @@ from __future__ import annotations
 import enum
 import importlib
 import importlib.metadata
+import inspect
 import json
 from pathlib import Path
 
@@ -32,8 +33,19 @@ class Codec:
         self.memo = {}
         self.keepalive = []
         self.reuse_buffers = reuse_buffers
+        self.objects = {}
 
-    def encode(self, value):
+    def encode(self, value, path="$"):
+        try:
+            return self._encode(value, path)
+        except (TypeError, ValueError) as error:
+            if getattr(error, "_mtp_state_path", False):
+                raise
+            annotated = type(error)(f"{error} at {path}")
+            annotated._mtp_state_path = True
+            raise annotated from error
+
+    def _encode(self, value, path):
         import torch
         import numpy as np
         if value is None or type(value) in (bool, str, int, float):
@@ -54,25 +66,52 @@ class Codec:
         if isinstance(value, torch.device):
             return {"$device": str(value)}
         if isinstance(value, torch.Generator):
-            return {"$generator": self.encode(value.get_state()), "device": str(value.device)}
+            return {"$generator": self.encode(value.get_state(), path + ".rng_state"), "device": str(value.device)}
         if isinstance(value, np.ndarray):
-            return {"$numpy": self.encode(torch.from_numpy(value.copy()))}
+            return {"$numpy": self.encode(torch.from_numpy(value.copy()), path + ".numpy_tensor")}
         if isinstance(value, np.generic):
-            return self.encode(value.item())
+            return self.encode(value.item(), path)
         if isinstance(value, enum.Enum):
-            return {"$enum": self.type_name(value), "value": self.encode(value.value)}
+            return {"$enum": self.type_name(value), "value": self.encode(value.value, path + ".value")}
+        if inspect.ismethod(value):
+            owner, name = value.__self__, value.__func__.__name__
+            cls = owner if isinstance(owner, type) else type(owner)
+            owner_type = self.class_name(cls)
+            declared = inspect.getattr_static(cls, name, None)
+            if isinstance(owner, type):
+                if not isinstance(declared, classmethod) or declared.__func__ is not value.__func__:
+                    raise TypeError("Unsupported class-bound method override")
+                return {"$class_method": owner_type, "name": name}
+            if declared is not value.__func__:
+                raise TypeError("Unsupported instance-bound method override")
+            # Do not recursively capture a runner/model hidden behind a callback.
+            if id(owner) not in self.objects:
+                raise TypeError(f"Bound method owner is outside recorded metadata: {owner_type}.{name}")
+            return {"$bound_method": self.objects[id(owner)], "name": name}
+        if callable(value):
+            raise TypeError(f"Unsupported recorded callable: {type(value)}")
         if isinstance(value, dict):
-            return {"$dict": [[self.encode(k), self.encode(v)] for k, v in value.items()]}
+            return {"$dict": [[self.encode(k, path + ".key"),
+                               self.encode(v, f"{path}[{k!r}]" if type(k) in (str, int) else path + ".value")]
+                              for k, v in value.items()]}
         if isinstance(value, (list, tuple, set)):
-            return {"$" + type(value).__name__: [self.encode(x) for x in value]}
+            return {"$" + type(value).__name__: [self.encode(x, f"{path}[{i}]") for i, x in enumerate(value)]}
         if hasattr(value, "__dict__"):
             name = self.type_name(value)
-            return {"$object": name, "state": self.encode(vars(value))}
+            if id(value) in self.objects:
+                return {"$object_ref": self.objects[id(value)]}
+            key = str(len(self.objects))
+            self.objects[id(value)] = key
+            self.keepalive.append(value)
+            return {"$object": name, "id": key, "state": self.encode(vars(value), path)}
         raise TypeError(f"Unsupported recorded state: {type(value)}")
 
     @staticmethod
     def type_name(value):
-        cls = type(value)
+        return Codec.class_name(type(value))
+
+    @staticmethod
+    def class_name(cls):
         if not cls.__module__.startswith(("vllm.", "omni_npu.")) or "<locals>" in cls.__qualname__:
             raise TypeError(f"Unsupported state class: {cls}")
         return cls.__module__ + ":" + cls.__qualname__
@@ -121,6 +160,22 @@ class Codec:
             return self.decode(tree["$numpy"]).cpu().numpy().copy()
         if "$enum" in tree:
             return self.resolve(tree["$enum"])(self.decode(tree["value"]))
+        if "$object_ref" in tree:
+            return self.objects[tree["$object_ref"]]
+        if "$bound_method" in tree or "$class_method" in tree:
+            owner = (self.resolve(tree["$class_method"]) if "$class_method" in tree
+                     else self.objects[tree["$bound_method"]])
+            name = tree["name"]
+            cls = owner if isinstance(owner, type) else type(owner)
+            self.class_name(cls)
+            declared = inspect.getattr_static(cls, name, None)
+            if isinstance(owner, type):
+                if not isinstance(declared, classmethod):
+                    raise ValueError("Recorded class method no longer exists")
+                return declared.__get__(None, cls)
+            if not inspect.isfunction(declared):
+                raise ValueError("Recorded instance method no longer exists")
+            return declared.__get__(owner, cls)
         for name, cls in (("list", list), ("tuple", tuple), ("set", set)):
             if "$" + name in tree:
                 return cls(self.decode(x) for x in tree["$" + name])
@@ -128,6 +183,8 @@ class Codec:
             return {self.decode(k): self.decode(v) for k, v in tree["$dict"]}
         if "$object" in tree:
             obj = object.__new__(self.resolve(tree["$object"]))
+            if "id" in tree:
+                self.objects[tree["id"]] = obj
             for key, value in self.decode(tree["state"]).items():
                 object.__setattr__(obj, key, value)
             return obj

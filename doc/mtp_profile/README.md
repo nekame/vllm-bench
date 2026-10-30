@@ -156,6 +156,8 @@ Cache snapshot содержит **только draft-блоки, перечис�
 
 Recorder добавляет synchronization и CPU copies: времена этого запуска не являются baseline. Stateful penalties, token constraints и объекты metadata, которые нельзя явно сериализовать, отклоняются. Для первого capture используйте greedy sampling без дополнительных logits processors. JSON tree и tensor-only `torch.save` загружаются с `weights_only=True`, без десериализации произвольных pickle-объектов.
 
+Codec сохраняет shared references и self-references обычных metadata-объектов. Bound methods записываются как имя объявленного метода и ссылка на уже записываемый объект; при replay метод привязывается к восстановленному объекту. Объявленные class methods сохраняются ссылкой на класс. Это устраняет ограничение старого codec `Unsupported state class: <class 'method'>` для таких полей. Произвольные функции/lambda и подменённые instance methods не сериализуются. Если callback ссылается на внешний объект, который ещё не записывается, codec останавливается, чтобы не захватить через него runner или модель. Ошибки сериализации включают путь к полю, например `$['inputs']['sampling_metadata']['cached']`; при отказе нужен этот путь, поскольку одно имя типа `method` не определяет источник. Старые object records без reference IDs поддерживаются. Для повторной записи после обновления перезапустите сервер под wrapper и выберите новый output-каталог.
+
 Готовая запись:
 
 ```text
