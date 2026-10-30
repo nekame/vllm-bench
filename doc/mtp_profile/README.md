@@ -176,6 +176,12 @@ Graph-прогрев выполняется в два этапа. Сначала
 
 Trace собирается отдельным повтором, чтобы profiler overhead не попадал в baseline latency. Внутри него CPU ranges `mtp/forward`, `mtp/logits`, `mtp/sampling` помогают ориентироваться; они не являются NPU-временами и не размечают слои внутри replay.
 
+Диапазон `mtp/propose` охватывает **весь** профилируемый вызов proposer и завершающую `torch.npu.synchronize()`: все draft steps, межшаговые Python/ATen-хвосты, logits, sampling, обновление metadata и завершение NPU-работы. Восстановление входов/cache, предшествующий barrier, запуск/остановка профайлера и offline export остаются снаружи. Wall time `trace_cycle_s` измеряется внутри этого диапазона; его длительность на CPU timeline также включает небольшие накладные расходы вызовов часов. Эта метка не является NPU kernel range.
+
+В rank-specific `results.json` сохраняются `trace_cycle_s`, `trace_s_per_proposed_token` (`trace_cycle_s / depth`) и `trace_to_baseline_ratio` (`trace_cycle_s / median_s`). Baseline-поля `latencies_s`, `median_s` и `s_per_proposed_token` по-прежнему относятся к прогонам без профайлера.
+
+В `summary.json` и CSV добавлены `trace_cycle_s` (максимум по ranks), `trace_s_per_proposed_token`, `trace_proposed_tokens_per_s` и `trace_to_baseline_ratio` (отношение к `critical_path_median_s`). JSON дополнительно содержит `per_rank_trace_cycle_s`. Так можно сравнить полный trace-цикл с baseline, а не интервал между соседними logits-matmul со средним временем на токен. Это сравнение одного профилируемого вызова с медианой baseline, а не изолированное измерение overhead профайлера. Старые результаты без trace timing можно агрегировать как раньше; смешивать ranks с наличием и отсутствием этого поля нельзя.
+
 `--diagnostic-stages` дополнительно выполняет отдельный запуск с synchronization на границах частей. Его результаты хранятся отдельно от baseline; сумма частей не обязана равняться времени обычного цикла из-за потери перекрытия.
 
 Результаты включают:

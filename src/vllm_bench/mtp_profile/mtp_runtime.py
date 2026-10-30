@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 
-from vllm_bench.mtp_profile.mtp_common import layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
 from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, ensure_draft_token_buffer,
                        load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
 
@@ -475,6 +475,17 @@ def compare(reference, actual, atol, rtol):
     return result
 
 
+def trace_propose(runner, proposer, inputs, graph, template=None):
+    """Whole profiled cycle, including all inter-step work and NPU drain."""
+    import torch
+    with torch.autograd.profiler.record_function("mtp/propose"):
+        start = time.perf_counter()
+        result = execute(runner, proposer, inputs, graph, template)
+        torch.npu.synchronize()
+        elapsed = time.perf_counter() - start
+    return result, elapsed
+
+
 def run(plan):
     a = plan["options"]
     if a["execution"] == "graph":
@@ -585,8 +596,9 @@ def run(plan):
                         profiler_level=torch_npu.profiler.ProfilerLevel.Level1))
                 with profiler:
                     with observe(proposer):
-                        execute(runner, proposer, call_inputs, graph, template)
+                        torch.distributed.barrier()
                         torch.npu.synchronize()
+                        _, trace_cycle_s = trace_propose(runner, proposer, call_inputs, graph, template)
                 diagnostic = None
                 if a["diagnostic_stages"]:
                     call_inputs = restore()
@@ -599,6 +611,9 @@ def run(plan):
                 results.append({"depth": depth, "layer_sequence": layer_sequence(plan["config"], depth),
                                 "latencies_s": latencies, "median_s": statistics.median(latencies),
                                 "s_per_proposed_token": statistics.median(latencies) / depth,
+                                "trace_cycle_s": trace_cycle_s,
+                                "trace_s_per_proposed_token": trace_cycle_s / depth,
+                                "trace_to_baseline_ratio": trace_cycle_s / statistics.median(latencies),
                                 "tokens_shape": list(tokens.shape), "diagnostic_stage_s": diagnostic,
                                 "memory_allocated_bytes": torch.npu.memory_allocated(),
                                 "memory_reserved_bytes": torch.npu.memory_reserved(),
@@ -626,14 +641,25 @@ def aggregate(plan):
         critical = [max(rank[index]["latencies_s"][j] for rank in ranks) for j in range(a["repeats"])]
         seconds = statistics.median(critical)
         batch = plan["total_sequences"]
-        summary.append({"depth": depth, "critical_path_median_s": seconds,
+        row = {"depth": depth, "critical_path_median_s": seconds,
                         "total_sequences": batch, "proposed_tokens_per_s": batch * depth / seconds,
-                        "per_rank_median_s": [rank[index]["median_s"] for rank in ranks]})
+                        "per_rank_median_s": [rank[index]["median_s"] for rank in ranks]}
+        have_trace = ["trace_cycle_s" in rank[index] for rank in ranks]
+        if any(have_trace) and not all(have_trace):
+            raise ValueError("Trace cycle timing is missing on some ranks")
+        if all(have_trace):
+            trace_times = [rank[index]["trace_cycle_s"] for rank in ranks]
+            trace_seconds = max(trace_times)
+            row.update(trace_cycle_s=trace_seconds, trace_s_per_proposed_token=trace_seconds / depth,
+                       trace_proposed_tokens_per_s=batch * depth / trace_seconds,
+                       trace_to_baseline_ratio=trace_seconds / seconds,
+                       per_rank_trace_cycle_s=trace_times)
+        summary.append(row)
     write_json(output / "summary.json", summary)
     with (output / "summary.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["depth", "critical_path_median_s", "total_sequences", "proposed_tokens_per_s"])
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS)
         writer.writeheader()
-        writer.writerows({k: row[k] for k in writer.fieldnames} for row in summary)
+        writer.writerows({k: row.get(k) for k in writer.fieldnames} for row in summary)
 
 
 def main():

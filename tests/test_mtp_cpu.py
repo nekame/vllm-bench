@@ -1,5 +1,6 @@
 """Standalone MTP CPU checks: no torch, vLLM, torch_npu or hardware imports."""
 import contextlib
+import csv
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
@@ -533,6 +534,72 @@ class GraphWarmupTests(unittest.TestCase):
             setup.assert_not_called()
             self.assertEqual(execute.call_count, 2)
             self.assertTrue(all(call.args[3] is False for call in execute.call_args_list))
+
+
+class TraceCycleTests(unittest.TestCase):
+    def test_range_and_wall_timer_include_propose_and_npu_drain(self):
+        events = []
+
+        @contextlib.contextmanager
+        def record(name):
+            events.append(("enter", name))
+            try:
+                yield
+            finally:
+                events.append(("exit", name))
+
+        times = iter([10.0, 10.009])
+
+        def clock():
+            events.append("clock")
+            return next(times)
+
+        token_ids = object()
+        torch = SimpleNamespace(autograd=SimpleNamespace(profiler=SimpleNamespace(record_function=record)),
+                                npu=SimpleNamespace(synchronize=lambda: events.append("npu-drain")))
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(mtp_runtime.time, "perf_counter", side_effect=clock), \
+                patch.object(mtp_runtime, "execute", side_effect=lambda *args: events.append("propose") or token_ids) as execute:
+            result, elapsed = mtp_runtime.trace_propose("runner", "proposer", {"inputs": 1}, True, "template")
+        self.assertIs(result, token_ids)
+        self.assertAlmostEqual(elapsed, 0.009)
+        self.assertEqual(events, [("enter", "mtp/propose"), "clock", "propose", "npu-drain", "clock", ("exit", "mtp/propose")])
+        execute.assert_called_once_with("runner", "proposer", {"inputs": 1}, True, "template")
+
+    def test_summary_keeps_baseline_and_reports_profiled_critical_path(self):
+        for topology in ("tp1", "dp8-ep8"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                settings = mtp_common.TOPOLOGIES[topology]
+                size = 1 if topology == "tp1" else 8
+                for rank in range(size):
+                    folder = root / f"rank-{rank:03d}"
+                    folder.mkdir()
+                    baseline = 0.007289 + rank * 0.001
+                    trace = 0.009 + rank * 0.002
+                    (folder / "results.json").write_text(json.dumps([{
+                        "latencies_s": [baseline - 0.001, baseline, baseline + 0.001],
+                        "median_s": baseline, "trace_cycle_s": trace}]))
+                plan = {"topology": settings, "total_sequences": settings["dp"],
+                        "options": {"output": str(root), "depths": [7], "repeats": 3}}
+                mtp_runtime.aggregate(plan)
+                result = json.loads((root / "summary.json").read_text())[0]
+                baseline, trace = 0.007289 + (size - 1) * 0.001, 0.009 + (size - 1) * 0.002
+                self.assertAlmostEqual(result["critical_path_median_s"], baseline)
+                self.assertAlmostEqual(result["proposed_tokens_per_s"], settings["dp"] * 7 / baseline)
+                self.assertAlmostEqual(result["trace_cycle_s"], trace)
+                self.assertAlmostEqual(result["trace_s_per_proposed_token"], trace / 7)
+                self.assertAlmostEqual(result["trace_proposed_tokens_per_s"], settings["dp"] * 7 / trace)
+                self.assertAlmostEqual(result["trace_to_baseline_ratio"], trace / baseline)
+                self.assertEqual(len(result["per_rank_trace_cycle_s"]), size)
+                with (root / "summary.csv").open() as stream:
+                    row = next(csv.DictReader(stream))
+                self.assertAlmostEqual(float(row["trace_cycle_s"]), trace)
+                if size > 1:
+                    data = json.loads((root / "rank-000/results.json").read_text())
+                    del data[0]["trace_cycle_s"]
+                    (root / "rank-000/results.json").write_text(json.dumps(data))
+                    with self.assertRaisesRegex(ValueError, "missing on some ranks"):
+                        mtp_runtime.aggregate(plan)
 
 
 class DiagnosticConfigTests(unittest.TestCase):

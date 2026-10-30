@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, checkpoint_config, layer_sequence, topology_world_size, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, TOPOLOGIES, checkpoint_config, layer_sequence, topology_world_size, validate_record, write_json
 from vllm_bench.common.runtime_env import RESET_ENV, instrumentation_pythonpath
 
 
@@ -172,10 +172,10 @@ def main(argv=None):
         summaries.extend(json.loads((folder / "summary.json").read_text()))
     write_json(output / "summary.json", summaries)
     with (output / "summary.csv").open("w", newline="") as stream:
-        fields = ["depth", "critical_path_median_s", "total_sequences", "proposed_tokens_per_s"]
+        fields = SUMMARY_FIELDS
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
-        writer.writerows({k: row[k] for k in fields} for row in summaries)
+        writer.writerows({k: row.get(k) for k in fields} for row in summaries)
     return 0
 
 

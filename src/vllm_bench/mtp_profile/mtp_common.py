@@ -10,6 +10,10 @@ TOPOLOGIES = {"tp1": {"tp": 1, "dp": 1, "ep": False},
               "tp8": {"tp": 8, "dp": 1, "ep": False},
               "dp8-ep8": {"tp": 1, "dp": 8, "ep": True}}
 
+SUMMARY_FIELDS = ("depth", "critical_path_median_s", "total_sequences", "proposed_tokens_per_s",
+                  "trace_cycle_s", "trace_s_per_proposed_token", "trace_proposed_tokens_per_s",
+                  "trace_to_baseline_ratio")
+
 
 def topology_world_size(topology):
     return topology["tp"] * topology["dp"]
