@@ -353,12 +353,16 @@ def execute(runner, proposer, inputs, graph, template=None):
     return proposer.propose(**inputs)
 
 
-def setup_graphs(proposer, cfg, token_count):
-    import torch
-    from vllm.config import CUDAGraphMode
-    from omni_npu.compilation.acl_graph import ACLGraphWrapper, set_graph_params
+def prepare_graph_state(cfg, token_count):
+    from omni_npu.compilation.acl_graph import set_graph_params
     sizes = set(cfg.compilation_config.cudagraph_capture_sizes or []) | {token_count}
     set_graph_params(sizes)
+
+
+def setup_graphs(proposer, cfg):
+    import torch
+    from vllm.config import CUDAGraphMode
+    from omni_npu.compilation.acl_graph import ACLGraphWrapper
     stream = torch.npu.Stream()
     model = proposer.model
 
@@ -389,6 +393,26 @@ def setup_graphs(proposer, cfg, token_count):
                                    attn_layer_names=[n for n in proposer.attn_layer_names if model.get_spec_layer(n) == int(index)])
         for index, layer in model.model.layers.items()}
     return list(model.model.wrapped_layers.values())
+
+
+def warmup_execution(runner, proposer, cfg, restore, *, graph, token_count, warmup, template=None):
+    """Compile on FULL metadata before attaching any lazy-capture wrappers."""
+    import torch
+    wrappers = None
+    if graph:
+        prepare_graph_state(cfg, token_count)
+        # NONE would bypass compilation in omni_npu.compilation.decorators.
+        # FULL without ACLGraphWrapper activates compilation without capture.
+        for _ in range(warmup):
+            inputs = restore()
+            execute(runner, proposer, inputs, True, template)
+            torch.npu.synchronize()
+        wrappers = setup_graphs(proposer, cfg)
+    for _ in range(warmup + (1 if graph else 0)):
+        inputs = restore()
+        execute(runner, proposer, inputs, graph, template)
+        torch.npu.synchronize()
+    return wrappers
 
 
 @contextmanager
@@ -452,9 +476,12 @@ def compare(reference, actual, atol, rtol):
 
 
 def run(plan):
+    a = plan["options"]
+    if a["execution"] == "graph":
+        os.environ["VLLM_USE_AOT_COMPILE"] = "0"
     import torch
     import torch_npu  # noqa: F401
-    a = plan["options"]
+    from vllm.compilation.counter import compilation_counter
     if not versions()["vllm"].startswith("0.25.1"):
         raise RuntimeError("Standalone private-API adapter targets vLLM 0.25.1; use its OmniInfer environment")
     rank = int(os.environ["RANK"])
@@ -485,12 +512,12 @@ def run(plan):
                 # Keep baseline on CPU; only copy into existing device allocations.
                 baseline = load_state(output / "baseline", "cpu")
             graph = a["execution"] == "graph"
-            graph_wrappers = None
             results = []
             effective = {"versions": versions(), "compilation": str(cfg.compilation_config),
                          "parallel": str(cfg.parallel_config), "model_class": type(proposer.model).__name__,
                          "attention_layers": proposer.attn_layer_names,
                          "target_weights_loaded": False, "npu_validation": "executing"}
+            effective["runtime_environment"] = {"VLLM_USE_AOT_COMPILE": os.environ.get("VLLM_USE_AOT_COMPILE")}
             from omni_npu.model_config.config_loader.loader import model_extra_config
             effective["operator_config"] = diagnostic_config(model_extra_config)
             write_json(output / "effective_config.json", effective)
@@ -521,16 +548,14 @@ def run(plan):
                 template = None
                 if record:
                     template = load_state(Path(a["capture"]) / f"rank-{rank:03d}" / "before", runner.device, fields={"batch_execution"})["batch_execution"]
-                if graph and graph_wrappers is None:
-                    graph_wrappers = setup_graphs(proposer, cfg, template[1].num_tokens if template else inputs["target_token_ids"].numel())
-                # Capture is lazy in ACLGraphWrapper; prime all required heads.
-                for _ in range(a["warmup"] + (1 if graph else 0)):
-                    call_inputs = restore()
-                    execute(runner, proposer, call_inputs, graph, template)
-                    torch.npu.synchronize()
+                graph_wrappers = warmup_execution(
+                    runner, proposer, cfg, restore, graph=graph,
+                    token_count=template[1].num_tokens if template else inputs["target_token_ids"].numel(),
+                    warmup=a["warmup"], template=template)
                 if graph and not any(w.concrete_aclgraph_entries for w in graph_wrappers):
                     raise ValueError("Requested graph mode produced no captured ACL graphs")
                 graph_counts = [len(w.concrete_aclgraph_entries) for w in graph_wrappers] if graph else None
+                backend_compilations = compilation_counter.num_backend_compilations
                 if reference:
                     call_inputs = restore()
                     with observe(proposer, references=True) as (_, actual):
@@ -569,6 +594,8 @@ def run(plan):
                         execute(runner, proposer, call_inputs, graph, template)
                 if graph and graph_counts != [len(w.concrete_aclgraph_entries) for w in graph_wrappers]:
                     raise ValueError("New ACL graph capture occurred after warmup; timings are invalid")
+                if graph and compilation_counter.num_backend_compilations != backend_compilations:
+                    raise ValueError("Backend compilation occurred after graph warmup; timings are invalid")
                 results.append({"depth": depth, "layer_sequence": layer_sequence(plan["config"], depth),
                                 "latencies_s": latencies, "median_s": statistics.median(latencies),
                                 "s_per_proposed_token": statistics.median(latencies) / depth,
@@ -577,6 +604,7 @@ def run(plan):
                                 "memory_reserved_bytes": torch.npu.memory_reserved(),
                                 "peak_memory_allocated_bytes": torch.npu.max_memory_allocated(),
                                 "graph_entry_counts": graph_counts,
+                                "backend_compilations_after_warmup": backend_compilations,
                                 "synthetic": record is None})
             write_json(output / "results.json", results)
             torch.distributed.barrier()

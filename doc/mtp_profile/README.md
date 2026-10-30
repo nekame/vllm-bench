@@ -99,6 +99,8 @@ python -m vllm_bench.mtp_profile.profile_mtp \
 
 В режиме `compiled` компиляция сохраняется, а `cudagraph_mode` становится `NONE`. В `graph` используется `FULL` и реальные `ACLGraphWrapper` для predictor-слоёв. Передать целевые настройки можно через `--compilation-config /data/config/compilation.json`; содержимое — JSON object vLLM CompilationConfig. При необходимости передайте также исходный `--additional-config` и `--patches`.
 
+Standalone `graph` устанавливает `VLLM_USE_AOT_COMPILE=0` до импорта runtime: используется JIT-путь `torch.compile` с теми же выбранными backend/passes, а ACL Graph остаётся включённым. Это учитывает OmniInfer fallback-компиляцию для фактического range/stride: AOT-путь vLLM запрещает backend-компиляцию внутри своего initial profiling run. Проверка vLLM не отключается. Значение переменной сохраняется в launch plan и effective config; для `eager` и `compiled` launcher её не переопределяет. Это настройка standalone-процесса, исходники установленного OmniInfer/vLLM не меняются. См. [vLLM monitor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/compilation/monitor.py) и [выбор AOT/JIT в decorator](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/compilation/decorators.py).
+
 ```bash
 python -m vllm_bench.mtp_profile.profile_mtp \
   --model /data/models/pangu505b-mxfp8-mtp \
@@ -170,7 +172,7 @@ Topology, HF config, operator config и версии пакетов должны
 
 Перед каждым повтором восстанавливаются одинаковые cache, metadata и входы; device input buffers переиспользуются. Восстановление, disk I/O и межранговый barrier находятся вне измеряемого интервала. Wall time измеряется до завершения NPU-работы всего draft-цикла, без промежуточных synchronization между forward/logits/sampling.
 
-Graph capture и прогрев выполняются до измерений. Проверяются стабильность device pointers/layout входов и отсутствие новых graph entries после прогрева. При нарушении вместо потенциально неверного профиля будет ошибка; автоматического eager fallback нет. Такой отказ на сервере требует разбора соответствующего private-API/graph пути.
+Graph-прогрев выполняется в два этапа. Сначала реальные draft-вызовы идут с metadata режима `FULL`, но без ACLGraphWrapper, чтобы JIT-компиляция завершилась вне capture. Режим `NONE` для этого не подходит: OmniInfer обходит в нём компиляцию. Затем подключаются graph-обёртки и выполняются lazy capture и прогрев replay. Оба этапа завершаются до измерений, состояние восстанавливается перед каждым вызовом. Проверяются стабильность device pointers/layout входов, отсутствие новых graph entries и backend-компиляций после прогрева. При нарушении вместо потенциально неверного профиля будет ошибка; автоматического eager fallback нет. Такой отказ на сервере требует разбора соответствующего private-API/graph пути. Сообщение vLLM про initial profiling run относится к его внутреннему этапу компиляции/прогрева и само по себе не означает ошибку экспорта torch_npu trace.
 
 Trace собирается отдельным повтором, чтобы profiler overhead не попадал в baseline latency. Внутри него CPU ranges `mtp/forward`, `mtp/logits`, `mtp/sampling` помогают ориентироваться; они не являются NPU-временами и не размечают слои внутри replay.
 

@@ -109,6 +109,7 @@ def main(argv=None):
             "compilation_config": compilation, "additional_config": additional, "patches": patches,
             "expected_layers": {str(d): layer_sequence(config, d) for d in a.depths},
             "capture_metadata": replay_meta,
+            "runtime_environment": {"VLLM_USE_AOT_COMPILE": "0"} if a.execution == "graph" else {},
             "total_sequences": a.batch_per_dp_rank * TOPOLOGIES[a.topology]["dp"],
             "server_started": False, "target_weights_loaded": False,
             "validation": "CPU planning only; NPU execution requires server validation"}
@@ -147,6 +148,9 @@ def main(argv=None):
     # Use Omni's HCCL + separate gloo groups. vLLM's split-PG validation assumes
     # an externally initialized CUDA device-bound default group.
     env["VLLM_DISTRIBUTED_USE_SPLIT_GROUP"] = "0"
+    # Omni's exact-range/stride fallback may compile on the first real call.
+    # vLLM AOT profiling forbids that; use its JIT path, keeping torch.compile.
+    env.update(plan["runtime_environment"])
     commands, summaries = [], []
     # Speculative depth affects buffer/cache sizes, not just the proposer loop.
     # Separate jobs preserve the configured-depth semantics of real deployments.

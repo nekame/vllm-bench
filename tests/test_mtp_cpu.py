@@ -163,6 +163,7 @@ class PlanningTests(unittest.TestCase):
                     self.assertEqual(plan["total_sequences"], 8 if topology == "dp8-ep8" else 1)
                     self.assertEqual(plan["expected_layers"]["7"], [50] * 7)
                     self.assertFalse(plan["target_weights_loaded"])
+                    self.assertEqual(plan["runtime_environment"], {"VLLM_USE_AOT_COMPILE": "0"} if execution == "graph" else {})
 
     def test_wrong_capture_topology_and_config_fail(self):
         cfg = {"num_hidden_layers": 50}
@@ -301,11 +302,32 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
                 profile_mtp.main(args)
+
             self.assertEqual(json.loads(stream.getvalue())["options"]["depths"], [3])
             meta["world_size"] = 8
             path.write_text(json.dumps(meta))
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 profile_mtp.main(args)
+
+    def test_graph_launcher_selects_jit_without_disabling_compilation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+            for mode in ("graph", "compiled", "eager"):
+                def launch(command, **kwargs):
+                    plan = json.loads(Path(command[-1]).read_text())
+                    self.assertEqual(kwargs["env"]["VLLM_USE_AOT_COMPILE"], "0" if mode == "graph" else "1")
+                    self.assertEqual(plan["compilation_config"]["mode"], 0 if mode == "eager" else 3)
+                    row = {"depth": 3, "critical_path_median_s": 0.1,
+                           "total_sequences": 1, "proposed_tokens_per_s": 30}
+                    (Path(plan["options"]["output"]) / "summary.json").write_text(json.dumps([row]))
+                    return SimpleNamespace(returncode=0)
+
+                with self.subTest(mode=mode), patch.dict("os.environ", {"VLLM_USE_AOT_COMPILE": "1"}), \
+                        patch.object(subprocess, "run", side_effect=launch), contextlib.redirect_stdout(io.StringIO()):
+                    profile_mtp.main(["--model", str(model), "--operator-config", str(operator),
+                                      "--topology", "tp1", "--depths", "3", "--execution", mode,
+                                      "--output", str(root / mode), "--execute"])
 
     def test_recorder_topology_detection_and_summary_rank_count(self):
         for name, settings in mtp_common.TOPOLOGIES.items():
@@ -464,6 +486,53 @@ class SyntheticBufferTests(unittest.TestCase):
                 else:
                     runner._make_buffer.assert_not_called()
                     self.assertFalse(hasattr(runner, "cu_num_draft_tokens"))
+
+
+class GraphWarmupTests(unittest.TestCase):
+    def test_compilation_precedes_capture_and_every_call_restores_state(self):
+        events = []
+        wrapped = False
+        torch = SimpleNamespace(npu=SimpleNamespace(synchronize=lambda: events.append("sync")))
+
+        def restore():
+            events.append("restore")
+            return {}
+
+        def execute(runner, proposer, inputs, graph, template):
+            self.assertTrue(graph)
+            events.append("capture/replay" if wrapped else "compile")
+
+        def setup(proposer, cfg):
+            nonlocal wrapped
+            wrapped = True
+            events.append("attach")
+            return ["wrapper"]
+
+        with patch.dict(sys.modules, {"torch": torch}), \
+                patch.object(mtp_runtime, "prepare_graph_state", side_effect=lambda *args: events.append("graph-state")), \
+                patch.object(mtp_runtime, "setup_graphs", side_effect=setup), \
+                patch.object(mtp_runtime, "execute", side_effect=execute):
+            wrappers = mtp_runtime.warmup_execution(None, None, None, restore, graph=True, token_count=1, warmup=2)
+        self.assertEqual(wrappers, ["wrapper"])
+        self.assertEqual(events, ["graph-state"] + ["restore", "compile", "sync"] * 2
+                         + ["attach"] + ["restore", "capture/replay", "sync"] * 3)
+
+    def test_compile_failure_does_not_start_capture_and_non_graph_uses_plain_warmup(self):
+        torch = SimpleNamespace(npu=SimpleNamespace(synchronize=MagicMock()))
+        with patch.dict(sys.modules, {"torch": torch}), \
+                patch.object(mtp_runtime, "prepare_graph_state"), patch.object(mtp_runtime, "setup_graphs") as setup, \
+                patch.object(mtp_runtime, "execute", side_effect=RuntimeError("compiler failed")):
+            with self.assertRaisesRegex(RuntimeError, "compiler failed"):
+                mtp_runtime.warmup_execution(None, None, None, lambda: {}, graph=True, token_count=1, warmup=2)
+            setup.assert_not_called()
+        with patch.dict(sys.modules, {"torch": torch}), \
+                patch.object(mtp_runtime, "prepare_graph_state") as prepare, patch.object(mtp_runtime, "setup_graphs") as setup, \
+                patch.object(mtp_runtime, "execute") as execute:
+            self.assertIsNone(mtp_runtime.warmup_execution(None, None, None, lambda: {}, graph=False, token_count=1, warmup=2))
+            prepare.assert_not_called()
+            setup.assert_not_called()
+            self.assertEqual(execute.call_count, 2)
+            self.assertTrue(all(call.args[3] is False for call in execute.call_args_list))
 
 
 class DiagnosticConfigTests(unittest.TestCase):
