@@ -23,6 +23,7 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint
 from vllm_bench.mtp_profile import profile_mtp
 from vllm_bench.mtp_profile import record_mtp
 from vllm_bench.mtp_profile import mtp_state
+from vllm_bench.mtp_profile import mtp_capture
 from vllm_bench.mtp_profile import mtp_runtime
 from vllm_bench.mtp_profile import verify_mtp_checkpoint
 
@@ -371,6 +372,121 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
                 self.assertAlmostEqual(summary["proposed_tokens_per_s"], sequences * 3 / (size + 1))
         with self.assertRaisesRegex(ValueError, "Unsupported MTP topology"):
             mtp_common.topology_name(1, 1, True)
+
+
+class SharedCacheTests(unittest.TestCase):
+    class Tensor:
+        def __init__(self, data, dtype="bf16", device="cpu", shape=None):
+            self.data, self.dtype, self.device = data, dtype, device
+            self.shape = shape or ((len(data), len(data[0])) if data and isinstance(data[0], list) else (len(data),))
+
+        def __getitem__(self, key):
+            if isinstance(key, tuple):
+                return type(self)(self.data[key[0]][key[1]], self.dtype, self.device)
+            if isinstance(key, slice):
+                rows = self.data[key]
+                return type(self)(rows, self.dtype, self.device, (len(rows), *self.shape[1:]))
+            return type(self)(self.data[key], self.dtype, self.device)
+
+        def numel(self):
+            result = 1
+            for n in self.shape:
+                result *= n
+            return result
+
+        def element_size(self):
+            return 8 if self.dtype == "int64" else 2
+
+        def tolist(self):
+            return self.data
+
+        def to(self, device):
+            return self
+
+        def cpu(self):
+            return self
+
+        def detach(self):
+            return self
+
+        def copy_(self, source):
+            for dst, src in zip(self.data, source.data):
+                dst[:] = src
+
+        def zero_(self):
+            for row in self.data:
+                row[:] = [0] * len(row)
+
+        def index_select(self, dim, indices):
+            assert dim == 0
+            return type(self)([self.data[i][:] for i in indices.data], self.dtype, self.device,
+                              (len(indices.data), *self.shape[1:]))
+
+        def index_copy_(self, dim, indices, values):
+            assert dim == 0
+            for i, row in zip(indices.data, values.data):
+                self.data[i][:] = row
+
+    def test_hybrid_shared_allocations_become_independent_without_mutating_runner(self):
+        original = SimpleNamespace(num_blocks=4, kv_cache_groups=[
+            SimpleNamespace(layer_names=["target"]), SimpleNamespace(layer_names=["draft.a"]),
+            SimpleNamespace(layer_names=["draft.b"])], kv_cache_tensors=[
+                SimpleNamespace(size=4096, shared_by=["target", "draft.a", "draft.b"], block_stride=0, offset=0)])
+        proposer = SimpleNamespace(runner=SimpleNamespace(kv_cache_config=original),
+                                   attn_layer_names=["draft.a", "draft.b"])
+        config, gids = mtp_capture.draft_cache_config(proposer)
+        self.assertEqual(gids, [1, 2])
+        self.assertEqual([t.shared_by for t in config.kv_cache_tensors], [["draft.a"], ["draft.b"]])
+        self.assertEqual([t.size for t in config.kv_cache_tensors], [4096, 4096])
+        self.assertEqual(original.kv_cache_tensors[0].shared_by, ["target", "draft.a", "draft.b"])
+        self.assertEqual(original.kv_cache_groups[0].layer_names, ["target"])
+        original.kv_cache_tensors[0].block_stride = 64
+        with self.assertRaisesRegex(ValueError, "Packed"):
+            mtp_capture.draft_cache_config(proposer)
+
+    def fixture(self):
+        # Blocks 0/1 contain unrelated data; the inactive second row references 1.
+        value = self.Tensor([[90, 91], [100, 101], [20, 21], [30, 31]], device="npu:0")
+        table = SimpleNamespace(num_blocks_per_row=[3, 1],
+                                block_table=SimpleNamespace(cpu=self.Tensor([[2, 0, 3], [1, 0, 0]], "int32")))
+        proposer = SimpleNamespace(runner=SimpleNamespace(
+            kv_cache_config=SimpleNamespace(num_blocks=4, kv_cache_groups=[SimpleNamespace(layer_names=["draft"])]),
+            input_batch=SimpleNamespace(block_table=[table])))
+        torch = SimpleNamespace(Tensor=self.Tensor, int64="int64",
+                                tensor=lambda xs, dtype, device: self.Tensor(xs, dtype, device),
+                                empty=lambda shape, dtype, device: self.Tensor(
+                                    [[0] * shape[1] for _ in range(shape[0])], dtype, device, shape))
+        return proposer, value, torch
+
+    def test_sparse_capture_omits_target_pages_and_repeated_restore_preserves_ids(self):
+        proposer, value, torch = self.fixture()
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(mtp_state, "cache_views", return_value={"draft": (value,)}):
+            state = mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1024)
+            leaf = state["draft"][0]
+            self.assertEqual(leaf["shape"], [4, 2])
+            self.assertEqual(leaf["indices"].data, [2, 3])
+            self.assertEqual(leaf["values"].data, [[20, 21], [30, 31]])
+            destination = self.Tensor([[9, 9] for _ in range(4)], device="npu:0")
+            for _ in range(2):
+                mtp_state.copy_tree({"draft": (destination,)}, state)
+                self.assertEqual(destination.data, [[0, 0], [0, 0], [20, 21], [30, 31]])
+                destination.data[2][:] = [99, 99]
+            self.assertEqual(value.data[1], [100, 101])
+            with self.assertRaisesRegex(ValueError, "layout mismatch"):
+                mtp_state.copy_tree(self.Tensor([[0, 0]]), leaf)
+
+    def test_sparse_capture_rejects_limit_invalid_ids_and_unknown_layout(self):
+        proposer, value, torch = self.fixture()
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(mtp_state, "cache_views", return_value={"draft": value}):
+            with self.assertRaisesRegex(ValueError, "byte limit"):
+                mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1)
+            proposer.runner.input_batch.block_table[0].block_table.cpu.data[0][0] = 4
+            with self.assertRaisesRegex(ValueError, "block ID"):
+                mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1024)
+            proposer.runner.input_batch.block_table[0].block_table.cpu.data[0][0] = 2
+            value.shape = (2, 4)
+            with self.assertRaisesRegex(ValueError, "block axis"):
+                mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1024)
 
 
 class StateTests(unittest.TestCase):

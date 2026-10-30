@@ -161,9 +161,82 @@ def cache_views(proposer):
     return {name: context[name].kv_cache for name in proposer.attn_layer_names}
 
 
+def snapshot_cache_blocks(proposer, group_ids, batch, limit_bytes):
+    """Capture referenced draft pages, never the backing shared with target.
+
+    Keep original page IDs and full destination shapes; no slot remapping.
+    Supported NPU cache leaves have the physical block on axis zero.
+    """
+    import torch
+    runner = proposer.runner
+    views = cache_views(proposer)
+    result, used = {}, 0
+    for gid in group_ids:
+        group = runner.kv_cache_config.kv_cache_groups[gid]
+        table = runner.input_batch.block_table[gid]
+        if batch > len(table.num_blocks_per_row):
+            raise ValueError("Capture batch exceeds block table rows")
+        ids = set()
+        for row in range(batch):
+            count = int(table.num_blocks_per_row[row])
+            if count < 0 or count > table.block_table.cpu.shape[1]:
+                raise ValueError("Invalid draft block table row length")
+            ids.update(int(x) for x in table.block_table.cpu[row, :count].tolist())
+        # Zero is the reserved null block; negative values are not physical IDs.
+        ids.discard(0)
+        if any(x < 0 or x >= runner.kv_cache_config.num_blocks for x in ids):
+            raise ValueError("Invalid draft block ID")
+        indices = torch.tensor(sorted(ids), dtype=torch.int64, device="cpu")
+
+        def snapshot(value):
+            nonlocal used
+            if isinstance(value, torch.Tensor):
+                if not value.shape or value.shape[0] != runner.kv_cache_config.num_blocks:
+                    raise ValueError(f"Unsupported draft cache block axis: {tuple(value.shape)}")
+                block_bytes = value[0].numel() * value.element_size()
+                used += len(ids) * block_bytes + indices.numel() * indices.element_size()
+                if used > limit_bytes:
+                    raise ValueError("Capture exceeds byte limit; increase PANGU_MTP_CAPTURE_MAX_GIB")
+                values = torch.empty((len(ids), *value.shape[1:]), dtype=value.dtype, device="cpu")
+                # Bounded gather temporary: the full model may fill NPU memory.
+                chunk = max(1, (16 * 1024**2) // max(1, block_bytes))
+                for start in range(0, len(ids), chunk):
+                    selected = indices[start:start + chunk].to(value.device)
+                    values[start:start + chunk].copy_(value.detach().index_select(0, selected).cpu())
+                return {"$mtp_cache_blocks": 1, "shape": list(value.shape),
+                        "indices": indices, "values": values}
+            if isinstance(value, (list, tuple)):
+                return type(value)(snapshot(x) for x in value)
+            raise TypeError(f"Unsupported draft cache container: {type(value)}")
+
+        for name in group.layer_names:
+            if name in views:
+                if name in result:
+                    raise ValueError(f"Draft layer belongs to multiple cache groups: {name}")
+                result[name] = snapshot(views[name])
+    if result.keys() != views.keys():
+        raise ValueError("Draft cache groups do not cover every draft layer")
+    return result
+
+
 def copy_tree(destination, source):
     import torch
     if isinstance(destination, torch.Tensor):
+        if isinstance(source, dict) and source.get("$mtp_cache_blocks") == 1:
+            values, indices = source["values"], source["indices"]
+            if (list(destination.shape) != source["shape"] or destination.dtype != values.dtype
+                    or tuple(values.shape) != (indices.numel(), *destination.shape[1:])
+                    or len(indices.shape) != 1 or indices.dtype != torch.int64):
+                raise ValueError("Sparse cache layout mismatch")
+            destination.zero_()
+            if indices.numel():
+                # Bound transfer temporaries during repeated state restoration.
+                block_bytes = max(1, values[0].numel() * values.element_size())
+                chunk = max(1, (16 * 1024**2) // block_bytes)
+                for start in range(0, indices.numel(), chunk):
+                    destination.index_copy_(0, indices[start:start + chunk].to(destination.device),
+                                            values[start:start + chunk].to(destination.device))
+            return
         if destination.shape != source.shape or destination.dtype != source.dtype:
             raise ValueError(f"Cache layout mismatch: {destination.shape}/{destination.dtype} vs {source.shape}/{source.dtype}")
         destination.copy_(source)
