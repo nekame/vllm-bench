@@ -143,10 +143,11 @@ def create_runtime(plan, record=None):
     # external_launcher must see the complete torchrun world, including DP ranks.
     torch.distributed.init_process_group(backend="hccl", init_method="env://")
     limits = record["runtime_limits"] if record else {
-        "max_model_len": a["context_length"] + max(a["depths"]) + 32,
+        "max_model_len": a["context_length"] + max(a["depths"]) + 32 + (a.get("synthetic_query_length") or 1) - 1,
         "max_num_seqs": a["batch_per_dp_rank"],
         "max_num_batched_tokens": max(a["prefill_chunk"] * a["batch_per_dp_rank"],
-                                      a["batch_per_dp_rank"] * (max(a["depths"]) + 1))}
+                                      a["batch_per_dp_rank"] * max(max(a["depths"]) + 1,
+                                                                  a.get("synthetic_query_length") or 1))}
     cache_settings = record["cache_settings"] if record else {"enable_prefix_caching": False}
     extra_cache = {key: value for key, value in cache_settings.items() if key != "cache_dtype"}
     if "cache_dtype" in cache_settings:
@@ -260,6 +261,16 @@ def greedy_metadata(batch, device):
                             frequency_penalties=zeros, presence_penalties=zeros,
                             repetition_penalties=torch.ones_like(zeros), output_token_ids=[[] for _ in range(batch)],
                             allowed_token_ids_mask=None, bad_words_token_ids={}, logitsprocs=LogitsProcessors())
+
+
+def synthetic_query_length(options, depth, *, n_predict, fix_multi_mtp_kvcache):
+    minimum = depth + 1 if fix_multi_mtp_kvcache and depth <= n_predict else 1
+    length = options.get("synthetic_query_length")
+    if length is None:
+        return minimum
+    if length < minimum:
+        raise ValueError(f"Synthetic query length must be >= {minimum} for depth={depth} and this cache configuration")
+    return length
 
 
 def synthetic_inputs(runner, proposer, start, length, depth, seed):
@@ -539,9 +550,15 @@ def run(plan):
                         raise ValueError("Replay depth must equal the captured depth")
                     reference = load_state(Path(a["capture"]) / f"rank-{rank:03d}" / "reference", "cpu")
                 else:
-                    query_length = depth + 1 if proposer.fix_multi_mtp_kvcache and depth <= proposer.n_predict else 1
+                    query_length = synthetic_query_length(a, depth, n_predict=proposer.n_predict,
+                                                          fix_multi_mtp_kvcache=proposer.fix_multi_mtp_kvcache)
                     inputs = synthetic_inputs(runner, proposer, a["context_length"], query_length, depth, a["seed"])
                     reference = None
+                    effective["synthetic_input"] = {
+                        "query_length": query_length, "batch_per_dp_rank": a["batch_per_dp_rank"],
+                        "input_tokens": inputs["target_token_ids"].numel(),
+                        "descriptor_tokens": inputs["target_token_ids"].numel(), "depth": depth}
+                    write_json(output / "effective_config.json", effective)
                 # Keep CPU encoded inputs: propose mutates metadata and input views.
                 save_state(output / f"inputs-{depth}", inputs)
                 input_buffers = {}

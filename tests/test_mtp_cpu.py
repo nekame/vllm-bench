@@ -166,6 +166,27 @@ class PlanningTests(unittest.TestCase):
                     self.assertFalse(plan["target_weights_loaded"])
                     self.assertEqual(plan["runtime_environment"], {"VLLM_USE_AOT_COMPILE": "0"} if execution == "graph" else {})
 
+    def test_synthetic_query_length_preserves_batch_and_depth_and_rejects_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+            args = ["--model", str(model), "--operator-config", str(operator),
+                    "--topology", "tp8", "--execution", "graph", "--depths", "7",
+                    "--output", str(root / "result"), "--synthetic-query-length", "8"]
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream), patch.object(subprocess, "run") as run:
+                self.assertEqual(profile_mtp.main(args), 0)
+            run.assert_not_called()
+            plan = json.loads(stream.getvalue())
+            self.assertEqual(plan["options"]["synthetic_query_length"], 8)
+            self.assertEqual(plan["options"]["depths"], [7])
+            self.assertEqual(plan["total_sequences"], 1)
+            self.assertFalse((root / "result").exists())
+            for extra in (["--synthetic-query-length", "0"],
+                          ["--input", "replay", "--capture", str(root / "capture")]):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    profile_mtp.main(args + extra)
+
     def test_wrong_capture_topology_and_config_fail(self):
         cfg = {"num_hidden_layers": 50}
         meta = {"format": "pangu-mtp-capture-v1", "topology": "tp8", "config_sha256": mtp_common.digest(cfg)}
@@ -459,6 +480,37 @@ class StateTests(unittest.TestCase):
 
 
 class SyntheticBufferTests(unittest.TestCase):
+    def test_query_length_defaults_and_multi_mtp_minimum(self):
+        for fix in (False, True):
+            for depth in (3, 7):
+                default = 4 if fix and depth == 3 else 1
+                self.assertEqual(mtp_runtime.synthetic_query_length(
+                    {}, depth, n_predict=3, fix_multi_mtp_kvcache=fix), default)
+                self.assertEqual(mtp_runtime.synthetic_query_length(
+                    {"synthetic_query_length": 8}, depth, n_predict=3,
+                    fix_multi_mtp_kvcache=fix), 8)
+        with self.assertRaises(ValueError):
+            mtp_runtime.synthetic_query_length({"synthetic_query_length": 1}, 3,
+                                              n_predict=3, fix_multi_mtp_kvcache=True)
+
+    def test_graph_descriptor_uses_all_input_positions_for_one_sequence(self):
+        config = ModuleType("vllm.config")
+        config.CUDAGraphMode = SimpleNamespace(FULL="FULL", NONE="NONE")
+        context = ModuleType("vllm.forward_context")
+        context.BatchDescriptor = lambda tokens: SimpleNamespace(num_tokens=tokens)
+        runner = SimpleNamespace(vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1)))
+        proposer = SimpleNamespace(propose=MagicMock(return_value="draft"))
+        for tokens in (1, 8):
+            inputs = {"target_token_ids": SimpleNamespace(shape=(tokens,)),
+                      "next_token_ids": SimpleNamespace(shape=(1,)), "num_speculative_tokens": 7}
+            with patch.dict(sys.modules, {"vllm.config": config, "vllm.forward_context": context,
+                                         "torch": ModuleType("torch")}):
+                self.assertEqual(mtp_runtime.execute(runner, proposer, inputs, True), "draft")
+            mode, descriptor, across = runner.batch_execution_and_padding_state
+            self.assertEqual((mode, descriptor.num_tokens, across), ("FULL", tokens, None))
+            proposer.propose.assert_called_with(**inputs)
+
     def test_synthetic_bootstrap_with_and_without_multi_mtp_cache_fix(self):
         for enabled in (False, True):
             with self.subTest(fix_multi_mtp_kvcache=enabled):

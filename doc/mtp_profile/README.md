@@ -97,6 +97,21 @@ python -m vllm_bench.mtp_profile.profile_mtp \
 
 Каждый depth запускается отдельным последовательным torchrun job с собственной загрузкой небольшого MTP-checkpoint и собственными speculative buffers. Это важно: `num_speculative_tokens` влияет на cache и формы буферов, поэтому depth=3 не измеряется с буферами конфигурации depth=7. В replay сохраняется configured depth исходного сервера, даже если записанный вызов запросил меньше токенов.
 
+Для сравнения с полным сервером, где proposer получает `actual=8, padded=8, num_reqs=1`, задайте восемь реальных входных позиций на одну последовательность:
+
+```bash
+python -m vllm_bench.mtp_profile.profile_mtp \
+  --model /data/models/pangu505b-mxfp8-mtp \
+  --operator-config /data/config/operators-tp8.json \
+  --topology tp8 --batch-per-dp-rank 1 --context-length 8192 \
+  --depths 7 --synthetic-query-length 8 --execution graph \
+  --output /data/profile-results/mtp-tp8-q8-graph --execute
+```
+
+При необходимости добавьте прежние `--compilation-config`, `--additional-config` и `--patches`. Параметр `--synthetic-query-length` меняет длину входа измеряемого вызова, а не batch или число предложений: здесь один запрос, вход из восьми позиций, семь выходных draft-токенов. Tokens, positions, hidden states и attention metadata создаются для всех восьми позиций; graph descriptor получает размер 8. В обычной ветке depth=7 этот размер сохраняется для следующих draft-шагов. Позиции начинаются после `--context-length`, поэтому при значении 8192 первый вход занимает позиции 8192–8199. Заполнение истории через `--prefill-chunk` не меняется.
+
+По умолчанию длина остаётся прежней: 1 либо `depth+1` для multi-MTP с включённым `fix_multi_mtp_kvcache`. Явное значение не может быть меньше этого минимума. В `effective_config.json` раздел `synthetic_input` содержит фактические query length, batch, число входных позиций, размер descriptor и depth. Для replay параметр запрещён: там формы берутся из capture. Совпадение форм не воспроизводит реальные target hidden states, историю принятий/отказов или размещение полной модели в памяти; для более точного сравнения нужен replay.
+
 В режиме `compiled` компиляция сохраняется, а `cudagraph_mode` становится `NONE`. В `graph` используется `FULL` и реальные `ACLGraphWrapper` для predictor-слоёв. Передать целевые настройки можно через `--compilation-config /data/config/compilation.json`; содержимое — JSON object vLLM CompilationConfig. При необходимости передайте также исходный `--additional-config` и `--patches`.
 
 Standalone `graph` устанавливает `VLLM_USE_AOT_COMPILE=0` до импорта runtime: используется JIT-путь `torch.compile` с теми же выбранными backend/passes, а ACL Graph остаётся включённым. Это учитывает OmniInfer fallback-компиляцию для фактического range/stride: AOT-путь vLLM запрещает backend-компиляцию внутри своего initial profiling run. Проверка vLLM не отключается. Значение переменной сохраняется в launch plan и effective config; для `eager` и `compiled` launcher её не переопределяет. Это настройка standalone-процесса, исходники установленного OmniInfer/vLLM не меняются. См. [vLLM monitor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/compilation/monitor.py) и [выбор AOT/JIT в decorator](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/compilation/decorators.py).

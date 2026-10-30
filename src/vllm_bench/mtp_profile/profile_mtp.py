@@ -25,6 +25,8 @@ def main(argv=None):
     p.add_argument("--capture", type=Path, help="Complete capture directory containing every rank of the selected topology")
     p.add_argument("--context-length", type=int, default=8192)
     p.add_argument("--batch-per-dp-rank", type=int, default=1)
+    p.add_argument("--synthetic-query-length", type=int,
+                   help="Real input positions per sequence in synthetic measured calls; does not change draft depth")
     p.add_argument("--depths", type=int, nargs="+", help="Defaults to 3 7; replay uses captured depth")
     p.add_argument("--execution", choices=("eager", "compiled", "graph"), default="eager")
     p.add_argument("--compilation-config", type=Path, help="JSON object with target compilation settings")
@@ -50,6 +52,11 @@ def main(argv=None):
         p.error("Replay requires --capture")
     if a.input == "synthetic" and a.capture is not None:
         p.error("--capture is only used with --input replay")
+    if a.synthetic_query_length is not None:
+        if a.input != "synthetic":
+            p.error("--synthetic-query-length is only used with --input synthetic")
+        if a.synthetic_query_length < 1:
+            p.error("--synthetic-query-length must be positive")
     config, manifest = checkpoint_config(a.model.resolve())
     operator = json.loads(a.operator_config.read_text())
     if not {"model_parallel_config", "operator_optimization_config"} <= operator.keys():
