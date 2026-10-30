@@ -21,7 +21,7 @@ import sys
 import time
 
 from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
-from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, ensure_draft_token_buffer,
+from vllm_bench.mtp_profile.mtp_state import (bind_sampling_runtime, cache_views, copy_tree, ensure_draft_token_buffer,
                        load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
 
 
@@ -570,6 +570,8 @@ def run(plan):
                         torch.set_rng_state(record["state"]["rng_cpu"].cpu())
                         torch.npu.set_rng_state(record["state"]["rng_npu"].cpu())
                     restored = load_state(output / f"inputs-{depth}", runner.device, reuse_buffers=input_buffers)
+                    if record:
+                        bind_sampling_runtime(restored, runner)
                     torch.npu.synchronize()
                     return restored
 

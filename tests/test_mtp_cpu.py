@@ -592,6 +592,47 @@ class StateTests(unittest.TestCase):
             restored = mtp_state.Codec().decode(tree)
         self.assertEqual(restored.compute(), 10)
 
+    def test_sampling_input_batch_back_reference_is_detached_and_rebound(self):
+        module = ModuleType("vllm.test_sampling_codec")
+        exec("class SamplingMetadata: pass", module.__dict__)
+        metadata = module.SamplingMetadata()
+        metadata.no_penalties = True
+        metadata.temperature = self.Tensor([0], device="npu:0")
+        metadata.output_token_ids = [[1, 2, 3]]
+        # A complete runner is deliberately not serializable.
+        source_runner = SimpleNamespace(_slot_mapping_req_indices=lambda n: n)
+        source_batch = SimpleNamespace(block_table=SimpleNamespace(
+            _omni_req_indices_source=source_runner._slot_mapping_req_indices))
+        metadata.npu_input_batch = source_batch
+        inputs = {"sampling_metadata": metadata, "num_speculative_tokens": 7}
+        recorded = mtp_state.recordable_inputs(inputs)
+        self.assertIs(metadata.npu_input_batch, source_batch)
+        self.assertIsNot(recorded["sampling_metadata"], metadata)
+        self.assertIs(recorded["sampling_metadata"].temperature, metadata.temperature)
+        self.assertIsNone(recorded["sampling_metadata"].npu_input_batch)
+        with patch.dict(sys.modules, {**self.modules(), module.__name__: module}):
+            codec = mtp_state.Codec()
+            tree = codec.encode(recorded)
+            restored = mtp_state.Codec(codec.tensors, device="npu:0").decode(tree)
+        destination_runner = SimpleNamespace(input_batch=object())
+        self.assertIs(mtp_state.bind_sampling_runtime(restored, destination_runner), restored)
+        self.assertIs(restored["sampling_metadata"].npu_input_batch, destination_runner.input_batch)
+        self.assertEqual(restored["sampling_metadata"].temperature.data, [0])
+        self.assertEqual(restored["sampling_metadata"].output_token_ids, [[1, 2, 3]])
+        self.assertIs(metadata.npu_input_batch, source_batch)
+
+    def test_sampling_runtime_links_reject_penalties_and_allow_legacy_metadata(self):
+        metadata = SimpleNamespace(no_penalties=False, npu_input_batch=object())
+        inputs = {"sampling_metadata": metadata}
+        with self.assertRaisesRegex(ValueError, "penalties"):
+            mtp_state.recordable_inputs(inputs)
+        with self.assertRaisesRegex(ValueError, "penalties"):
+            mtp_state.bind_sampling_runtime(inputs, SimpleNamespace(input_batch=object()))
+        legacy = {"sampling_metadata": SimpleNamespace(no_penalties=True)}
+        self.assertIs(mtp_state.recordable_inputs(legacy), legacy)
+        mtp_state.bind_sampling_runtime(legacy, SimpleNamespace(input_batch=object()))
+        self.assertFalse(hasattr(legacy["sampling_metadata"], "npu_input_batch"))
+
     def test_cache_restore_keeps_destination_and_rejects_layout_changes(self):
         destination, source = self.Tensor([0, 0], device="npu:0"), self.Tensor([1, 2])
         with patch.dict(sys.modules, self.modules()):

@@ -6,6 +6,7 @@ dropping metadata. ML libraries are imported only when encoding/decoding state.
 from __future__ import annotations
 
 import enum
+from copy import copy
 import importlib
 import importlib.metadata
 import inspect
@@ -23,6 +24,31 @@ def versions():
         except importlib.metadata.PackageNotFoundError:
             result[name] = "unknown"
     return result
+
+
+def recordable_inputs(inputs):
+    """Detach Omni's runtime InputBatch back-reference from the saved inputs."""
+    metadata = inputs["sampling_metadata"]
+    if getattr(metadata, "npu_input_batch", None) is None:
+        return inputs
+    if not metadata.no_penalties:
+        raise ValueError("Recording npu_input_batch with sampling penalties is unsupported")
+    # Shallow-copy only metadata. Keep tensors/processor state, and do not touch
+    # the actual metadata used by the full server's original propose call.
+    result = dict(inputs)
+    result["sampling_metadata"] = copy(metadata)
+    result["sampling_metadata"].npu_input_batch = None
+    return result
+
+
+def bind_sampling_runtime(inputs, runner):
+    """Rebind recorded runtime links to the standalone runner, before timing."""
+    metadata = inputs["sampling_metadata"]
+    if hasattr(metadata, "npu_input_batch"):
+        if not metadata.no_penalties:
+            raise ValueError("Replay npu_input_batch with sampling penalties is unsupported")
+        metadata.npu_input_batch = runner.input_batch
+    return inputs
 
 
 class Codec:

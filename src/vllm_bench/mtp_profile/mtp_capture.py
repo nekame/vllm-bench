@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, digest, proposer_globals, topology_name, topology_world_size, write_json
-from vllm_bench.mtp_profile.mtp_state import runner_state, save_state, snapshot_cache_blocks, versions
+from vllm_bench.mtp_profile.mtp_state import recordable_inputs, runner_state, save_state, snapshot_cache_blocks, versions
 
 
 def compilation_options(config):
@@ -93,7 +93,7 @@ def attach(runner):
         config = json.loads((Path(proposer.vllm_config.model_config.model) / "config.json").read_text())
         cache_config, gids = draft_cache_config(proposer)
         torch.npu.synchronize()
-        state = {"inputs": inputs, "cache_config": cache_config,
+        state = {"inputs": recordable_inputs(inputs), "cache_config": cache_config,
                  "caches": snapshot_cache_blocks(proposer, gids, inputs["next_token_ids"].shape[0], max_bytes),
                  "runner": runner_state(runner, gids),
                  "batch_execution": runner.batch_execution_and_padding_state,
