@@ -14,6 +14,8 @@ SUMMARY_FIELDS = ("depth", "critical_path_median_s", "total_sequences", "propose
                   "trace_cycle_s", "trace_s_per_proposed_token", "trace_proposed_tokens_per_s",
                   "trace_to_baseline_ratio")
 
+OMNI_COMPILE_BACKEND = "omni_npu.compilation.npugraph_ex.NpuGraphExAdaptor"
+
 
 def topology_world_size(topology):
     return topology["tp"] * topology["dp"]
@@ -31,7 +33,7 @@ def digest(value):
 
 
 def compilation_input_options(options):
-    """Turn internal PassConfig unset sentinels back into constructor defaults.
+    """Convert resolved runtime compilation options back to constructor inputs.
 
     vLLM has bool-annotated pass flags whose defaults are None, but rejects
     explicit JSON null for some of those fields. Preserve explicit values.
@@ -40,6 +42,12 @@ def compilation_input_options(options):
     passes = result.get("pass_config")
     if isinstance(passes, dict):
         result["pass_config"] = {key: value for key, value in passes.items() if value is not None}
+    # CompilationConfig validates mode=3 against constructor backend names before
+    # resolving an empty backend through current_platform.get_compile_backend().
+    # The resolved OOT class path cannot itself be passed back to that validator.
+    if (result.get("mode", 3) in (3, "VLLM_COMPILE")
+            and result.get("backend") == OMNI_COMPILE_BACKEND):
+        result["backend"] = ""
     return result
 
 

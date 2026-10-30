@@ -216,6 +216,7 @@ class PlanningTests(unittest.TestCase):
                         "config_sha256": mtp_common.digest(cfg), "versions": {}, "runtime_limits": {},
                         "additional_config": {}, "input_tokens": 1, "batch_per_dp_rank": 1, "padded_tokens": 1,
                         "compilation_options": {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY",
+                                                "backend": mtp_common.OMNI_COMPILE_BACKEND,
                                                 "pass_config": {"enable_qk_norm_rope_fusion": None, "enable_sp": False}},
                         "operator_config": json.loads(operator.read_text())}
                 (path / "capture.json").write_text(json.dumps(meta))
@@ -229,6 +230,19 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["cudagraph_mode"], "FULL_DECODE_ONLY")
             self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["pass_config"], {"enable_sp": False})
             self.assertEqual(json.loads(stream.getvalue())["compilation_pass_defaults"], ["enable_qk_norm_rope_fusion"])
+            self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["backend"], "")
+            self.assertEqual(json.loads(stream.getvalue())["compilation_platform_backend"], mtp_common.OMNI_COMPILE_BACKEND)
+            # New captures export backend="" and retain its resolved identity separately.
+            for rank in range(8):
+                path = folder / f"rank-{rank:03d}" / "capture.json"
+                meta = json.loads(path.read_text())
+                meta["compilation_options"]["backend"] = ""
+                meta["effective_compile_backend"] = mtp_common.OMNI_COMPILE_BACKEND
+                path.write_text(json.dumps(meta))
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                profile_mtp.main(args)
+            self.assertEqual(json.loads(stream.getvalue())["compilation_platform_backend"], mtp_common.OMNI_COMPILE_BACKEND)
             (folder / "rank-007" / "capture.json").unlink()
             with self.assertRaises(OSError):
                 profile_mtp.main(args)
@@ -400,6 +414,22 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
 
 
 class CompilationOptionsTests(unittest.TestCase):
+    def test_only_known_resolved_mode_three_backend_uses_platform_default(self):
+        original = {"mode": 3, "backend": mtp_common.OMNI_COMPILE_BACKEND,
+                    "cudagraph_mode": "FULL_DECODE_ONLY"}
+        converted = mtp_common.compilation_input_options(original)
+        self.assertEqual(converted["backend"], "")
+        self.assertEqual(original["backend"], mtp_common.OMNI_COMPILE_BACKEND)
+        self.assertEqual(converted["mode"], 3)
+        self.assertEqual(converted["cudagraph_mode"], "FULL_DECODE_ONLY")
+        self.assertEqual(mtp_common.compilation_input_options(converted), converted)
+        for backend in ("inductor", "eager", "", "another.module.Backend"):
+            options = {"mode": 3, "backend": backend}
+            self.assertEqual(mtp_common.compilation_input_options(options), options)
+        for mode in (0, 1, 2):
+            options = {"mode": mode, "backend": mtp_common.OMNI_COMPILE_BACKEND}
+            self.assertEqual(mtp_common.compilation_input_options(options), options)
+
     def test_unset_pass_defaults_are_omitted_without_mutating_source_or_explicit_values(self):
         passes = {"enable_qk_norm_rope_fusion": None, "enable_sp": False,
                   "fuse_norm_quant": True, "threshold": 0}
@@ -420,7 +450,7 @@ class CompilationOptionsTests(unittest.TestCase):
             fuse_norm_quant: bool = True
 
         cfg = SimpleNamespace(mode=3, cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
-                              backend="inductor", custom_ops=[], splitting_ops=[], compile_sizes=None,
+                              backend=mtp_common.OMNI_COMPILE_BACKEND, custom_ops=[], splitting_ops=[], compile_sizes=None,
                               pass_config=PassConfig(), cudagraph_capture_sizes=[8],
                               cudagraph_num_of_warmups=2, max_cudagraph_capture_size=8,
                               inductor_compile_config={})
@@ -428,6 +458,8 @@ class CompilationOptionsTests(unittest.TestCase):
         self.assertEqual(result["pass_config"], {"enable_sp": False, "fuse_norm_quant": True})
         self.assertIsNone(cfg.pass_config.enable_qk_norm_rope_fusion)
         self.assertEqual(result["cudagraph_mode"], "FULL_DECODE_ONLY")
+        self.assertEqual(result["backend"], "")
+        self.assertEqual(cfg.backend, mtp_common.OMNI_COMPILE_BACKEND)
 
 
 class SharedCacheTests(unittest.TestCase):

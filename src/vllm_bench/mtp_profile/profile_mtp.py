@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, TOPOLOGIES, checkpoint_config, compilation_input_options, layer_sequence, topology_world_size, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_common import OMNI_COMPILE_BACKEND, SUMMARY_FIELDS, TOPOLOGIES, checkpoint_config, compilation_input_options, layer_sequence, topology_world_size, validate_record, write_json
 from vllm_bench.common.runtime_env import RESET_ENV, instrumentation_pythonpath
 
 
@@ -91,7 +91,11 @@ def main(argv=None):
         p.error("Compilation and additional config must be JSON objects")
     passes = compilation.get("pass_config")
     omitted_pass_fields = sorted(key for key, value in passes.items() if value is None) if isinstance(passes, dict) else []
+    expected_backend = compilation.get("backend")
+    if replay_meta and not a.compilation_config:
+        expected_backend = replay_meta.get("effective_compile_backend", expected_backend)
     compilation = compilation_input_options(compilation)
+    expected_backend = OMNI_COMPILE_BACKEND if expected_backend == OMNI_COMPILE_BACKEND and compilation.get("backend", "") == "" else None
     if a.execution == "eager":
         compilation.update(mode=0, cudagraph_mode="NONE")
     elif a.execution == "compiled":
@@ -118,6 +122,7 @@ def main(argv=None):
             "config": config, "checkpoint_manifest": manifest, "operator_config": operator,
             "compilation_config": compilation, "additional_config": additional, "patches": patches,
             "compilation_pass_defaults": omitted_pass_fields,
+            "compilation_platform_backend": expected_backend,
             "expected_layers": {str(d): layer_sequence(config, d) for d in a.depths},
             "capture_metadata": replay_meta,
             "runtime_environment": {"VLLM_USE_AOT_COMPILE": "0"} if a.execution == "graph" else {},

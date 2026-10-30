@@ -184,6 +184,9 @@ def create_runtime(plan, record=None):
         raise ValueError("Draft architecture is not the expected MTP class; refusing model construction")
     if a["execution"] != "eager" and cfg.compilation_config.mode == CompilationMode.NONE:
         raise ValueError("Compilation was disabled by effective platform config")
+    expected_backend = plan.get("compilation_platform_backend")
+    if expected_backend and a["execution"] != "eager" and cfg.compilation_config.backend != expected_backend:
+        raise ValueError(f"Platform selected compile backend {cfg.compilation_config.backend!r}; expected {expected_backend!r}")
     if a["execution"] == "graph":
         require_full_decode_graph(cfg, "Effective runtime config")
     context = set_current_vllm_config(cfg)

@@ -160,6 +160,7 @@ def attach(runner):
                                       ("OMNI_DRAFT_TOP_K", "OMNI_PANGU_V2_HIGH_THROUGHOUT")},
                 "patches": os.environ.get("OMNI_VLLM_PATCHES_DIR"),
                 "compilation_config_repr": str(cfg.compilation_config),
+                "effective_compile_backend": cfg.compilation_config.backend,
                 "compilation_options": compilation_options(cfg.compilation_config),
                 "complete": True}
         write_json(folder / "capture.json", meta)
