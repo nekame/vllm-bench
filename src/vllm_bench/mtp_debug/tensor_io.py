@@ -76,6 +76,8 @@ class TensorWriter:
     def save(self, tensor, forward_index, call_index, name):
         if self.stopped_reason:
             return {"status": "not_recorded", "reason": self.stopped_reason}
+        if tensor is None:
+            return {"status": "not_recorded", "reason": "no_tensor_value"}
         size = tensor.numel() * tensor.element_size()
         if size > self.max_tensor_bytes or self.written + size > self.budget_bytes:
             self.stopped_reason = "tensor_size_limit" if size > self.max_tensor_bytes else "run_byte_budget"

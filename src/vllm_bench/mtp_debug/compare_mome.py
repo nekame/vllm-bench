@@ -75,6 +75,10 @@ def compare_call(root, a, b, position, comparable_prefix, same_start):
                 ("num_accepted_tokens", "num_computed_tokens", "query_start_loc", "B_size", "pad_slot_id"))
         and not list(incomplete_snapshots(metadata_a)) and not list(incomplete_snapshots(metadata_b)))
     result = {"status": "compared", "parameters_equal": params_a == params_b,
+              "left_y_source": left.get("y_source", "returned_tensor"),
+              "right_y_source": right.get("y_source", "returned_tensor"),
+              "left_return_kind": left.get("return_kind", "tensor"),
+              "right_return_kind": right.get("return_kind", "tensor"),
               "metadata_equal": logical(metadata_a) == logical(metadata_b) if metadata_known else None,
               "left_metadata": metadata_a, "right_metadata": metadata_b,
               "left_parameters": params_a, "right_parameters": params_b,
