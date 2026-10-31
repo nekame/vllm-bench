@@ -78,9 +78,20 @@ def end_capture(context, arguments, result):
     if context is None:
         return
     trace, save, cache, block, writer = context
-    trace["y_after"] = save(result, "y-after")
+    inplace = arguments.get("inplace", True)
+    trace["return_kind"] = "none" if result is None else "tensor"
+    if result is None and inplace:
+        # Some inplace kernels have no return value; their observable result is x.
+        trace["y_source"] = "inplace_x"
+        trace["y_after"] = save(arguments["x"], "y-after")
+    elif result is None:
+        trace["y_source"] = "unavailable"
+        trace["y_after"] = {"status": "not_recorded", "reason": "none_return_without_inplace"}
+    else:
+        trace["y_source"] = "returned_tensor"
+        trace["y_after"] = save(result, "y-after")
     trace["states_after"] = [{"block": block, "tensor": save(cache[block], "state-after")}]
-    if arguments.get("inplace", True):
+    if inplace:
         trace["x_after"] = save(arguments["x"], "x-after")
     trace["status"] = "stopped" if writer.stopped_reason else "complete"
     if writer.stopped_reason:

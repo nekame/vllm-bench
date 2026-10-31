@@ -119,6 +119,12 @@ class ComparisonTests(unittest.TestCase):
             result = build_report(root, [left], [right])["calls"][0]
             self.assertEqual(result["status"], "unavailable")
             self.assertEqual(result["right_reason"], "run_byte_budget")
+            trace(right).update(status="complete", return_kind="none", y_source="unavailable",
+                                y_after={"status": "not_recorded", "reason": "none_return_without_inplace"})
+            result = build_report(root, [left], [right])["calls"][0]
+            self.assertEqual(result["status"], "partial")
+            self.assertIsNone(result["all_captured_tensors_exact_equal"])
+            self.assertEqual(result["right_y_source"], "unavailable")
 
     def test_cli_full_report_no_overwrite_and_explicit_position(self):
         with tempfile.TemporaryDirectory() as root:

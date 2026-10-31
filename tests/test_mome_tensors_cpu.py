@@ -142,6 +142,10 @@ class PayloadTests(unittest.TestCase):
             self.assertEqual(compare_tensors(directory, None, directory, None)["status"], "unavailable")
         with self.assertRaises(ValueError):
             numbers(b"\0\0", "int16")
+        with tempfile.TemporaryDirectory() as directory:
+            writer = TensorWriter(directory, 1)
+            self.assertEqual(writer.save(None, 0, 0, "none")["reason"], "no_tensor_value")
+            self.assertEqual(writer.written, 0)
 
 
 class CaptureTests(unittest.TestCase):
@@ -155,7 +159,7 @@ class CaptureTests(unittest.TestCase):
                         "sampler_output_with_padding": [[10, 20]]})
             self.assertEqual(rec.tensor_writer.stopped_reason, "cycle_limit")
 
-    def run_conv(self, directory, prefill=False, armed=True):
+    def run_conv(self, directory, prefill=False, armed=True, return_none=False, inplace=True):
         class Conv:
             weight = Tensor([[1., 0.], [0., 1.], [0., 0.]])
             kernel_width = 3
@@ -164,7 +168,7 @@ class CaptureTests(unittest.TestCase):
             def forward(self, x, conv_states, mome_metadata, inplace=True):
                 x.data[0][0] = 70.
                 conv_states.data[0][1][0] = 30.
-                return x
+                return None if return_none else x
 
         import types
         meta = types.SimpleNamespace(num_prefills=int(prefill), num_decodes=int(not prefill),
@@ -179,10 +183,28 @@ class CaptureTests(unittest.TestCase):
             spec_rejection.install_conv(module, "layers.0.o_conv")
             token = spec_rejection.TARGET.set(frame if armed else None)
             try:
-                self.assertIs(module.forward(x, cache, meta), x)
+                self.assertIs(module.forward(x, cache, meta, inplace=inplace), None if return_none else x)
             finally:
                 spec_rejection.TARGET.reset(token)
         return frame
+
+    def test_inplace_none_return_captures_mutated_x_and_preserves_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.run_conv(directory, return_none=True)["mome_calls"][0]["tensor_capture"]
+            self.assertEqual(trace["status"], "complete")
+            self.assertEqual(trace["return_kind"], "none")
+            self.assertEqual(trace["y_source"], "inplace_x")
+            self.assertEqual(numbers(read_tensor(directory, trace["y_after"]), "float32"), [70., 8., 9., 10.])
+            self.assertEqual(trace["y_after"]["sha256"], trace["x_after"]["sha256"])
+            self.assertNotEqual(trace["x_before"]["sha256"], trace["y_after"]["sha256"])
+
+    def test_none_without_inplace_does_not_invent_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = self.run_conv(directory, return_none=True, inplace=False)["mome_calls"][0]["tensor_capture"]
+            self.assertEqual(trace["y_after"]["status"], "not_recorded")
+            self.assertEqual(trace["y_source"], "unavailable")
+            self.assertEqual(trace["states_after"][0]["tensor"]["status"], "complete")
+            self.assertNotIn("x_after", trace)
 
     def test_before_inplace_mutation_and_after_snapshots(self):
         with tempfile.TemporaryDirectory() as directory:
