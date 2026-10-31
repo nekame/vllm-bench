@@ -261,6 +261,8 @@ bash scripts/inspect_indexer.sh attention-comparison.json
 
 По умолчанию rank/position/layer берутся из `first_boundary`. Для конкретного среза добавьте `--rank 0 --position 8193 --layer 0`. Скрипт выводит context и четыре строки с `exact_equal`, статусом и доступными метриками; alias `query_scale` поддерживается. Отсутствующие или неоднозначные поля явно отмечаются и не считаются совпадением. Нужен полный JSON, бинарные дампы для этой команды не требуются.
 
+Если key/scales сравниваются по байтам, скрипт сам переводит `first_different_offsets` в логические позиции по длине строки и `compared_positions`. Для короткого вывода только истории используйте `bash scripts/inspect_indexer.sh attention-comparison.json --history-summary`: три строки содержат context с вариантом оператора, `key_rows` и `key_scales`. `sampled_different_positions` относится к сохранённым первым смещениям; полный список позиций известен только при `all_different_positions_known=true`. Число отличающихся байтов не является численной величиной ошибки scales. Режим indexer нужно определять по оператору и его параметрам: `hif8_ds_mla` описывает attention KV и сам по себе не доказывает dtype scales indexer.
+
 Основные значения `result`:
 
 | Значение | Что найдено |

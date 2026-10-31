@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from vllm_bench.mtp_debug.inspect_indexer import extract, main
+from vllm_bench.mtp_debug.inspect_indexer import extract, history_locations, main
 
 
 def fixture():
@@ -17,6 +17,41 @@ def fixture():
 
 
 class IndexerReportTests(unittest.TestCase):
+    def test_byte_history_maps_actual_positions_and_respects_offset_sample_limit(self):
+        scales = {"compared_positions": list(range(8194)), "left_nbytes": 8194 * 4, "right_nbytes": 8194 * 4,
+                  "different_bytes": 16, "first_different_offsets": [17167, 17176, 21653, 22752]}
+        mapping = history_locations(scales)
+        self.assertEqual(mapping["bytes_per_position"], 4)
+        self.assertEqual(mapping["sampled_different_positions"], [4291, 4294, 5413, 5688])
+        self.assertFalse(mapping["all_different_positions_known"])
+        scales.update(different_bytes=4)
+        self.assertTrue(history_locations(scales)["all_different_positions_known"])
+        scales.update(compared_positions=[7, 11], left_nbytes=8, right_nbytes=8, different_bytes=1, first_different_offsets=[5])
+        self.assertEqual(history_locations(scales)["first_different_position"], 11)
+        scales["first_different_offsets"] = [8]
+        self.assertEqual(history_locations(scales)["mapping_status"], "unavailable")
+
+    def test_history_summary_includes_operator_and_only_two_cache_fields(self):
+        report = fixture()
+        records = report["comparisons"][0]["records"]
+        scales = records[3]
+        scales.update(exact_equal=False, different_bytes=1, first_different_offsets=[5],
+                      compared_positions=[3, 7], left_nbytes=8, right_nbytes=8)
+        records.append({**scales, "field": "key_rows"})
+        parameters = {"operator": "quant_lightning_indexer", "scalars": {"quant_mode": 3}}
+        records.append({"boundary": "indexer_kernel_parameters", "field": "parameters", "status": "compared",
+                        "exact_equal": True, "left": parameters, "right": parameters})
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "comparison.json"
+            path.write_text(json.dumps(report))
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                main([str(path), "--history-summary"])
+        lines = dict(line.split("=", 1) for line in output.getvalue().splitlines())
+        self.assertEqual(set(lines), {"context", "key_rows", "key_scales"})
+        self.assertEqual(json.loads(lines["context"])["indexer_parameters"]["left"]["operator"], "quant_lightning_indexer")
+        self.assertEqual(json.loads(lines["key_scales"])["sampled_different_positions"], [7])
+        self.assertNotIn("first_different_offsets", json.loads(lines["key_scales"]))
+
     def test_defaults_alias_and_cli(self):
         report = fixture()
         report["comparisons"][0]["records"][1]["field"] = "query_scale"

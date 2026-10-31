@@ -8,7 +8,24 @@ FIELDS = {"query": ("query",), "query_dequant_scale": ("query_dequant_scale", "q
           "weights": ("weights",), "key_scales": ("key_scales",)}
 
 
-def extract(report, rank=None, position=None, layer=None):
+def history_locations(record):
+    positions = record.get("compared_positions", [])
+    size = record.get("left_nbytes")
+    if (not positions or type(size) is not int or size <= 0 or size % len(positions)
+            or record.get("right_nbytes") != size):
+        return {"mapping_status": "unavailable", "reason": "equal byte sizes and compared positions required"}
+    width = size // len(positions)
+    offsets = record.get("first_different_offsets", [])
+    if any(type(offset) is not int or not 0 <= offset < size for offset in offsets):
+        return {"mapping_status": "unavailable", "reason": "byte offset outside compared payload"}
+    return {"mapping_status": "mapped", "bytes_per_position": width,
+            "sampled_different_positions": sorted({positions[offset // width] for offset in offsets}),
+            "all_different_positions_known": len(offsets) == record.get("different_bytes"),
+            "first_different_position": positions[offsets[0] // width] if offsets else None,
+            "first_byte_within_position": offsets[0] % width if offsets else None}
+
+
+def extract(report, rank=None, position=None, layer=None, history_summary=False):
     first = report.get("first_boundary") or {}
     selected = {name: value if value is not None else first.get(name)
                 for name, value in (("rank", rank), ("position", position), ("layer", layer))}
@@ -21,7 +38,12 @@ def extract(report, rank=None, position=None, layer=None):
         raise ValueError(f"Expected exactly one comparison for {selected}; found {len(matches)}")
     comparison = matches[0]
     result = {**selected, "left_cycle": comparison.get("left_cycle"), "right_cycle": comparison.get("right_cycle"), "fields": {}}
-    for name, aliases in FIELDS.items():
+    parameters = [r for r in comparison.get("records", []) if r.get("boundary") == "indexer_kernel_parameters" and r.get("field") == "parameters"]
+    if len(parameters) == 1:
+        result["indexer_parameters"] = {side: {key: parameters[0].get(side, {}).get(key) for key in ("operator", "scalars")}
+                                        for side in ("left", "right")}
+    fields = {"key_rows": ("key_rows",), "key_scales": ("key_scales",)} if history_summary else FIELDS
+    for name, aliases in fields.items():
         records = [r for r in comparison.get("records", [])
                    if r.get("boundary") == "indexer_kernel_input" and r.get("field") in aliases]
         if len(records) != 1:
@@ -33,6 +55,11 @@ def extract(report, rank=None, position=None, layer=None):
                     "different_bytes", "max_abs_finite", "relative_l2_finite", "max_ulp_finite", "nonfinite_elements",
                     "first_differences", "first_different_offsets") if k in record}
         evidence["exact_equal"] = record.get("exact_equal") if record.get("status") == "compared" else None
+        if name in ("key_rows", "key_scales") and "different_bytes" in record:
+            evidence.update(history_locations(record))
+        if history_summary:
+            evidence.pop("first_different_offsets", None)
+            evidence.pop("first_differences", None)
         result["fields"][name] = evidence
     return result
 
@@ -43,9 +70,10 @@ def main(argv=None):
     parser.add_argument("--rank", type=int)
     parser.add_argument("--position", type=int)
     parser.add_argument("--layer", type=int)
+    parser.add_argument("--history-summary", action="store_true", help="Three short lines: operator context and key/scales logical positions")
     args = parser.parse_args(argv)
     try:
-        report = extract(json.loads(args.path.read_text()), args.rank, args.position, args.layer)
+        report = extract(json.loads(args.path.read_text()), args.rank, args.position, args.layer, args.history_summary)
     except (OSError, ValueError, TypeError, KeyError) as error:
         parser.error(str(error))
     print("context=" + json.dumps({k: v for k, v in report.items() if k != "fields"}, ensure_ascii=False))
