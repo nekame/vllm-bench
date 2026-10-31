@@ -253,6 +253,14 @@ bash scripts/compare_attention.sh /data/profile-results/attention-tensors \
 
 `first_boundary` содержит position, layer, rank, этап и поле. Численные метрики включают `different_elements`, `max_abs_finite`, относительную L2 и максимальное расстояние ULP; для HiF8/opaque данных — различающиеся байты. Порядок indices и совпадение их множества проверяются отдельно. NaN/Inf, metadata/weights и нарушения протокола отражаются автоматически. Различия полного MoME state остаются отдельными наблюдениями: используемая kernel история пока не доказана.
 
+Чтобы вывести сравнение четырёх входов indexer (`query`, `query_dequant_scale`, `weights`, `key_scales`) из уже готового полного отчёта:
+
+```bash
+bash scripts/inspect_indexer.sh attention-comparison.json
+```
+
+По умолчанию rank/position/layer берутся из `first_boundary`. Для конкретного среза добавьте `--rank 0 --position 8193 --layer 0`. Скрипт выводит context и четыре строки с `exact_equal`, статусом и доступными метриками; alias `query_scale` поддерживается. Отсутствующие или неоднозначные поля явно отмечаются и не считаются совпадением. Нужен полный JSON, бинарные дампы для этой команды не требуются.
+
 Основные значения `result`:
 
 | Значение | Что найдено |

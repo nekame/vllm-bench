@@ -8,7 +8,7 @@
     "conf/layer_profile/suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
     "doc/CONTRIBUTING.md": "31a88302e4827022ebcc10082d32f94fa66042102711b532f5c21639a6595afd",
     "doc/layer_profile/README.md": "00d918301f9546ee5ec225465139762e47927ec4be60a34de1e18c78c3897a24",
-    "doc/mtp_debug/README.md": "c3e3521ae837ca5f52b773741bf864bdc71a92f5d6bb219793ce67a65e316fd6",
+    "doc/mtp_debug/README.md": "0179d5afd947caa09ac2341fd36aec33ef02b494bed4d2ca4f141fc480c68360",
     "doc/mtp_profile/README.md": "0786195165dc5bf39325e598f61d04e0cfb55ac8987a5fa983bf4e4070fc4401",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
@@ -17,6 +17,7 @@
     "scripts/compare_mome.sh": "61fb238f695d8c7a660e50ed458a1be59a9efa8feeabb6b6c7eb74c526f0b01e",
     "scripts/extract_token_choices.sh": "2fae37bb45c4e414bb406f41d36e5084edbdfa0a4fc468b5222081b2f413c6b8",
     "scripts/find_first_difference.sh": "6e3b2c0611ec1f634ce596fbf1f8d7f8a3adfe450ca09970d1255b4c103bd7eb",
+    "scripts/inspect_indexer.sh": "fdd24db1f96b90e77fc91f948693206a7663e7f28c50b398e1c53f8e38ff0736",
     "src/vllm_bench/__init__.py": "4d92c99389ad87fcd0b559f1e3010b8f998e442bdde4d04bce4cb204ebd29039",
     "src/vllm_bench/common/__init__.py": "5045adf0ef5085ec88f6738380d5b7dae95515fe7e2e48d273c938573f6c77f2",
     "src/vllm_bench/common/checkpoint.py": "c76981b9d1bb7561a72a33a9f8d3da324c306f95f13ffd22b479389d20a1633d",
@@ -37,6 +38,7 @@
     "src/vllm_bench/mtp_debug/compare_rejections.py": "f32b8f21798d5c146486649efc49b112ab2cbe53304111df55c6b10d7661e024",
     "src/vllm_bench/mtp_debug/debug_spec.py": "ce2d0a480d7eaefe9e9bcf736479377674b2aff663690206da4655f82c7978ab",
     "src/vllm_bench/mtp_debug/find_divergence.py": "4b895fdeb8e264e591ddab5a14d1229b1266a4a42951c0af9ce3924953767a51",
+    "src/vllm_bench/mtp_debug/inspect_indexer.py": "ebe7f22093e68d8e6f745e464d811680b9bd7d66b431540090ef997bae8a5f62",
     "src/vllm_bench/mtp_debug/instrumentation/sitecustomize.py": "6e33c2b351a48660d77715aff1d102dac5cf6ae37b0950dbe9886d127370957b",
     "src/vllm_bench/mtp_debug/locate_output.py": "6def3068c8ae8bf1ff252ca6b9fbf0dcd1769f95ef58cd57380c3455e75b361b",
     "src/vllm_bench/mtp_debug/mome_tensors.py": "ef40943040e52cc3cc08b860abb428e74c4e7fdf26a2ef70004204398a638f57",
@@ -65,6 +67,7 @@
     "tests/test_compare_rejections_cpu.py": "161d32da8ad796b562ec23c60ccdd3b2452d7668cef3e1f9e7c88febeb0adda0",
     "tests/test_cpu.py": "d2e3c60c87ca05d76d6610cb620f9a1c3b8731c920c8024cae7230be12a5ac9c",
     "tests/test_find_divergence_cpu.py": "9c7b1393a1bde440913b748cf0c14710761d5853e65973cee2b7084167787dcb",
+    "tests/test_inspect_indexer_cpu.py": "f45ad7434211a71e6522fc2e2f3c499caf97ff199c7ad7a91ddb335d36f1cae1",
     "tests/test_layout_cpu.py": "e9dedc355ce1a5e122e62a96e71b6f4d11a53a8d91ab99fc26f0c47cd9af5a8c",
     "tests/test_locate_output_cpu.py": "56e9fd6e7054d98d5f91a5626715d3f30b301e73e5e456a91db22597ad215593",
     "tests/test_mome_tensors_cpu.py": "9b709049104beabe5e73308ab47b8ddb900f44b36ac6c276731ce8247da673d2",
@@ -73,7 +76,7 @@
     "tests/test_spec_rejection_cpu.py": "9e180edd4d2e85dd8ae490df50d70cdce25df4a5fef0b5ae3645fe4b206a290d"
   },
   "validation": {
-    "cpu_tests": 107,
+    "cpu_tests": 110,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python3 -m unittest discover -s tests",
     "npu_execution_performed": false,
@@ -88,6 +91,7 @@
     "mtp_mome_inplace_return_validation": "CPU mocks: preserve inplace None return, capture mutated x as output, report non-inplace None as unavailable; NPU smoke test pending",
     "mtp_attention_trace_validation": "CPU-only: 8-rank stage diagnosis, logical paging, HiF8 byte components, index ordering, TP reconstruction, rejected rows, gaps, legacy/missing payloads, nonfinite/protocol failures, scoped actual-operator mocks, positional QLI2, return preservation, quotas, integer codec and ULP/L2; actual torch/NPU hooks and execution pending smoke tests",
     "mtp_attention_npu_validation": "not performed; requires A5 DP1/TP8 PP1 hif8_ds_mla server smoke test",
-    "mtp_attention_paged_copy_validation": "CPU mocks: prohibit NPU advanced indexing, copy referenced pages once with basic slices, preserve selected FP32/HiF8 bytes and row order, validate empty selection and limits before copy; NPU server rerun pending"
+    "mtp_attention_paged_copy_validation": "CPU mocks: prohibit NPU advanced indexing, copy referenced pages once with basic slices, preserve selected FP32/HiF8 bytes and row order, validate empty selection and limits before copy; NPU server rerun pending",
+    "mtp_indexer_inspector_validation": "CPU tests: first-boundary/default and explicit selectors, query_scale alias, missing/unavailable/ambiguous fields, CLI extraction from full comparison JSON"
   }
 }
