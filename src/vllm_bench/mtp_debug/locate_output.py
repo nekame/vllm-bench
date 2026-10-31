@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from vllm_bench.mtp_debug.compare_rejections import describe, load_events, requests, timeline
+from vllm_bench.mtp_debug.ranks import filter_rank
 
 
 def top_row(event, field, row):
@@ -87,13 +88,14 @@ def main(argv=None):
                         help="Absolute output position, e.g. first_observed_token_difference.path; not token ID")
     parser.add_argument("--label", help="Optionally restrict to one LABEL")
     parser.add_argument("--request", help="Optionally restrict to one request ID")
+    parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--output", type=Path, help="Write full JSON to a new file; print a short summary")
     args = parser.parse_args(argv)
     if args.position < 0:
         parser.error("--position must be nonnegative")
     try:
         matches, missing = [], []
-        for key, items in requests(load_events(args.path)).items():
+        for key, items in requests(filter_rank(load_events(args.path), args.rank)).items():
             description = describe(key, items)
             if args.label is not None and description["label"] != args.label:
                 continue

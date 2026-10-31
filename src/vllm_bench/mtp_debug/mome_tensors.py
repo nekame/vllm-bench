@@ -6,6 +6,7 @@ import sys
 
 from vllm_bench.mtp_debug.spec_debug import values
 from vllm_bench.mtp_debug.tensor_io import TensorWriter, tensor_identity
+from vllm_bench.mtp_debug.ranks import current_rank
 
 
 def runtime_info():
@@ -36,6 +37,10 @@ def begin_capture(recorder, frame, event, arguments, params):
              "parameters": {**params, "inplace": arguments.get("inplace", True)},
              "states_before": [], "states_after": []}
     event["tensor_capture"] = trace
+    attention = frame.get("attention_trace", {})
+    if attention.get("status") == "skipped":
+        trace.update(status="skipped", reason=attention.get("reason"))
+        return None
     if getattr(meta, "num_prefills", None) != 0 or getattr(meta, "num_decodes", None) != 1:
         trace.update(status="skipped", reason="not_single_request_decode")
         return None
@@ -47,7 +52,7 @@ def begin_capture(recorder, frame, event, arguments, params):
         return None
     if recorder.tensor_writer is None:
         recorder.tensor_writer = TensorWriter(recorder.output, os.getpid(),
-            rank=int(os.environ.get("PANGU_SPEC_DEBUG_RANK", "0")),
+            rank=current_rank(),
             max_tensor_bytes=int(os.environ.get("PANGU_SPEC_DEBUG_TENSOR_MAX_MIB", "16")) * 1024**2,
             budget_bytes=int(os.environ.get("PANGU_SPEC_DEBUG_TENSOR_BUDGET_MIB", "512")) * 1024**2)
     writer = recorder.tensor_writer

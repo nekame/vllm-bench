@@ -7,8 +7,9 @@ import struct
 import sys
 
 
-WIDTH = {"bfloat16": 2, "float16": 2, "float32": 4, "float64": 8}
-CODES = {"float16": "e", "float32": "f", "float64": "d"}
+WIDTH = {"bfloat16": 2, "float16": 2, "float32": 4, "float64": 8,
+         "uint8": 1, "int8": 1, "int32": 4, "int64": 8}
+CODES = {"float16": "e", "float32": "f", "float64": "d", "uint8": "B", "int8": "b", "int32": "i", "int64": "q"}
 
 
 def numbers(raw, dtype):
@@ -73,15 +74,20 @@ class TensorWriter:
             "max_tensor_bytes": self.max_tensor_bytes, "budget_bytes": self.budget_bytes}) + "\n")
         temporary.replace(path)
 
-    def save(self, tensor, forward_index, call_index, name):
+    def can_save(self, size):
         if self.stopped_reason:
-            return {"status": "not_recorded", "reason": self.stopped_reason}
-        if tensor is None:
-            return {"status": "not_recorded", "reason": "no_tensor_value"}
-        size = tensor.numel() * tensor.element_size()
+            return False
         if size > self.max_tensor_bytes or self.written + size > self.budget_bytes:
             self.stopped_reason = "tensor_size_limit" if size > self.max_tensor_bytes else "run_byte_budget"
             self.write_status()
+            return False
+        return True
+
+    def save(self, tensor, forward_index, call_index, name, row_summaries=True):
+        if tensor is None:
+            return {"status": "not_recorded", "reason": "no_tensor_value"}
+        size = tensor.numel() * tensor.element_size()
+        if not self.can_save(size):
             return {"status": "not_recorded", "reason": self.stopped_reason,
                     "requested_bytes": size}
         path = self.root / "tensors" / f"rank-{self.rank}-pid-{self.pid}" / f"forward-{forward_index:06d}" / f"call-{call_index:03d}" / f"{name}.bin"
@@ -101,7 +107,7 @@ class TensorWriter:
             temporary.replace(path)
             self.written += size
             rows = []
-            if shape and shape[0]:
+            if row_summaries and shape and shape[0]:
                 row_bytes = size // shape[0]
                 for index in range(shape[0]):
                     content = raw[index * row_bytes:(index + 1) * row_bytes]
@@ -110,6 +116,7 @@ class TensorWriter:
             result = {"status": "complete", "path": path.relative_to(self.root).as_posix(),
                       "shape": shape, "dtype": dtype, "byteorder": "little",
                       "nbytes": size, "sha256": hashlib.sha256(raw).hexdigest(), "rows": rows,
+                      "row_summaries": row_summaries,
                       "original_strides": list(tensor.stride()) if hasattr(tensor, "stride") else None}
             self.write_status()
             return result
@@ -163,6 +170,8 @@ def compare_bytes(left, right, dtype, shape):
     max_index = None
     first = []
     nonfinite = {"left": 0, "right": 0}
+    sum_delta2 = sum_a2 = sum_b2 = 0.
+    max_ulp = None
     for index, (x, y) in enumerate(zip(a, b)):
         nonfinite["left"] += not math.isfinite(x)
         nonfinite["right"] += not math.isfinite(y)
@@ -173,11 +182,28 @@ def compare_bytes(left, right, dtype, shape):
                 first.append({"index": coordinates(index, shape), "left": json_number(x), "right": json_number(y)})
         if math.isfinite(x) and math.isfinite(y):
             delta = abs(x - y)
+            try:
+                sum_delta2 += delta * delta
+                sum_a2 += x * x
+                sum_b2 += y * y
+            except OverflowError:
+                sum_delta2 = float("inf")
+            if dtype in ("bfloat16", "float16", "float32", "float64"):
+                sign = 1 << (width * 8 - 1)
+                mask = (1 << (width * 8)) - 1
+                def ordered(content):
+                    bits = int.from_bytes(content, "little")
+                    return (~bits & mask) if bits & sign else bits | sign
+                ulp = abs(ordered(left[index * width:(index + 1) * width]) - ordered(right[index * width:(index + 1) * width]))
+                max_ulp = max(max_ulp or 0, ulp)
             if delta > max_abs:
                 max_abs, max_index = delta, coordinates(index, shape)
-    return {"exact_equal": left == right, "different_elements": count,
+    result = {"exact_equal": left == right, "different_elements": count,
             "max_abs_finite": json_number(max_abs), "max_abs_index": max_index,
             "nonfinite_elements": nonfinite, "first_differences": first}
+    result.update(relative_l2_finite=json_number(math.sqrt(sum_delta2) / max(math.sqrt(sum_a2), math.sqrt(sum_b2), 1e-12)),
+                  max_ulp_finite=max_ulp)
+    return result
 
 
 def compare_tensors(left_root, left, right_root, right, rows=None):

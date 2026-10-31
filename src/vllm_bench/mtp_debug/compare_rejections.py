@@ -3,6 +3,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from vllm_bench.mtp_debug.ranks import filter_rank
 
 
 PHYSICAL = {"cache_indices", "slot_mapping", "block_table_tensor"}
@@ -315,6 +316,7 @@ def main(argv=None):
     parser.add_argument("--left-request")
     parser.add_argument("--right-request")
     parser.add_argument("--list-requests", action="store_true")
+    parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--atol", type=float, default=1e-5)
     parser.add_argument("--rtol", type=float, default=1e-5)
     parser.add_argument("--output", type=Path, help="Write complete JSON report; stdout remains a brief summary")
@@ -322,12 +324,12 @@ def main(argv=None):
     if not math.isfinite(args.atol) or not math.isfinite(args.rtol) or min(args.atol, args.rtol) < 0:
         parser.error("Tolerances must be finite and nonnegative")
     try:
-        left = load_events(args.left)
+        left = filter_rank(load_events(args.left), args.rank)
         if args.list_requests:
             for key, items in requests(left).items():
                 print(json.dumps(describe(key, items), ensure_ascii=False))
             return
-        right = left if args.right is None or args.right == args.left else load_events(args.right)
+        right = left if args.right is None or args.right == args.left else filter_rank(load_events(args.right), args.rank)
         description_a, items_a = select(left, args.left_label, args.left_request)
         description_b, items_b = select(right, args.right_label, args.right_request)
         if description_a["rank"] != description_b["rank"]:

@@ -196,6 +196,81 @@ bash scripts/compare_mome.sh /data/profile-results/mome-tensors \
 
 CPU-проверки покрывают dtype/целостность, лимиты, inplace-снимки, пропуск prefill, совместимость старых записей, сравнение строк и поиск события. На NPU новый режим ещё требует smoke test: подтвердить hooks и отсутствие `.bin` до `ARM`, получить два запроса, проверить `tensor_capture.status=complete`, выполнить offline-анализ и отдельно проверить достижение малого лимита. Синхронизации/CPU copies/disk I/O меняют тайминги и могут скрывать гонку; эти запуски не подходят для TPOT baseline.
 
+## Автоматический срез HiF8 DSA attention
+
+Этот режим предназначен для поиска расхождения между выходами `qa_conv`/`compresskv_conv` и входом `o_conv`. Поддерживается текущая реализация OmniInfer на A5: `hif8_ds_mla`, noncontiguous KV, latent 512, rotary 64, sparse count 2048, DP=1/TP=8, без CP/KVSP. При неподдерживаемой конфигурации запуск отказывается включать этот режим; неподдерживаемый формат фактического вызова отмечается в capture. Исходники OmniInfer не меняются: hooks устанавливаются только в workers запущенного процесса.
+
+Нужен **новый** capture, старые дампы MoME не содержат аргументы attention. Запускайте из корня checkout:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python -m vllm_bench.mtp_debug.debug_spec \
+  --output /data/profile-results/attention-tensors \
+  --rejection-windows --attention-tensors --mome-layers 0 \
+  --attention-steps-per-request 32 \
+  --limit 1000 --execute -- bash /data/scripts/launch-full-model-eager.sh
+```
+
+Серверный скрипт должен включать `--enforce-eager --no-enable-prefix-caching`. Сохраните depth=1 для первого теста и отправляйте одинаковый вход по одному запросу, с `temperature=0`, `seed=123`. После прогрева, перед первым тестовым запросом:
+
+```bash
+printf '%s\n' request-01 > /data/profile-results/attention-tensors/LABEL
+touch /data/profile-results/attention-tensors/ARM
+```
+
+После полного завершения первого запроса, перед вторым:
+
+```bash
+printf '%s\n' request-02 > /data/profile-results/attention-tensors/LABEL
+```
+
+`--attention-tensors` включает `--mome-tensors` и по умолчанию записывает **все восемь rank**. `--attention-ranks 0,3` позволяет снять часть rank, но полное TP-сравнение будет отмечено как неполное. Без нового режима прежний default rank=0 сохраняется. Старые анализаторы получили `--rank`, по умолчанию 0, чтобы выбирать нужную копию события в многопроцессном capture.
+
+В `target_forward.attention_trace` сохраняются:
+
+- Фактический вызов quantized lightning indexer: quantized query, веса, query scales, действующие key/scales по логическим позициям, lengths, параметры и упорядоченный результат. Поддерживается также позиционная сигнатура `cann_ops_transformer.quant_lightning_indexer`.
+- Фактический вызов HiF8 sparse attention: поглощённый query, sparse indices, выбранные packed KV строки, dummy value, sinks при наличии, lengths, параметры и выход kernel. Packed строка разбирается на 512 байт latent, 128 байт BF16 rotary и 16 байт FP32 scales. HiF8 сравнивается **по байтам**, без собственного численного декодера.
+- Вход и выход `_post_attn_absorb`, идентичность W_UV, полный вход/выход `o_conv`, точные MoME состояния и параметры выбранного слоя. Новые collectives/barriers не добавляются; аргументы и возвращаемые значения оригинальных вызовов сохраняются.
+
+KV сохраняется через действующий `block_table` и реальный размер страницы аргумента оператора. Физические номера страниц остаются для аудита; сравнение идёт по логическим позициям. Indexer получает всю действующую историю, attention — объединение реально выбранных строк. Неиспользуемая аллокация KV не дампится. Для attention payloads сохраняется SHA256 полного файла, без тысяч отдельных строковых samples/hashes; точные строки сравниваются offline по `.bin`.
+
+Ограничение `--attention-steps-per-request` относится к первым decode-проходам каждого request ID после включения записи; prefill не расходует квоту. После квоты точные attention/MoME snapshots пропускаются с явной причиной. Лимиты payloads общие для MoME и attention: по умолчанию 16 МиБ на один тензор и 512 МиБ **на worker**, то есть до 4 ГиБ для TP8. При необходимости увеличьте `--tensor-max-mib`/`--tensor-budget-mib`; достигнутый лимит останавливает точные дампы этого worker до перезапуска. Проверяйте `tensor-status-rank-*-pid-*.json` и `hooks-pid-*.json`.
+
+После получения двух запросов:
+
+```bash
+bash scripts/compare_attention.sh /data/profile-results/attention-tensors \
+  --left request-01 --right request-02 --output attention-comparison.json
+```
+
+Команда сама находит первое отличие принятых токенов и сравнивает захваченные операнды на одинаковом записанном префиксе до него. Из диагностики исключаются строки с отвергнутым speculative conditioning и позиции после расхождения. Разные границы forward и пробелы истории не угадываются, а отмечаются как недостаточное покрытие. Проверяются все выбранные слои и восемь rank; локальные выходы проекции соединяются в порядке TP rank и сверяются с входом `o_conv` каждого rank. Внутри каждого запроса дополнительно проверяется передача выхода attention во вход проекции.
+
+Создаются три файла, существующие файлы не перезаписываются:
+
+- `attention-comparison.json` — все сравнения, метрики, сведения о первом отличающемся токене, состояния, TP reconstruction и ограничения покрытия.
+- `attention-comparison.summary.json` — компактная сводка.
+- `attention-comparison.summary.txt` — короткий текст для передачи. **Для начала пришлите первые три строки: `result`, `first_boundary`, `evidence`.**
+
+`first_boundary` содержит position, layer, rank, этап и поле. Численные метрики включают `different_elements`, `max_abs_finite`, относительную L2 и максимальное расстояние ULP; для HiF8/opaque данных — различающиеся байты. Порядок indices и совпадение их множества проверяются отдельно. NaN/Inf, metadata/weights и нарушения протокола отражаются автоматически. Различия полного MoME state остаются отдельными наблюдениями: используемая kernel история пока не доказана.
+
+Основные значения `result`:
+
+| Значение | Что найдено |
+| --- | --- |
+| `INDEXER_INPUT_OR_PARAMETERS_DIFFER` / `INDEXER_HISTORY_DIFFERS` | Первое отличие в quantized indexer operands или его истории |
+| `DSA_SELECTED_INDICES_DIFFER` | Изменился результат indexer либо indices фактического attention |
+| `ATTENTION_SELECTED_KV_DIFFERS` / `ATTENTION_KERNEL_INPUT_DIFFERS` | Различаются выбранные KV либо остальные входы attention |
+| `ATTENTION_OUTPUT_DIFFERS_WITH_EQUAL_SELECTED_INPUTS` | Выход attention различается при равных снятых действующих операндах и параметрах; направление для проверки kernel |
+| `POST_ATTENTION_PROJECTION_DIFFERS` | Первое отличие на выходе проекции |
+| `TP_RECONSTRUCTION_MISMATCH` | Вход o_conv не совпал с конкатенацией снятых TP chunks |
+| `INCOMPLETE_CAPTURE` | Не хватает rank, операндов, истории или проверенного сопоставления; это не вывод о причине |
+| `PROTOCOL_INVARIANT_FAILURE` / `NONFINITE_VALUES_OBSERVED` | Нарушен проверяемый протокол либо обнаружены NaN/Inf |
+| `NO_DIFFERENCE_IN_CAPTURED_ATTENTION` | В сравнимой записанной части attention отличий нет; полная генерация этим не проверена |
+
+Другие этапы, например Q/KV MoME input/output или параметры исполнения, обозначаются собственным `*_DIFFERS`. Даже при неполном покрытии наблюдаемая `first_boundary` остаётся в отчёте вместе с причиной ограничения. Это первая наблюдаемая граница, **не доказанная первопричина**; Q/KV и indexer могут выполняться параллельно. Равенство prompt до начала записи предполагается извне.
+
+CPU-тесты используют синтетические файлы всех восьми rank и mocks фактических wrappers, проверяют позиционную сигнатуру indexer, `None`/tuple returns, paging, квоты/лимиты, пропуск отвергнутых строк, пропуски истории, диагностику каждого участка и TP reconstruction. На NPU требуется smoke test: подтвердить отсутствие дампов до ARM, полные indexer/attention/projection stages после него, покрытие восьми rank, новые отчёты и явную остановку при малом budget. Синхронные копирования могут скрыть гонку и меняют TPOT; измерять производительность с этим режимом нельзя.
+
 ## Проверки и ограничения
 
 ```bash

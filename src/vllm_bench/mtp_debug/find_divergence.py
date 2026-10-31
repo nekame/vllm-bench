@@ -5,6 +5,7 @@ from pathlib import Path
 
 from vllm_bench.mtp_debug.compare_rejections import describe, load_events, requests, timeline
 from vllm_bench.mtp_debug.locate_output import locate
+from vllm_bench.mtp_debug.ranks import filter_rank
 
 
 def select_request(events, name):
@@ -88,13 +89,14 @@ def main(argv=None):
     parser.add_argument("path", type=Path, help="Capture directory or JSONL; may also contain rejection windows")
     parser.add_argument("--left", default="request-01", help="Left LABEL or request ID")
     parser.add_argument("--right", default="request-02", help="Right LABEL or request ID")
+    parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--context", type=int, default=4, help="Preceding token positions included in the report")
     parser.add_argument("--output", type=Path, help="Write complete JSON to a new file")
     args = parser.parse_args(argv)
     if not 0 <= args.context <= 10000:
         parser.error("--context must be between 0 and 10000")
     try:
-        events = load_events(args.path)
+        events = filter_rank(load_events(args.path), args.rank)
         description_a, left = select_request(events, args.left)
         description_b, right = select_request(events, args.right)
         if description_a == description_b:

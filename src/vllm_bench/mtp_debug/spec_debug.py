@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import time
+from vllm_bench.mtp_debug.ranks import rank_selected
 
 ACTIVE = contextvars.ContextVar("pangu_spec_debug", default=None)
 
@@ -56,7 +57,7 @@ def patch_sampler(module):
     module._pangu_spec_debug = True
     output = Path(os.environ["PANGU_SPEC_DEBUG_DIR"])
     limit = int(os.environ.get("PANGU_SPEC_DEBUG_LIMIT", "1000"))
-    selected_rank = int(os.environ.get("PANGU_SPEC_DEBUG_RANK", "0"))
+    selected_ranks = os.environ.get("PANGU_SPEC_DEBUG_RANK", "0")
     captured = 0
 
     original_compute = module.compute_probs_and_sample
@@ -104,7 +105,7 @@ def patch_sampler(module):
         nonlocal captured
         import torch.distributed as dist
         rank = dist.get_rank() if dist.is_initialized() else 0
-        if rank != selected_rank or captured >= limit or not (output / "ARM").exists():
+        if not rank_selected(rank, selected_ranks) or captured >= limit or not (output / "ARM").exists():
             return original_forward(self, *args, **kwargs)
         bound = inspect.signature(original_forward).bind(self, *args, **kwargs).arguments
         sampling = bound["sampling_metadata"]

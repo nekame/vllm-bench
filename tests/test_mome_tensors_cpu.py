@@ -12,7 +12,7 @@ from unittest.mock import patch
 from vllm_bench.mtp_debug import spec_rejection
 from vllm_bench.mtp_debug import debug_spec
 from vllm_bench.mtp_debug.tensor_io import (
-    TensorWriter, WIDTH, compare_bytes, compare_tensors, json_safe, numbers, read_tensor)
+    CODES, TensorWriter, WIDTH, compare_bytes, compare_tensors, json_safe, numbers, read_tensor)
 
 
 class Tensor:
@@ -57,7 +57,8 @@ class Tensor:
 def encode(tensor):
     if tensor.dtype == "bfloat16":
         return b"".join(struct.pack("<H", struct.unpack("<I", struct.pack("<f", x))[0] >> 16) for x in tensor.flat())
-    return struct.pack("<" + {"float16": "e", "float32": "f", "float64": "d"}[tensor.dtype] * tensor.numel(), *tensor.flat())
+    flat = [int(x) for x in tensor.flat()] if tensor.dtype in ("uint8", "int8", "int32", "int64") else tensor.flat()
+    return struct.pack("<" + CODES[tensor.dtype] * tensor.numel(), *flat)
 
 
 class PayloadTests(unittest.TestCase):
@@ -79,9 +80,10 @@ class PayloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch("vllm_bench.mtp_debug.tensor_io.tensor_bytes", side_effect=encode):
             writer = TensorWriter(directory, 1)
             for index, dtype in enumerate(WIDTH):
-                tensor = Tensor([[1., -2.], [3., 4.]], dtype)
+                second = 2. if dtype == "uint8" else -2.
+                tensor = Tensor([[1., second], [3., 4.]], dtype)
                 descriptor = writer.save(tensor, index, 0, "value")
-                self.assertEqual(numbers(read_tensor(directory, descriptor), dtype), [1., -2., 3., 4.])
+                self.assertEqual(numbers(read_tensor(directory, descriptor), dtype), [1., second, 3., 4.])
                 self.assertEqual(descriptor["rows"][1]["sample"], [3., 4.])
                 self.assertEqual(descriptor["byteorder"], "little")
                 path = Path(directory) / descriptor["path"]

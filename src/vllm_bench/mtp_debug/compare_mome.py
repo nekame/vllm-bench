@@ -7,6 +7,7 @@ from vllm_bench.mtp_debug.compare_rejections import incomplete_snapshots, load_e
 from vllm_bench.mtp_debug.find_divergence import analyze, missing_ranges, select_request
 from vllm_bench.mtp_debug.locate_output import locate
 from vllm_bench.mtp_debug.tensor_io import compare_tensors, json_safe
+from vllm_bench.mtp_debug.ranks import filter_rank
 
 
 def capture_root(path):
@@ -176,6 +177,7 @@ def main(argv=None):
     parser.add_argument("path", type=Path)
     parser.add_argument("--left", default="request-01")
     parser.add_argument("--right", default="request-02")
+    parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--position", type=int, help="Defaults to the first recorded committed-token difference")
     parser.add_argument("--capture-root", type=Path, help="Directory containing relative tensor payload paths")
     parser.add_argument("--output", type=Path)
@@ -183,7 +185,7 @@ def main(argv=None):
     if args.position is not None and args.position < 0:
         parser.error("--position must be nonnegative")
     try:
-        events = load_events(args.path)
+        events = filter_rank(load_events(args.path), args.rank)
         description_a, left = select_request(events, args.left)
         description_b, right = select_request(events, args.right)
         if description_a == description_b or description_a["rank"] != description_b["rank"]:
