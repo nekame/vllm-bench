@@ -90,12 +90,27 @@ class TensorWriter:
         if not self.can_save(size):
             return {"status": "not_recorded", "reason": self.stopped_reason,
                     "requested_bytes": size}
+        try:
+            return self.save_bytes(tensor_bytes(tensor), str(tensor.dtype).removeprefix("torch."),
+                                   list(tensor.shape), forward_index, call_index, name, row_summaries,
+                                   list(tensor.stride()) if hasattr(tensor, "stride") else None)
+        except Exception:
+            if self.stopped_reason != "capture_error":
+                self.stopped_reason = "capture_error"
+                try:
+                    self.write_status()
+                except OSError:
+                    pass
+            raise
+
+    def save_bytes(self, raw, dtype, shape, forward_index, call_index, name, row_summaries=False, original_strides=None):
+        """Write an already copied exact payload without reconstructing a device tensor."""
+        size = len(raw)
+        if not self.can_save(size):
+            return {"status": "not_recorded", "reason": self.stopped_reason, "requested_bytes": size}
         path = self.root / "tensors" / f"rank-{self.rank}-pid-{self.pid}" / f"forward-{forward_index:06d}" / f"call-{call_index:03d}" / f"{name}.bin"
         temporary = path.with_suffix(".tmp")
         try:
-            raw = tensor_bytes(tensor)
-            dtype = str(tensor.dtype).removeprefix("torch.")
-            shape = list(tensor.shape)
             if dtype not in WIDTH or len(raw) != size or math.prod(shape) * WIDTH[dtype] != size:
                 raise ValueError("Tensor shape/dtype/byte size mismatch")
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +132,7 @@ class TensorWriter:
                       "shape": shape, "dtype": dtype, "byteorder": "little",
                       "nbytes": size, "sha256": hashlib.sha256(raw).hexdigest(), "rows": rows,
                       "row_summaries": row_summaries,
-                      "original_strides": list(tensor.stride()) if hasattr(tensor, "stride") else None}
+                      "original_strides": original_strides}
             self.write_status()
             return result
         except Exception:

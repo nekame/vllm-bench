@@ -18,15 +18,28 @@ from vllm_bench.mtp_debug.tensor_io import TensorWriter, compare_bytes, read_ten
 
 
 class Cache(Tensor):
-    device = "cpu"
+    device = "npu"
+
+    def __init__(self, data, dtype="float32", slices=None):
+        super().__init__(data, dtype)
+        self.slices = [] if slices is None else slices
 
     def dim(self):
         return len(self.shape)
 
     def __getitem__(self, key):
-        if isinstance(key, tuple):
-            return Tensor([self.data[p][s] for p, s in zip(*key)], self.dtype)
-        return super().__getitem__(key)
+        if not isinstance(key, slice):
+            raise AssertionError("NPU advanced indexing must not be used")
+        self.slices.append((key.start, key.stop))
+        return Cache(self.data[key], self.dtype, self.slices)
+
+    def contiguous(self):
+        return self
+
+    def view(self, dtype):
+        if dtype != "uint8":
+            raise AssertionError("Cache view must preserve bytes")
+        return Tensor(list(encode(self)), "uint8")
 
 
 class RuntimeTests(unittest.TestCase):
@@ -125,19 +138,45 @@ class RuntimeTests(unittest.TestCase):
 
     def test_paged_payload_maps_logical_positions_and_checks_budget_before_copy(self):
         cache = Cache([[[1., 2.], [3., 4.]], [[5., 6.], [7., 8.]]])
-        fake_torch = NS(long="int64", tensor=lambda data, **kwargs: data)
+        fake_torch = NS(uint8="uint8")
         with tempfile.TemporaryDirectory() as root, patch.dict(sys.modules, {"torch": fake_torch}), patch("vllm_bench.mtp_debug.tensor_io.tensor_bytes", side_effect=encode):
             writer = TensorWriter(root, 1)
-            with patch.object(trace, "writer", return_value=writer):
+            with patch.object(trace, "writer", return_value=writer), patch.object(trace, "tensor_bytes", side_effect=encode):
                 descriptor = trace.paged({"forward_index": 0}, {"slot": 0}, "selected", cache, [0, 3], [[1, 0]])
             self.assertEqual(struct.unpack("<4f", read_tensor(root, descriptor)), (5., 6., 3., 4.))
             self.assertEqual(descriptor["physical_pages"], [1, 0])
             self.assertEqual(descriptor["page_slots"], [0, 1])
+            self.assertEqual(cache.slices, [(1, 2), (0, 1)])
+            self.assertEqual(descriptor["gather_method"], "basic_page_slice_to_cpu_then_byte_offsets")
             writer = TensorWriter(root, 2, max_tensor_bytes=1)
-            with patch.object(trace, "writer", return_value=writer), patch.object(trace, "save") as save:
+            with patch.object(trace, "writer", return_value=writer), patch.object(trace, "tensor_bytes") as copy_bytes:
                 descriptor = trace.paged({"forward_index": 0}, {"slot": 0}, "selected", cache, [0], [[0]])
             self.assertEqual(descriptor["reason"], "tensor_size_limit")
-            save.assert_not_called()
+            copy_bytes.assert_not_called()
+            self.assertEqual(len(cache.slices), 2)
+
+    def test_packed_hif8_bytes_are_preserved_and_each_page_copied_once(self):
+        rows = [[(i + offset) % 256 for i in range(656)] for offset in range(4)]
+        cache = Cache([[[rows[0]], [rows[1]]], [[rows[2]], [rows[3]]]], "uint8")
+        with tempfile.TemporaryDirectory() as root, patch.dict(sys.modules, {"torch": NS(uint8="uint8")}), patch.object(trace, "tensor_bytes", side_effect=encode):
+            writer = TensorWriter(root, 1)
+            with patch.object(trace, "writer", return_value=writer):
+                descriptor = trace.paged({"forward_index": 0}, {"slot": 0}, "packed", cache, [3, 0, 1], [[1, 0]], opaque=True)
+            self.assertEqual(read_tensor(root, descriptor), bytes(rows[1] + rows[2] + rows[3]))
+            self.assertEqual(descriptor["shape"], [3, 1, 656])
+            self.assertEqual(descriptor["comparison_mode"], "bytes_only")
+            self.assertEqual(cache.slices, [(0, 1), (1, 2)])
+
+    def test_empty_paged_selection_creates_valid_empty_payload_without_copy(self):
+        cache = Cache([[[1., 2.]]])
+        with tempfile.TemporaryDirectory() as root, patch.object(trace, "tensor_bytes") as copy_bytes:
+            writer = TensorWriter(root, 1)
+            with patch.object(trace, "writer", return_value=writer):
+                descriptor = trace.paged({"forward_index": 0}, {"slot": 0}, "empty", cache, [], [[0]])
+            self.assertEqual(read_tensor(root, descriptor), b"")
+            self.assertEqual(descriptor["shape"], [0, 2])
+            self.assertEqual(cache.slices, [])
+            copy_bytes.assert_not_called()
 
     def test_decode_quota_is_per_request_and_prefill_does_not_consume_it(self):
         runner = NS(_pangu_attention_counts={}, _pangu_attention_topology={})

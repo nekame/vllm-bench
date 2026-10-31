@@ -10,7 +10,7 @@ from vllm_bench.mtp_debug.attention_layout import PACKED_WIDTH, page_coordinates
 from vllm_bench.mtp_debug.mome_tensors import runtime_info
 from vllm_bench.mtp_debug.ranks import current_rank
 from vllm_bench.mtp_debug.spec_debug import values
-from vllm_bench.mtp_debug.tensor_io import TensorWriter, WIDTH, tensor_identity
+from vllm_bench.mtp_debug.tensor_io import TensorWriter, WIDTH, tensor_bytes, tensor_identity
 
 OP = contextvars.ContextVar("pangu_attention_operator", default=None)
 
@@ -92,14 +92,39 @@ def paged(frame, item, name, tensor, positions, table, opaque=False):
     if tensor is None or tensor.dim() < 2:
         return {"status": "not_recorded", "reason": "unsupported_paged_tensor"}
     pages, slots = page_coordinates(positions, table, tensor.shape[1], tensor.shape[0])
-    expected = len(positions) * math.prod(tensor.shape[2:]) * tensor.element_size()
+    row_bytes = math.prod(tensor.shape[2:]) * tensor.element_size()
+    expected = len(positions) * row_bytes
     if not writer().can_save(expected):
         return {"status": "not_recorded", "reason": writer().stopped_reason}
-    import torch
-    p = torch.tensor(pages, device=tensor.device, dtype=torch.long)
-    s = torch.tensor(slots, device=tensor.device, dtype=torch.long)
-    rows = tensor[p, s]
-    descriptor = save(frame, item, name, rows, opaque)
+    source_dtype = str(tensor.dtype)
+    dtype = source_dtype.removeprefix("torch.")
+    opaque = opaque or dtype not in WIDTH
+    # NPU advanced indexing (tensor[pages, slots]) is not supported for all
+    # quantized cache layouts. Copy each referenced page once using basic
+    # slicing, then gather exact rows on CPU by byte offsets. Never copy the
+    # entire cache or run an indexing kernel on it.
+    grouped = {}
+    for index, (page, slot) in enumerate(zip(pages, slots)):
+        grouped.setdefault(page, []).append((index, slot))
+    raw = bytearray(expected)
+    for page, rows in grouped.items():
+        cpu_page = tensor[page:page + 1].detach().cpu().contiguous()
+        if opaque:
+            import torch
+            cpu_page = cpu_page.view(torch.uint8)
+        content = tensor_bytes(cpu_page)
+        if len(content) != tensor.shape[1] * row_bytes:
+            raise ValueError("Copied KV page byte size mismatch")
+        for index, slot in rows:
+            raw[index * row_bytes:(index + 1) * row_bytes] = content[slot * row_bytes:(slot + 1) * row_bytes]
+    shape = [len(positions), *tensor.shape[2:]]
+    if opaque:
+        shape = [len(positions), *tensor.shape[2:-1], tensor.shape[-1] * tensor.element_size()] if tensor.dim() > 2 else [len(positions), tensor.element_size()]
+        dtype = "uint8"
+    descriptor = writer().save_bytes(raw, dtype, shape, frame["forward_index"], item["slot"], name)
+    if opaque:
+        descriptor.update(comparison_mode="bytes_only", source_dtype=source_dtype)
+    descriptor["gather_method"] = "basic_page_slice_to_cpu_then_byte_offsets"
     descriptor["logical_positions"] = positions
     # Physical mappings are audit data, never used as equality evidence.
     descriptor["physical_pages"] = pages

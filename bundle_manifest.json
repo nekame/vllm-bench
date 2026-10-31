@@ -8,7 +8,7 @@
     "conf/layer_profile/suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
     "doc/CONTRIBUTING.md": "31a88302e4827022ebcc10082d32f94fa66042102711b532f5c21639a6595afd",
     "doc/layer_profile/README.md": "00d918301f9546ee5ec225465139762e47927ec4be60a34de1e18c78c3897a24",
-    "doc/mtp_debug/README.md": "30411c3f51c9f7c18eb9d3b01ce11832ba69cb5efb8a6fa4a7443df294e96d0d",
+    "doc/mtp_debug/README.md": "c3e3521ae837ca5f52b773741bf864bdc71a92f5d6bb219793ce67a65e316fd6",
     "doc/mtp_profile/README.md": "0786195165dc5bf39325e598f61d04e0cfb55ac8987a5fa983bf4e4070fc4401",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
@@ -31,7 +31,7 @@
     "src/vllm_bench/mtp_debug/__init__.py": "a06b936959bfe6b6da8d66dc0110bfb0ec7ac3ff1648473f7d7451a3146e198d",
     "src/vllm_bench/mtp_debug/attention_compare.py": "341882fb096c29f6ebb3e361ed463f0c54e137191cedf7379132f5d19449e6ca",
     "src/vllm_bench/mtp_debug/attention_layout.py": "cf2e6127ac998bbdfab860d54606a7ae878ed2174214d06e19b08b1e83bc3259",
-    "src/vllm_bench/mtp_debug/attention_trace.py": "fa6e9f420c069d0d5e6c3a3c073124174a03b6b268b9eb9719b7e4c42299b68f",
+    "src/vllm_bench/mtp_debug/attention_trace.py": "c68686ce948247ade5305f240e59d2c0c3f829a4a6b25f64c1ed9856a169cc02",
     "src/vllm_bench/mtp_debug/compare_attention.py": "939fdd7b8469119918476719e599ef53d0afcfc0ec67be43eeca3ff95bf0e020",
     "src/vllm_bench/mtp_debug/compare_mome.py": "04f11976ae9496c41380160482c8d8b7a45404923694e865dbf3863b5c79df24",
     "src/vllm_bench/mtp_debug/compare_rejections.py": "f32b8f21798d5c146486649efc49b112ab2cbe53304111df55c6b10d7661e024",
@@ -44,7 +44,7 @@
     "src/vllm_bench/mtp_debug/spec_debug.py": "289a0fd358ab404f8a307105fd4306a527e0863f2428d8f4af5d1d5c33fe6767",
     "src/vllm_bench/mtp_debug/spec_rejection.py": "1c58aec56da86277448862accda00dfc6f4cccf00579449c5947ac6546e86bd8",
     "src/vllm_bench/mtp_debug/summarize_rejections.py": "c675f9622d18bd139e0f1f22af8359d2520ef2019ae6cd7a0a8e0b9d67707217",
-    "src/vllm_bench/mtp_debug/tensor_io.py": "7fad07c3106b173236e1b72925d9860725a5cdec4591276487f73c17d2178351",
+    "src/vllm_bench/mtp_debug/tensor_io.py": "d8b610e34f7c5a10a0181ff8613a64eaade6b1d0de0c4ba2c1e92c1069e51e94",
     "src/vllm_bench/mtp_profile/__init__.py": "6ef0ae80c207d81e67d349d5c8853ed7d4b1c2e296be387e81243e5c492804f3",
     "src/vllm_bench/mtp_profile/instrumentation/sitecustomize.py": "8c83178325c31fbc4d4fc64a2aaf115e67b97dbcfedd707c8e7293b68e6d484f",
     "src/vllm_bench/mtp_profile/mtp_capture.py": "4fbdb68552eec970114921694ef68302081536d56d5086ace7769c56f8aabb43",
@@ -60,7 +60,7 @@
     "src/vllm_bench/tools/export_profile.py": "f225f6ce9421a38909a0894eefa673c32506ecfc07717bb9cebab94265453b77",
     "tests/attention_fixtures.py": "5e67ce8f0c13fa725731d9de0a47eff875d6fce9cb07cee9e158781fc681fbab",
     "tests/test_attention_compare_cpu.py": "582e8308f4243018025c7a52a755b720ceb2b344271e8b352cdbc40490048f01",
-    "tests/test_attention_trace_cpu.py": "2afa715f2b61534fea13135f4a917584f44597ba972c4539ac3db3bfd9bcef8e",
+    "tests/test_attention_trace_cpu.py": "dd667467f03407c5a8e281a0c45f3cecd12eeea49a840034be02c1d6f68c5d83",
     "tests/test_compare_mome_cpu.py": "52efe36191cbbf18a3c4c6f773728adb5d1ee0a8f6c6d171ccb42fefb990e487",
     "tests/test_compare_rejections_cpu.py": "161d32da8ad796b562ec23c60ccdd3b2452d7668cef3e1f9e7c88febeb0adda0",
     "tests/test_cpu.py": "d2e3c60c87ca05d76d6610cb620f9a1c3b8731c920c8024cae7230be12a5ac9c",
@@ -73,7 +73,7 @@
     "tests/test_spec_rejection_cpu.py": "9e180edd4d2e85dd8ae490df50d70cdce25df4a5fef0b5ae3645fe4b206a290d"
   },
   "validation": {
-    "cpu_tests": 105,
+    "cpu_tests": 107,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python3 -m unittest discover -s tests",
     "npu_execution_performed": false,
@@ -87,6 +87,7 @@
     "mtp_mome_tensor_validation": "CPU-only: exact BF16/FP16/FP32/FP64 payloads, row-level [3,8192] comparison, inplace snapshots, budgets, integrity, legacy captures and offline CLI; real torch/NPU serialization and server execution pending smoke tests",
     "mtp_mome_inplace_return_validation": "CPU mocks: preserve inplace None return, capture mutated x as output, report non-inplace None as unavailable; NPU smoke test pending",
     "mtp_attention_trace_validation": "CPU-only: 8-rank stage diagnosis, logical paging, HiF8 byte components, index ordering, TP reconstruction, rejected rows, gaps, legacy/missing payloads, nonfinite/protocol failures, scoped actual-operator mocks, positional QLI2, return preservation, quotas, integer codec and ULP/L2; actual torch/NPU hooks and execution pending smoke tests",
-    "mtp_attention_npu_validation": "not performed; requires A5 DP1/TP8 PP1 hif8_ds_mla server smoke test"
+    "mtp_attention_npu_validation": "not performed; requires A5 DP1/TP8 PP1 hif8_ds_mla server smoke test",
+    "mtp_attention_paged_copy_validation": "CPU mocks: prohibit NPU advanced indexing, copy referenced pages once with basic slices, preserve selected FP32/HiF8 bytes and row order, validate empty selection and limits before copy; NPU server rerun pending"
   }
 }
