@@ -6,8 +6,10 @@ dropping metadata. ML libraries are imported only when encoding/decoding state.
 from __future__ import annotations
 
 import enum
+from copy import copy
 import importlib
 import importlib.metadata
+import inspect
 import json
 from pathlib import Path
 
@@ -24,6 +26,31 @@ def versions():
     return result
 
 
+def recordable_inputs(inputs):
+    """Detach Omni's runtime InputBatch back-reference from the saved inputs."""
+    metadata = inputs["sampling_metadata"]
+    if getattr(metadata, "npu_input_batch", None) is None:
+        return inputs
+    if not metadata.no_penalties:
+        raise ValueError("Recording npu_input_batch with sampling penalties is unsupported")
+    # Shallow-copy only metadata. Keep tensors/processor state, and do not touch
+    # the actual metadata used by the full server's original propose call.
+    result = dict(inputs)
+    result["sampling_metadata"] = copy(metadata)
+    result["sampling_metadata"].npu_input_batch = None
+    return result
+
+
+def bind_sampling_runtime(inputs, runner):
+    """Rebind recorded runtime links to the standalone runner, before timing."""
+    metadata = inputs["sampling_metadata"]
+    if hasattr(metadata, "npu_input_batch"):
+        if not metadata.no_penalties:
+            raise ValueError("Replay npu_input_batch with sampling penalties is unsupported")
+        metadata.npu_input_batch = runner.input_batch
+    return inputs
+
+
 class Codec:
     def __init__(self, tensors=None, device="cpu", limit_bytes=None, reuse_buffers=None):
         self.tensors = {} if tensors is None else tensors
@@ -32,8 +59,19 @@ class Codec:
         self.memo = {}
         self.keepalive = []
         self.reuse_buffers = reuse_buffers
+        self.objects = {}
 
-    def encode(self, value):
+    def encode(self, value, path="$"):
+        try:
+            return self._encode(value, path)
+        except (TypeError, ValueError) as error:
+            if getattr(error, "_mtp_state_path", False):
+                raise
+            annotated = type(error)(f"{error} at {path}")
+            annotated._mtp_state_path = True
+            raise annotated from error
+
+    def _encode(self, value, path):
         import torch
         import numpy as np
         if value is None or type(value) in (bool, str, int, float):
@@ -54,25 +92,52 @@ class Codec:
         if isinstance(value, torch.device):
             return {"$device": str(value)}
         if isinstance(value, torch.Generator):
-            return {"$generator": self.encode(value.get_state()), "device": str(value.device)}
+            return {"$generator": self.encode(value.get_state(), path + ".rng_state"), "device": str(value.device)}
         if isinstance(value, np.ndarray):
-            return {"$numpy": self.encode(torch.from_numpy(value.copy()))}
+            return {"$numpy": self.encode(torch.from_numpy(value.copy()), path + ".numpy_tensor")}
         if isinstance(value, np.generic):
-            return self.encode(value.item())
+            return self.encode(value.item(), path)
         if isinstance(value, enum.Enum):
-            return {"$enum": self.type_name(value), "value": self.encode(value.value)}
+            return {"$enum": self.type_name(value), "value": self.encode(value.value, path + ".value")}
+        if inspect.ismethod(value):
+            owner, name = value.__self__, value.__func__.__name__
+            cls = owner if isinstance(owner, type) else type(owner)
+            owner_type = self.class_name(cls)
+            declared = inspect.getattr_static(cls, name, None)
+            if isinstance(owner, type):
+                if not isinstance(declared, classmethod) or declared.__func__ is not value.__func__:
+                    raise TypeError("Unsupported class-bound method override")
+                return {"$class_method": owner_type, "name": name}
+            if declared is not value.__func__:
+                raise TypeError("Unsupported instance-bound method override")
+            # Do not recursively capture a runner/model hidden behind a callback.
+            if id(owner) not in self.objects:
+                raise TypeError(f"Bound method owner is outside recorded metadata: {owner_type}.{name}")
+            return {"$bound_method": self.objects[id(owner)], "name": name}
+        if callable(value):
+            raise TypeError(f"Unsupported recorded callable: {type(value)}")
         if isinstance(value, dict):
-            return {"$dict": [[self.encode(k), self.encode(v)] for k, v in value.items()]}
+            return {"$dict": [[self.encode(k, path + ".key"),
+                               self.encode(v, f"{path}[{k!r}]" if type(k) in (str, int) else path + ".value")]
+                              for k, v in value.items()]}
         if isinstance(value, (list, tuple, set)):
-            return {"$" + type(value).__name__: [self.encode(x) for x in value]}
+            return {"$" + type(value).__name__: [self.encode(x, f"{path}[{i}]") for i, x in enumerate(value)]}
         if hasattr(value, "__dict__"):
             name = self.type_name(value)
-            return {"$object": name, "state": self.encode(vars(value))}
+            if id(value) in self.objects:
+                return {"$object_ref": self.objects[id(value)]}
+            key = str(len(self.objects))
+            self.objects[id(value)] = key
+            self.keepalive.append(value)
+            return {"$object": name, "id": key, "state": self.encode(vars(value), path)}
         raise TypeError(f"Unsupported recorded state: {type(value)}")
 
     @staticmethod
     def type_name(value):
-        cls = type(value)
+        return Codec.class_name(type(value))
+
+    @staticmethod
+    def class_name(cls):
         if not cls.__module__.startswith(("vllm.", "omni_npu.")) or "<locals>" in cls.__qualname__:
             raise TypeError(f"Unsupported state class: {cls}")
         return cls.__module__ + ":" + cls.__qualname__
@@ -121,6 +186,22 @@ class Codec:
             return self.decode(tree["$numpy"]).cpu().numpy().copy()
         if "$enum" in tree:
             return self.resolve(tree["$enum"])(self.decode(tree["value"]))
+        if "$object_ref" in tree:
+            return self.objects[tree["$object_ref"]]
+        if "$bound_method" in tree or "$class_method" in tree:
+            owner = (self.resolve(tree["$class_method"]) if "$class_method" in tree
+                     else self.objects[tree["$bound_method"]])
+            name = tree["name"]
+            cls = owner if isinstance(owner, type) else type(owner)
+            self.class_name(cls)
+            declared = inspect.getattr_static(cls, name, None)
+            if isinstance(owner, type):
+                if not isinstance(declared, classmethod):
+                    raise ValueError("Recorded class method no longer exists")
+                return declared.__get__(None, cls)
+            if not inspect.isfunction(declared):
+                raise ValueError("Recorded instance method no longer exists")
+            return declared.__get__(owner, cls)
         for name, cls in (("list", list), ("tuple", tuple), ("set", set)):
             if "$" + name in tree:
                 return cls(self.decode(x) for x in tree["$" + name])
@@ -128,6 +209,8 @@ class Codec:
             return {self.decode(k): self.decode(v) for k, v in tree["$dict"]}
         if "$object" in tree:
             obj = object.__new__(self.resolve(tree["$object"]))
+            if "id" in tree:
+                self.objects[tree["id"]] = obj
             for key, value in self.decode(tree["state"]).items():
                 object.__setattr__(obj, key, value)
             return obj
@@ -161,9 +244,82 @@ def cache_views(proposer):
     return {name: context[name].kv_cache for name in proposer.attn_layer_names}
 
 
+def snapshot_cache_blocks(proposer, group_ids, batch, limit_bytes):
+    """Capture referenced draft pages, never the backing shared with target.
+
+    Keep original page IDs and full destination shapes; no slot remapping.
+    Supported NPU cache leaves have the physical block on axis zero.
+    """
+    import torch
+    runner = proposer.runner
+    views = cache_views(proposer)
+    result, used = {}, 0
+    for gid in group_ids:
+        group = runner.kv_cache_config.kv_cache_groups[gid]
+        table = runner.input_batch.block_table[gid]
+        if batch > len(table.num_blocks_per_row):
+            raise ValueError("Capture batch exceeds block table rows")
+        ids = set()
+        for row in range(batch):
+            count = int(table.num_blocks_per_row[row])
+            if count < 0 or count > table.block_table.cpu.shape[1]:
+                raise ValueError("Invalid draft block table row length")
+            ids.update(int(x) for x in table.block_table.cpu[row, :count].tolist())
+        # Zero is the reserved null block; negative values are not physical IDs.
+        ids.discard(0)
+        if any(x < 0 or x >= runner.kv_cache_config.num_blocks for x in ids):
+            raise ValueError("Invalid draft block ID")
+        indices = torch.tensor(sorted(ids), dtype=torch.int64, device="cpu")
+
+        def snapshot(value):
+            nonlocal used
+            if isinstance(value, torch.Tensor):
+                if not value.shape or value.shape[0] != runner.kv_cache_config.num_blocks:
+                    raise ValueError(f"Unsupported draft cache block axis: {tuple(value.shape)}")
+                block_bytes = value[0].numel() * value.element_size()
+                used += len(ids) * block_bytes + indices.numel() * indices.element_size()
+                if used > limit_bytes:
+                    raise ValueError("Capture exceeds byte limit; increase PANGU_MTP_CAPTURE_MAX_GIB")
+                values = torch.empty((len(ids), *value.shape[1:]), dtype=value.dtype, device="cpu")
+                # Bounded gather temporary: the full model may fill NPU memory.
+                chunk = max(1, (16 * 1024**2) // max(1, block_bytes))
+                for start in range(0, len(ids), chunk):
+                    selected = indices[start:start + chunk].to(value.device)
+                    values[start:start + chunk].copy_(value.detach().index_select(0, selected).cpu())
+                return {"$mtp_cache_blocks": 1, "shape": list(value.shape),
+                        "indices": indices, "values": values}
+            if isinstance(value, (list, tuple)):
+                return type(value)(snapshot(x) for x in value)
+            raise TypeError(f"Unsupported draft cache container: {type(value)}")
+
+        for name in group.layer_names:
+            if name in views:
+                if name in result:
+                    raise ValueError(f"Draft layer belongs to multiple cache groups: {name}")
+                result[name] = snapshot(views[name])
+    if result.keys() != views.keys():
+        raise ValueError("Draft cache groups do not cover every draft layer")
+    return result
+
+
 def copy_tree(destination, source):
     import torch
     if isinstance(destination, torch.Tensor):
+        if isinstance(source, dict) and source.get("$mtp_cache_blocks") == 1:
+            values, indices = source["values"], source["indices"]
+            if (list(destination.shape) != source["shape"] or destination.dtype != values.dtype
+                    or tuple(values.shape) != (indices.numel(), *destination.shape[1:])
+                    or len(indices.shape) != 1 or indices.dtype != torch.int64):
+                raise ValueError("Sparse cache layout mismatch")
+            destination.zero_()
+            if indices.numel():
+                # Bound transfer temporaries during repeated state restoration.
+                block_bytes = max(1, values[0].numel() * values.element_size())
+                chunk = max(1, (16 * 1024**2) // block_bytes)
+                for start in range(0, indices.numel(), chunk):
+                    destination.index_copy_(0, indices[start:start + chunk].to(destination.device),
+                                            values[start:start + chunk].to(destination.device))
+            return
         if destination.shape != source.shape or destination.dtype != source.dtype:
             raise ValueError(f"Cache layout mismatch: {destination.shape}/{destination.dtype} vs {source.shape}/{source.dtype}")
         destination.copy_(source)
@@ -181,11 +337,36 @@ def copy_tree(destination, source):
         raise ValueError("Cache scalar state mismatch")
 
 
+def ensure_draft_token_buffer(runner, *, dtype=None, size=None):
+    """Standalone initialization/replay only; never invent state in a recorder."""
+    buf = getattr(runner, "cu_num_draft_tokens", None)
+    if buf is None:
+        if dtype is None:
+            import torch
+            dtype = torch.int32
+        buf = runner._make_buffer(runner.max_num_reqs if size is None else size, dtype=dtype)
+        buf.cpu.zero_()
+        buf.copy_to_gpu()
+        runner.cu_num_draft_tokens = buf
+    return buf
+
+
+def runner_buffers(runner):
+    """Required buffers plus the optional multi-MTP cumulative draft counts."""
+    for name in ("num_accepted_tokens", "num_prompt_tokens"):
+        yield name, getattr(runner, name)
+    buf = getattr(runner, "cu_num_draft_tokens", None)
+    if buf is not None:
+        yield "cu_num_draft_tokens", buf
+
+
 def runner_state(runner, group_ids):
     """Mutable runner buffers consumed by patched EagleProposer."""
     result = {"buffers": {}, "block_tables": []}
-    for name in ("num_accepted_tokens", "num_prompt_tokens", "cu_num_draft_tokens"):
-        buf = getattr(runner, name)
+    if (getattr(runner.drafter, "fix_multi_mtp_kvcache", False)
+            and getattr(runner, "cu_num_draft_tokens", None) is None):
+        raise ValueError("fix_multi_mtp_kvcache requires cu_num_draft_tokens before capturing runner state")
+    for name, buf in runner_buffers(runner):
         result["buffers"][name] = {"gpu": buf.gpu, "cpu": buf.cpu}
     for gid in group_ids:
         table = runner.input_batch.block_table[gid]
@@ -203,8 +384,12 @@ def runner_state(runner, group_ids):
 def restore_runner(runner, state):
     import numpy as np
     for name, values in state["buffers"].items():
-        copy_tree(getattr(runner, name).gpu, values["gpu"])
-        copy_tree(getattr(runner, name).cpu, values["cpu"])
+        if name == "cu_num_draft_tokens":
+            buf = ensure_draft_token_buffer(runner, dtype=values["gpu"].dtype, size=values["gpu"].shape[0])
+        else:
+            buf = getattr(runner, name)
+        copy_tree(buf.gpu, values["gpu"])
+        copy_tree(buf.cpu, values["cpu"])
     for gid, values in enumerate(state["block_tables"]):
         table = runner.input_batch.block_table[gid]
         for key, dst in (("gpu", table.block_table.gpu), ("cpu", table.block_table.cpu),

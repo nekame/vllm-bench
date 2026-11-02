@@ -9,8 +9,8 @@ import json
 import os
 from pathlib import Path
 
-from vllm_bench.mtp_profile.mtp_common import digest, proposer_globals, write_json
-from vllm_bench.mtp_profile.mtp_state import cache_views, runner_state, save_state, versions
+from vllm_bench.mtp_profile.mtp_common import TOPOLOGIES, compilation_input_options, digest, proposer_globals, topology_name, topology_world_size, write_json
+from vllm_bench.mtp_profile.mtp_state import recordable_inputs, runner_state, save_state, snapshot_cache_blocks, versions
 
 
 def compilation_options(config):
@@ -22,7 +22,7 @@ def compilation_options(config):
         value = getattr(config, key)
         result[key] = dataclasses.asdict(value) if dataclasses.is_dataclass(value) else value
     json.dumps(result)  # Reject non-JSON custom compiler callbacks explicitly.
-    return result
+    return compilation_input_options(result)
 
 
 def draft_cache_config(proposer):
@@ -37,14 +37,21 @@ def draft_cache_config(proposer):
             group_ids.append(gid)
     config.kv_cache_groups = groups
     tensors = []
+    covered = set()
     for tensor in config.kv_cache_tensors:
         retained = [n for n in tensor.shared_by if n in names]
         if retained:
-            # A cross-target shared allocation would also snapshot target data.
-            if set(retained) != set(tensor.shared_by):
-                raise ValueError("Draft shares a raw cache allocation with target; compact capture unsupported")
-            tensor.shared_by = retained
-            tensors.append(tensor)
+            if getattr(tensor, "block_stride", 0) or getattr(tensor, "offset", 0):
+                raise ValueError("Packed cross-layer cache allocations are not supported by MTP capture")
+            # Hybrid pools alias layers from different groups. Replay gives each
+            # draft layer an independent allocation with identical block numbers.
+            for name in retained:
+                independent = deepcopy(tensor)
+                independent.shared_by = [name]
+                tensors.append(independent)
+                covered.add(name)
+    if covered != names:
+        raise ValueError(f"Draft cache allocations missing: {sorted(names - covered)}")
     config.kv_cache_tensors = tensors
     return config, group_ids
 
@@ -65,12 +72,9 @@ def attach(runner):
         raise ValueError("Invalid capture limits")
     rank = torch.distributed.get_rank()
     parallel = proposer.vllm_config.parallel_config
-    if parallel.tensor_parallel_size == 8 and parallel.data_parallel_size == 1 and not parallel.enable_expert_parallel:
-        topology = "tp8"
-    elif parallel.tensor_parallel_size == 1 and parallel.data_parallel_size == 8 and parallel.enable_expert_parallel:
-        topology = "dp8-ep8"
-    else:
-        raise ValueError("Recorder supports TP8/DP1 or TP1/DP8/EP8 only")
+    topology = topology_name(parallel.tensor_parallel_size, parallel.data_parallel_size, parallel.enable_expert_parallel)
+    if torch.distributed.get_world_size() != topology_world_size(TOPOLOGIES[topology]):
+        raise ValueError(f"Recorder world size differs from topology {topology}; extra parallel dimensions are unsupported")
 
     @functools.wraps(original)
     def record(*args, **kwargs):
@@ -88,8 +92,10 @@ def attach(runner):
             raise ValueError("Recorder v1 supports draft sampling without penalties/token constraints")
         config = json.loads((Path(proposer.vllm_config.model_config.model) / "config.json").read_text())
         cache_config, gids = draft_cache_config(proposer)
-        state = {"inputs": inputs, "cache_config": cache_config,
-                 "caches": cache_views(proposer), "runner": runner_state(runner, gids),
+        torch.npu.synchronize()
+        state = {"inputs": recordable_inputs(inputs), "cache_config": cache_config,
+                 "caches": snapshot_cache_blocks(proposer, gids, inputs["next_token_ids"].shape[0], max_bytes),
+                 "runner": runner_state(runner, gids),
                  "batch_execution": runner.batch_execution_and_padding_state,
                  "rng_cpu": torch.get_rng_state(), "rng_npu": torch.npu.get_rng_state()}
         torch.npu.synchronize()
@@ -136,6 +142,7 @@ def attach(runner):
         meta = {"format": "pangu-mtp-capture-v1", "rank": rank, "world_size": torch.distributed.get_world_size(),
                 "topology": topology, "config_sha256": digest(config), "versions": versions(),
                 "depth": inputs["num_speculative_tokens"], "snapshot_bytes": size,
+                "cache_snapshot": "draft-blocks-v1",
                 "input_tokens": inputs["target_token_ids"].numel(),
                 "batch_per_dp_rank": inputs["next_token_ids"].shape[0],
                 "padded_tokens": state["batch_execution"][1].num_tokens if state["batch_execution"] else None,
@@ -153,6 +160,7 @@ def attach(runner):
                                       ("OMNI_DRAFT_TOP_K", "OMNI_PANGU_V2_HIGH_THROUGHOUT")},
                 "patches": os.environ.get("OMNI_VLLM_PATCHES_DIR"),
                 "compilation_config_repr": str(cfg.compilation_config),
+                "effective_compile_backend": cfg.compilation_config.backend,
                 "compilation_options": compilation_options(cfg.compilation_config),
                 "complete": True}
         write_json(folder / "capture.json", meta)

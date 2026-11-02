@@ -1,5 +1,8 @@
 """Standalone MTP CPU checks: no torch, vLLM, torch_npu or hardware imports."""
 import contextlib
+import csv
+from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import importlib.abc
 import io
@@ -12,7 +15,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace, ModuleType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vllm_bench.mtp_profile import mtp_common
 from vllm_bench.layer_profile import prepare_checkpoint
@@ -20,6 +23,7 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint
 from vllm_bench.mtp_profile import profile_mtp
 from vllm_bench.mtp_profile import record_mtp
 from vllm_bench.mtp_profile import mtp_state
+from vllm_bench.mtp_profile import mtp_capture
 from vllm_bench.mtp_profile import mtp_runtime
 from vllm_bench.mtp_profile import verify_mtp_checkpoint
 
@@ -157,9 +161,32 @@ class PlanningTests(unittest.TestCase):
                     run.assert_not_called()
                     self.assertFalse(output.exists())
                     plan = json.loads(stream.getvalue())
+                    self.assertEqual(plan["world_size"], 1 if topology == "tp1" else 8)
                     self.assertEqual(plan["total_sequences"], 8 if topology == "dp8-ep8" else 1)
                     self.assertEqual(plan["expected_layers"]["7"], [50] * 7)
                     self.assertFalse(plan["target_weights_loaded"])
+                    self.assertEqual(plan["runtime_environment"], {"VLLM_USE_AOT_COMPILE": "0"} if execution == "graph" else {})
+
+    def test_synthetic_query_length_preserves_batch_and_depth_and_rejects_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+            args = ["--model", str(model), "--operator-config", str(operator),
+                    "--topology", "tp8", "--execution", "graph", "--depths", "7",
+                    "--output", str(root / "result"), "--synthetic-query-length", "8"]
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream), patch.object(subprocess, "run") as run:
+                self.assertEqual(profile_mtp.main(args), 0)
+            run.assert_not_called()
+            plan = json.loads(stream.getvalue())
+            self.assertEqual(plan["options"]["synthetic_query_length"], 8)
+            self.assertEqual(plan["options"]["depths"], [7])
+            self.assertEqual(plan["total_sequences"], 1)
+            self.assertFalse((root / "result").exists())
+            for extra in (["--synthetic-query-length", "0"],
+                          ["--input", "replay", "--capture", str(root / "capture")]):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    profile_mtp.main(args + extra)
 
     def test_wrong_capture_topology_and_config_fail(self):
         cfg = {"num_hidden_layers": 50}
@@ -188,15 +215,34 @@ class PlanningTests(unittest.TestCase):
                         "world_size": 8, "complete": True, "depth": 7,
                         "config_sha256": mtp_common.digest(cfg), "versions": {}, "runtime_limits": {},
                         "additional_config": {}, "input_tokens": 1, "batch_per_dp_rank": 1, "padded_tokens": 1,
-                        "compilation_options": {"mode": 3, "cudagraph_mode": "FULL"},
+                        "compilation_options": {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY",
+                                                "backend": mtp_common.OMNI_COMPILE_BACKEND,
+                                                "pass_config": {"enable_qk_norm_rope_fusion": None, "enable_sp": False}},
                         "operator_config": json.loads(operator.read_text())}
                 (path / "capture.json").write_text(json.dumps(meta))
             args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp8",
-                    "--input", "replay", "--capture", str(folder), "--output", str(root / "result")]
+                    "--input", "replay", "--capture", str(folder), "--output", str(root / "result"),
+                    "--execution", "graph"]
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
                 profile_mtp.main(args)
             self.assertEqual(json.loads(stream.getvalue())["options"]["depths"], [7])
+            self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["cudagraph_mode"], "FULL_DECODE_ONLY")
+            self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["pass_config"], {"enable_sp": False})
+            self.assertEqual(json.loads(stream.getvalue())["compilation_pass_defaults"], ["enable_qk_norm_rope_fusion"])
+            self.assertEqual(json.loads(stream.getvalue())["compilation_config"]["backend"], "")
+            self.assertEqual(json.loads(stream.getvalue())["compilation_platform_backend"], mtp_common.OMNI_COMPILE_BACKEND)
+            # New captures export backend="" and retain its resolved identity separately.
+            for rank in range(8):
+                path = folder / f"rank-{rank:03d}" / "capture.json"
+                meta = json.loads(path.read_text())
+                meta["compilation_options"]["backend"] = ""
+                meta["effective_compile_backend"] = mtp_common.OMNI_COMPILE_BACKEND
+                path.write_text(json.dumps(meta))
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                profile_mtp.main(args)
+            self.assertEqual(json.loads(stream.getvalue())["compilation_platform_backend"], mtp_common.OMNI_COMPILE_BACKEND)
             (folder / "rank-007" / "capture.json").unlink()
             with self.assertRaises(OSError):
                 profile_mtp.main(args)
@@ -215,6 +261,26 @@ class PlanningTests(unittest.TestCase):
             with contextlib.redirect_stdout(stream):
                 profile_mtp.main(args + ["--execution", "eager"])
             self.assertEqual(json.loads(stream.getvalue())["compilation_config"], {"mode": 0, "cudagraph_mode": "NONE"})
+
+    def test_graph_config_accepts_full_decode_only_without_rewriting_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+            config = root / "compilation.json"
+            args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp8",
+                    "--compilation-config", str(config), "--output", str(root / "result"), "--execution", "graph"]
+            for mode in ("FULL", "FULL_DECODE_ONLY"):
+                config.write_text(json.dumps({"mode": 3, "cudagraph_mode": mode, "cudagraph_capture_sizes": [8]}))
+                stream = io.StringIO()
+                with contextlib.redirect_stdout(stream):
+                    profile_mtp.main(args)
+                compilation = json.loads(stream.getvalue())["compilation_config"]
+                self.assertEqual(compilation["cudagraph_mode"], mode)
+                self.assertEqual(compilation["cudagraph_capture_sizes"], [8])
+            for mode in ("NONE", "PIECEWISE", "FULL_AND_PIECEWISE"):
+                config.write_text(json.dumps({"mode": 3, "cudagraph_mode": mode}))
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    profile_mtp.main(args)
 
     def test_depths_launch_as_separate_jobs_and_failure_stops_sequence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +323,259 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
         result = subprocess.run([sys.executable, "-c", code], cwd=HERE, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_tp1_launches_one_worker_without_expert_parallel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+
+            def launch(command, **kwargs):
+                self.assertIn("--nproc-per-node=1", command)
+                plan = json.loads(Path(command[-1]).read_text())
+                self.assertEqual(plan["topology"], {"tp": 1, "dp": 1, "ep": False})
+                self.assertEqual(plan["total_sequences"], 1)
+                self.assertEqual(plan["world_size"], 1)
+                row = {"depth": 3, "critical_path_median_s": 0.1,
+                       "total_sequences": 1, "proposed_tokens_per_s": 30}
+                (Path(plan["options"]["output"]) / "summary.json").write_text(json.dumps([row]))
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(subprocess, "run", side_effect=launch) as execute, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(profile_mtp.main(["--model", str(model), "--operator-config", str(operator),
+                                                  "--topology", "tp1", "--depths", "3", "--execute",
+                                                  "--output", str(root / "result")]), 0)
+            execute.assert_called_once()
+
+    def test_tp1_replay_uses_one_rank_and_rejects_wrong_world_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg, model, operator = self.prepare(root)
+            folder = root / "capture/rank-000"
+            folder.mkdir(parents=True)
+            meta = {"format": "pangu-mtp-capture-v1", "topology": "tp1", "rank": 0,
+                    "world_size": 1, "complete": True, "depth": 3,
+                    "config_sha256": mtp_common.digest(cfg), "versions": {}, "runtime_limits": {},
+                    "additional_config": {}, "input_tokens": 1, "batch_per_dp_rank": 1, "padded_tokens": 1,
+                    "compilation_options": {"mode": 3, "cudagraph_mode": "FULL"},
+                    "operator_config": json.loads(operator.read_text())}
+            path = folder / "capture.json"
+            path.write_text(json.dumps(meta))
+            args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp1",
+                    "--input", "replay", "--capture", str(folder.parent), "--output", str(root / "result")]
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                profile_mtp.main(args)
+
+            self.assertEqual(json.loads(stream.getvalue())["options"]["depths"], [3])
+            meta["world_size"] = 8
+            path.write_text(json.dumps(meta))
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                profile_mtp.main(args)
+
+    def test_graph_launcher_selects_jit_without_disabling_compilation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+            for mode in ("graph", "compiled", "eager"):
+                def launch(command, **kwargs):
+                    plan = json.loads(Path(command[-1]).read_text())
+                    self.assertEqual(kwargs["env"]["VLLM_USE_AOT_COMPILE"], "0" if mode == "graph" else "1")
+                    self.assertEqual(plan["compilation_config"]["mode"], 0 if mode == "eager" else 3)
+                    row = {"depth": 3, "critical_path_median_s": 0.1,
+                           "total_sequences": 1, "proposed_tokens_per_s": 30}
+                    (Path(plan["options"]["output"]) / "summary.json").write_text(json.dumps([row]))
+                    return SimpleNamespace(returncode=0)
+
+                with self.subTest(mode=mode), patch.dict("os.environ", {"VLLM_USE_AOT_COMPILE": "1"}), \
+                        patch.object(subprocess, "run", side_effect=launch), contextlib.redirect_stdout(io.StringIO()):
+                    profile_mtp.main(["--model", str(model), "--operator-config", str(operator),
+                                      "--topology", "tp1", "--depths", "3", "--execution", mode,
+                                      "--output", str(root / mode), "--execute"])
+
+    def test_recorder_topology_detection_and_summary_rank_count(self):
+        for name, settings in mtp_common.TOPOLOGIES.items():
+            with self.subTest(topology=name), tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mtp_common.topology_name(**settings), name)
+                size = 1 if name == "tp1" else 8
+                root = Path(tmp)
+                for rank in range(size):
+                    folder = root / f"rank-{rank:03d}"
+                    folder.mkdir()
+                    (folder / "results.json").write_text(json.dumps([{
+                        "latencies_s": [1 + rank, 3 + rank], "median_s": 2 + rank}]))
+                sequences = settings["dp"]
+                mtp_runtime.aggregate({"topology": settings, "total_sequences": sequences,
+                                       "options": {"output": str(root), "depths": [3], "repeats": 2}})
+                summary = json.loads((root / "summary.json").read_text())[0]
+                self.assertEqual(summary["critical_path_median_s"], size + 1)
+                self.assertEqual(len(summary["per_rank_median_s"]), size)
+                self.assertAlmostEqual(summary["proposed_tokens_per_s"], sequences * 3 / (size + 1))
+        with self.assertRaisesRegex(ValueError, "Unsupported MTP topology"):
+            mtp_common.topology_name(1, 1, True)
+
+
+class CompilationOptionsTests(unittest.TestCase):
+    def test_only_known_resolved_mode_three_backend_uses_platform_default(self):
+        original = {"mode": 3, "backend": mtp_common.OMNI_COMPILE_BACKEND,
+                    "cudagraph_mode": "FULL_DECODE_ONLY"}
+        converted = mtp_common.compilation_input_options(original)
+        self.assertEqual(converted["backend"], "")
+        self.assertEqual(original["backend"], mtp_common.OMNI_COMPILE_BACKEND)
+        self.assertEqual(converted["mode"], 3)
+        self.assertEqual(converted["cudagraph_mode"], "FULL_DECODE_ONLY")
+        self.assertEqual(mtp_common.compilation_input_options(converted), converted)
+        for backend in ("inductor", "eager", "", "another.module.Backend"):
+            options = {"mode": 3, "backend": backend}
+            self.assertEqual(mtp_common.compilation_input_options(options), options)
+        for mode in (0, 1, 2):
+            options = {"mode": mode, "backend": mtp_common.OMNI_COMPILE_BACKEND}
+            self.assertEqual(mtp_common.compilation_input_options(options), options)
+
+    def test_unset_pass_defaults_are_omitted_without_mutating_source_or_explicit_values(self):
+        passes = {"enable_qk_norm_rope_fusion": None, "enable_sp": False,
+                  "fuse_norm_quant": True, "threshold": 0}
+        original = {"pass_config": passes, "compile_sizes": None,
+                    "inductor_compile_config": {"nullable_option": None}}
+        converted = mtp_common.compilation_input_options(original)
+        self.assertEqual(converted["pass_config"], {"enable_sp": False, "fuse_norm_quant": True, "threshold": 0})
+        self.assertIsNone(passes["enable_qk_norm_rope_fusion"])
+        self.assertIsNone(converted["compile_sizes"])
+        self.assertEqual(converted["inductor_compile_config"], {"nullable_option": None})
+        self.assertEqual(mtp_common.compilation_input_options(converted), converted)
+
+    def test_recorder_exports_constructor_safe_pass_config(self):
+        @dataclass
+        class PassConfig:
+            enable_qk_norm_rope_fusion: bool = None
+            enable_sp: bool = False
+            fuse_norm_quant: bool = True
+
+        cfg = SimpleNamespace(mode=3, cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
+                              backend=mtp_common.OMNI_COMPILE_BACKEND, custom_ops=[], splitting_ops=[], compile_sizes=None,
+                              pass_config=PassConfig(), cudagraph_capture_sizes=[8],
+                              cudagraph_num_of_warmups=2, max_cudagraph_capture_size=8,
+                              inductor_compile_config={})
+        result = mtp_capture.compilation_options(cfg)
+        self.assertEqual(result["pass_config"], {"enable_sp": False, "fuse_norm_quant": True})
+        self.assertIsNone(cfg.pass_config.enable_qk_norm_rope_fusion)
+        self.assertEqual(result["cudagraph_mode"], "FULL_DECODE_ONLY")
+        self.assertEqual(result["backend"], "")
+        self.assertEqual(cfg.backend, mtp_common.OMNI_COMPILE_BACKEND)
+
+
+class SharedCacheTests(unittest.TestCase):
+    class Tensor:
+        def __init__(self, data, dtype="bf16", device="cpu", shape=None):
+            self.data, self.dtype, self.device = data, dtype, device
+            self.shape = shape or ((len(data), len(data[0])) if data and isinstance(data[0], list) else (len(data),))
+
+        def __getitem__(self, key):
+            if isinstance(key, tuple):
+                return type(self)(self.data[key[0]][key[1]], self.dtype, self.device)
+            if isinstance(key, slice):
+                rows = self.data[key]
+                return type(self)(rows, self.dtype, self.device, (len(rows), *self.shape[1:]))
+            return type(self)(self.data[key], self.dtype, self.device)
+
+        def numel(self):
+            result = 1
+            for n in self.shape:
+                result *= n
+            return result
+
+        def element_size(self):
+            return 8 if self.dtype == "int64" else 2
+
+        def tolist(self):
+            return self.data
+
+        def to(self, device):
+            return self
+
+        def cpu(self):
+            return self
+
+        def detach(self):
+            return self
+
+        def copy_(self, source):
+            for dst, src in zip(self.data, source.data):
+                dst[:] = src
+
+        def zero_(self):
+            for row in self.data:
+                row[:] = [0] * len(row)
+
+        def index_select(self, dim, indices):
+            assert dim == 0
+            return type(self)([self.data[i][:] for i in indices.data], self.dtype, self.device,
+                              (len(indices.data), *self.shape[1:]))
+
+        def index_copy_(self, dim, indices, values):
+            assert dim == 0
+            for i, row in zip(indices.data, values.data):
+                self.data[i][:] = row
+
+    def test_hybrid_shared_allocations_become_independent_without_mutating_runner(self):
+        original = SimpleNamespace(num_blocks=4, kv_cache_groups=[
+            SimpleNamespace(layer_names=["target"]), SimpleNamespace(layer_names=["draft.a"]),
+            SimpleNamespace(layer_names=["draft.b"])], kv_cache_tensors=[
+                SimpleNamespace(size=4096, shared_by=["target", "draft.a", "draft.b"], block_stride=0, offset=0)])
+        proposer = SimpleNamespace(runner=SimpleNamespace(kv_cache_config=original),
+                                   attn_layer_names=["draft.a", "draft.b"])
+        config, gids = mtp_capture.draft_cache_config(proposer)
+        self.assertEqual(gids, [1, 2])
+        self.assertEqual([t.shared_by for t in config.kv_cache_tensors], [["draft.a"], ["draft.b"]])
+        self.assertEqual([t.size for t in config.kv_cache_tensors], [4096, 4096])
+        self.assertEqual(original.kv_cache_tensors[0].shared_by, ["target", "draft.a", "draft.b"])
+        self.assertEqual(original.kv_cache_groups[0].layer_names, ["target"])
+        original.kv_cache_tensors[0].block_stride = 64
+        with self.assertRaisesRegex(ValueError, "Packed"):
+            mtp_capture.draft_cache_config(proposer)
+
+    def fixture(self):
+        # Blocks 0/1 contain unrelated data; the inactive second row references 1.
+        value = self.Tensor([[90, 91], [100, 101], [20, 21], [30, 31]], device="npu:0")
+        table = SimpleNamespace(num_blocks_per_row=[3, 1],
+                                block_table=SimpleNamespace(cpu=self.Tensor([[2, 0, 3], [1, 0, 0]], "int32")))
+        proposer = SimpleNamespace(runner=SimpleNamespace(
+            kv_cache_config=SimpleNamespace(num_blocks=4, kv_cache_groups=[SimpleNamespace(layer_names=["draft"])]),
+            input_batch=SimpleNamespace(block_table=[table])))
+        torch = SimpleNamespace(Tensor=self.Tensor, int64="int64",
+                                tensor=lambda xs, dtype, device: self.Tensor(xs, dtype, device),
+                                empty=lambda shape, dtype, device: self.Tensor(
+                                    [[0] * shape[1] for _ in range(shape[0])], dtype, device, shape))
+        return proposer, value, torch
+
+    def test_sparse_capture_omits_target_pages_and_repeated_restore_preserves_ids(self):
+        proposer, value, torch = self.fixture()
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(mtp_state, "cache_views", return_value={"draft": (value,)}):
+            state = mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1024)
+            leaf = state["draft"][0]
+            self.assertEqual(leaf["shape"], [4, 2])
+            self.assertEqual(leaf["indices"].data, [2, 3])
+            self.assertEqual(leaf["values"].data, [[20, 21], [30, 31]])
+            destination = self.Tensor([[9, 9] for _ in range(4)], device="npu:0")
+            for _ in range(2):
+                mtp_state.copy_tree({"draft": (destination,)}, state)
+                self.assertEqual(destination.data, [[0, 0], [0, 0], [20, 21], [30, 31]])
+                destination.data[2][:] = [99, 99]
+            self.assertEqual(value.data[1], [100, 101])
+            with self.assertRaisesRegex(ValueError, "layout mismatch"):
+                mtp_state.copy_tree(self.Tensor([[0, 0]]), leaf)
+
+    def test_sparse_capture_rejects_limit_invalid_ids_and_unknown_layout(self):
+        proposer, value, torch = self.fixture()
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(mtp_state, "cache_views", return_value={"draft": value}):
+            with self.assertRaisesRegex(ValueError, "byte limit"):
+                mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1)
+            proposer.runner.input_batch.block_table[0].block_table.cpu.data[0][0] = 4
+            with self.assertRaisesRegex(ValueError, "block ID"):
+                mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1024)
+            proposer.runner.input_batch.block_table[0].block_table.cpu.data[0][0] = 2
+            value.shape = (2, 4)
+            with self.assertRaisesRegex(ValueError, "block axis"):
+                mtp_state.snapshot_cache_blocks(proposer, [0], 1, 1024)
+
 
 class StateTests(unittest.TestCase):
     class Tensor:
@@ -285,6 +604,9 @@ class StateTests(unittest.TestCase):
         def copy_(self, other):
             self.data[:] = other.data
 
+        def zero_(self):
+            self.data[:] = [0] * len(self.data)
+
     def modules(self):
         class Placeholder:
             pass
@@ -302,6 +624,102 @@ class StateTests(unittest.TestCase):
         self.assertEqual(restored["inputs"][0].device, "npu:1")
         self.assertIs(restored["inputs"][0], restored["inputs"][1])
         self.assertEqual(restored["metadata"], (7, None))
+
+    def metadata_module(self):
+        module = ModuleType("vllm.test_mtp_codec")
+        exec("class Metadata:\n"
+             "    def __init__(self):\n"
+             "        self.value = 7\n"
+             "        self.cached = self.compute\n"
+             "        self.factory = self.default\n"
+             "        self.owner = self\n"
+             "    def compute(self):\n"
+             "        return self.value + 1\n"
+             "    @classmethod\n"
+             "    def default(cls):\n"
+             "        return cls.__name__\n", module.__dict__)
+        return module
+
+    def test_bound_methods_self_references_and_shared_objects_roundtrip(self):
+        module = self.metadata_module()
+        value = module.Metadata()
+        with patch.dict(sys.modules, {**self.modules(), module.__name__: module}):
+            encoder = mtp_state.Codec()
+            tree = encoder.encode({"metadata": value, "same": value})
+            restored = mtp_state.Codec(encoder.tensors).decode(json.loads(json.dumps(tree)))
+        metadata = restored["metadata"]
+        self.assertIs(metadata, restored["same"])
+        self.assertIs(metadata.owner, metadata)
+        self.assertIs(metadata.cached.__self__, metadata)
+        self.assertIsNot(metadata.cached.__self__, value)
+        self.assertEqual(metadata.cached(), 8)
+        metadata.value = 20
+        self.assertEqual(metadata.cached(), 21)
+        self.assertEqual(value.cached(), 8)
+        self.assertEqual(metadata.factory(), "Metadata")
+
+    def test_unrecorded_callback_owners_functions_and_overrides_rejected_with_path(self):
+        module = self.metadata_module()
+        value = module.Metadata()
+        other = module.Metadata()
+        callbacks = [other.compute, lambda: 0]
+        def injected(self):
+            return 0
+        from types import MethodType
+        callbacks.append(MethodType(injected, value))
+        with patch.dict(sys.modules, self.modules()):
+            for callback in callbacks:
+                value.cached = callback
+                with self.assertRaisesRegex(TypeError, r"at \$\['inputs'\]\['sampling_metadata'\]\['cached'\]"):
+                    mtp_state.Codec().encode({"inputs": {"sampling_metadata": value}})
+
+    def test_legacy_object_tree_without_ids_still_decodes(self):
+        module = self.metadata_module()
+        tree = {"$object": module.__name__ + ":Metadata", "state": {"$dict": [["value", 9]]}}
+        with patch.dict(sys.modules, {**self.modules(), module.__name__: module}):
+            restored = mtp_state.Codec().decode(tree)
+        self.assertEqual(restored.compute(), 10)
+
+    def test_sampling_input_batch_back_reference_is_detached_and_rebound(self):
+        module = ModuleType("vllm.test_sampling_codec")
+        exec("class SamplingMetadata: pass", module.__dict__)
+        metadata = module.SamplingMetadata()
+        metadata.no_penalties = True
+        metadata.temperature = self.Tensor([0], device="npu:0")
+        metadata.output_token_ids = [[1, 2, 3]]
+        # A complete runner is deliberately not serializable.
+        source_runner = SimpleNamespace(_slot_mapping_req_indices=lambda n: n)
+        source_batch = SimpleNamespace(block_table=SimpleNamespace(
+            _omni_req_indices_source=source_runner._slot_mapping_req_indices))
+        metadata.npu_input_batch = source_batch
+        inputs = {"sampling_metadata": metadata, "num_speculative_tokens": 7}
+        recorded = mtp_state.recordable_inputs(inputs)
+        self.assertIs(metadata.npu_input_batch, source_batch)
+        self.assertIsNot(recorded["sampling_metadata"], metadata)
+        self.assertIs(recorded["sampling_metadata"].temperature, metadata.temperature)
+        self.assertIsNone(recorded["sampling_metadata"].npu_input_batch)
+        with patch.dict(sys.modules, {**self.modules(), module.__name__: module}):
+            codec = mtp_state.Codec()
+            tree = codec.encode(recorded)
+            restored = mtp_state.Codec(codec.tensors, device="npu:0").decode(tree)
+        destination_runner = SimpleNamespace(input_batch=object())
+        self.assertIs(mtp_state.bind_sampling_runtime(restored, destination_runner), restored)
+        self.assertIs(restored["sampling_metadata"].npu_input_batch, destination_runner.input_batch)
+        self.assertEqual(restored["sampling_metadata"].temperature.data, [0])
+        self.assertEqual(restored["sampling_metadata"].output_token_ids, [[1, 2, 3]])
+        self.assertIs(metadata.npu_input_batch, source_batch)
+
+    def test_sampling_runtime_links_reject_penalties_and_allow_legacy_metadata(self):
+        metadata = SimpleNamespace(no_penalties=False, npu_input_batch=object())
+        inputs = {"sampling_metadata": metadata}
+        with self.assertRaisesRegex(ValueError, "penalties"):
+            mtp_state.recordable_inputs(inputs)
+        with self.assertRaisesRegex(ValueError, "penalties"):
+            mtp_state.bind_sampling_runtime(inputs, SimpleNamespace(input_batch=object()))
+        legacy = {"sampling_metadata": SimpleNamespace(no_penalties=True)}
+        self.assertIs(mtp_state.recordable_inputs(legacy), legacy)
+        mtp_state.bind_sampling_runtime(legacy, SimpleNamespace(input_batch=object()))
+        self.assertFalse(hasattr(legacy["sampling_metadata"], "npu_input_batch"))
 
     def test_cache_restore_keeps_destination_and_rejects_layout_changes(self):
         destination, source = self.Tensor([0, 0], device="npu:0"), self.Tensor([1, 2])
@@ -334,10 +752,300 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported state type"):
             mtp_state.Codec.resolve("os:system")
 
+    def test_snapshot_without_optional_buffer_and_reject_missing_required_state(self):
+        buf = SimpleNamespace(cpu=self.Tensor([1]), gpu=self.Tensor([1]))
+        runner = SimpleNamespace(num_accepted_tokens=buf, num_prompt_tokens=buf,
+                                 drafter=SimpleNamespace(fix_multi_mtp_kvcache=False))
+        state = mtp_state.runner_state(runner, [])
+        self.assertEqual(set(state["buffers"]), {"num_accepted_tokens", "num_prompt_tokens"})
+        runner.drafter.fix_multi_mtp_kvcache = True
+        with self.assertRaisesRegex(ValueError, "requires cu_num_draft_tokens"):
+            mtp_state.runner_state(runner, [])
+
+    def test_replay_allocates_missing_optional_buffer_and_restores_counts(self):
+        buf = SimpleNamespace(cpu=self.Tensor([0, 0], dtype="int32"),
+                              gpu=self.Tensor([0, 0], dtype="int32"))
+        buf.copy_to_gpu = lambda: buf.gpu.copy_(buf.cpu)
+        runner = SimpleNamespace(max_num_reqs=8, _make_buffer=MagicMock(return_value=buf))
+        state = {"buffers": {"cu_num_draft_tokens": {"gpu": self.Tensor([3, 6], dtype="int32"),
+                                                       "cpu": self.Tensor([3, 6], dtype="int32")}},
+                 "block_tables": []}
+        with patch.dict(sys.modules, self.modules()):
+            mtp_state.restore_runner(runner, state)
+        runner._make_buffer.assert_called_once_with(2, dtype="int32")
+        self.assertEqual(runner.cu_num_draft_tokens.gpu.data, [3, 6])
+        self.assertEqual(runner.cu_num_draft_tokens.cpu.data, [3, 6])
+        self.assertIs(mtp_state.ensure_draft_token_buffer(runner), buf)
+        self.assertEqual(runner._make_buffer.call_count, 1)
+
+
+class SyntheticBufferTests(unittest.TestCase):
+    def test_query_length_defaults_and_multi_mtp_minimum(self):
+        for fix in (False, True):
+            for depth in (3, 7):
+                default = 4 if fix and depth == 3 else 1
+                self.assertEqual(mtp_runtime.synthetic_query_length(
+                    {}, depth, n_predict=3, fix_multi_mtp_kvcache=fix), default)
+                self.assertEqual(mtp_runtime.synthetic_query_length(
+                    {"synthetic_query_length": 8}, depth, n_predict=3,
+                    fix_multi_mtp_kvcache=fix), 8)
+        with self.assertRaises(ValueError):
+            mtp_runtime.synthetic_query_length({"synthetic_query_length": 1}, 3,
+                                              n_predict=3, fix_multi_mtp_kvcache=True)
+
+    def test_graph_descriptor_uses_all_input_positions_for_one_sequence(self):
+        config = ModuleType("vllm.config")
+        config.CUDAGraphMode = SimpleNamespace(FULL="FULL", NONE="NONE")
+        context = ModuleType("vllm.forward_context")
+        context.BatchDescriptor = lambda tokens: SimpleNamespace(num_tokens=tokens)
+        runner = SimpleNamespace(vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1)))
+        proposer = SimpleNamespace(propose=MagicMock(return_value="draft"))
+        for tokens in (1, 8):
+            inputs = {"target_token_ids": SimpleNamespace(shape=(tokens,)),
+                      "next_token_ids": SimpleNamespace(shape=(1,)), "num_speculative_tokens": 7}
+            with patch.dict(sys.modules, {"vllm.config": config, "vllm.forward_context": context,
+                                         "torch": ModuleType("torch")}):
+                self.assertEqual(mtp_runtime.execute(runner, proposer, inputs, True), "draft")
+            mode, descriptor, across = runner.batch_execution_and_padding_state
+            self.assertEqual((mode, descriptor.num_tokens, across), ("FULL", tokens, None))
+            proposer.propose.assert_called_with(**inputs)
+
+    def test_synthetic_bootstrap_with_and_without_multi_mtp_cache_fix(self):
+        for enabled in (False, True):
+            with self.subTest(fix_multi_mtp_kvcache=enabled):
+                proposer = SimpleNamespace(fix_multi_mtp_kvcache=enabled, n_predict=3)
+                optional = SimpleNamespace(cpu=MagicMock(), gpu=MagicMock(), copy_to_gpu=MagicMock())
+                runner = SimpleNamespace(max_model_len=64, max_num_reqs=2,
+                                         kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+                                         num_prompt_tokens=SimpleNamespace(cpu=MagicMock(), copy_to_gpu=MagicMock()),
+                                         num_accepted_tokens=SimpleNamespace(cpu=MagicMock(), copy_to_gpu=MagicMock()),
+                                         input_batch=SimpleNamespace(target_token_ids_cache=MagicMock(),
+                                                                     target_model_hidden_states_cache=MagicMock()),
+                                         _make_buffer=MagicMock(return_value=optional))
+                torch = SimpleNamespace(int32="int32", npu=SimpleNamespace(synchronize=MagicMock()))
+                modules = {"torch": torch, "vllm": ModuleType("vllm"),
+                           "vllm.v1": ModuleType("vllm.v1"),
+                           "vllm.v1.kv_cache_interface": SimpleNamespace(MambaSpec=type("MambaSpec", (), {}))}
+                args = {"batch_per_dp_rank": 1, "context_length": 4, "prefill_chunk": 4, "seed": 1}
+                with patch.dict(sys.modules, modules), patch.object(mtp_runtime, "cache_views", return_value={}), \
+                        patch.object(mtp_runtime, "synthetic_inputs", return_value={}), patch.object(mtp_runtime, "execute") as execute:
+                    mtp_runtime.initialize_synthetic(runner, proposer, args)
+                execute.assert_called_once()
+                if enabled:
+                    runner._make_buffer.assert_called_once_with(2, dtype="int32")
+                    self.assertIs(runner.cu_num_draft_tokens, optional)
+                    optional.cpu.__getitem__.return_value.fill_.assert_called_with(0)
+                else:
+                    runner._make_buffer.assert_not_called()
+                    self.assertFalse(hasattr(runner, "cu_num_draft_tokens"))
+
+
+class GraphWarmupTests(unittest.TestCase):
+    def test_effective_decode_policy_allows_decode_only_and_rejects_downgrade(self):
+        class Mode(Enum):
+            NONE = 0
+            PIECEWISE = 1
+            FULL = 2
+            FULL_DECODE_ONLY = (2, 0)
+
+            def decode_mode(self):
+                return Mode(self.value[0]) if isinstance(self.value, tuple) else self
+
+        config = ModuleType("vllm.config")
+        config.CUDAGraphMode = Mode
+        cfg = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=Mode.FULL))
+        with patch.dict(sys.modules, {"vllm.config": config}):
+            for mode in (Mode.FULL, Mode.FULL_DECODE_ONLY):
+                cfg.compilation_config.cudagraph_mode = mode
+                mtp_runtime.require_full_decode_graph(cfg, "Effective config")
+                self.assertIs(cfg.compilation_config.cudagraph_mode, mode)
+            for mode in (Mode.NONE, Mode.PIECEWISE):
+                cfg.compilation_config.cudagraph_mode = mode
+                with self.assertRaisesRegex(ValueError, "Attention backend.*FULL decode"):
+                    mtp_runtime.require_full_decode_graph(cfg, "Attention backend")
+
+    def test_compilation_precedes_capture_and_every_call_restores_state(self):
+        events = []
+        wrapped = False
+        torch = SimpleNamespace(npu=SimpleNamespace(synchronize=lambda: events.append("sync")))
+
+        def restore():
+            events.append("restore")
+            return {}
+
+        def execute(runner, proposer, inputs, graph, template):
+            self.assertTrue(graph)
+            events.append("capture/replay" if wrapped else "compile")
+
+        def setup(proposer, cfg):
+            nonlocal wrapped
+            wrapped = True
+            events.append("attach")
+            return ["wrapper"]
+
+        with patch.dict(sys.modules, {"torch": torch}), \
+                patch.object(mtp_runtime, "prepare_graph_state", side_effect=lambda *args: events.append("graph-state")), \
+                patch.object(mtp_runtime, "setup_graphs", side_effect=setup), \
+                patch.object(mtp_runtime, "execute", side_effect=execute):
+            wrappers = mtp_runtime.warmup_execution(None, None, None, restore, graph=True, token_count=1, warmup=2)
+        self.assertEqual(wrappers, ["wrapper"])
+        self.assertEqual(events, ["graph-state"] + ["restore", "compile", "sync"] * 2
+                         + ["attach"] + ["restore", "capture/replay", "sync"] * 3)
+
+    def test_compile_failure_does_not_start_capture_and_non_graph_uses_plain_warmup(self):
+        torch = SimpleNamespace(npu=SimpleNamespace(synchronize=MagicMock()))
+        with patch.dict(sys.modules, {"torch": torch}), \
+                patch.object(mtp_runtime, "prepare_graph_state"), patch.object(mtp_runtime, "setup_graphs") as setup, \
+                patch.object(mtp_runtime, "execute", side_effect=RuntimeError("compiler failed")):
+            with self.assertRaisesRegex(RuntimeError, "compiler failed"):
+                mtp_runtime.warmup_execution(None, None, None, lambda: {}, graph=True, token_count=1, warmup=2)
+            setup.assert_not_called()
+        with patch.dict(sys.modules, {"torch": torch}), \
+                patch.object(mtp_runtime, "prepare_graph_state") as prepare, patch.object(mtp_runtime, "setup_graphs") as setup, \
+                patch.object(mtp_runtime, "execute") as execute:
+            self.assertIsNone(mtp_runtime.warmup_execution(None, None, None, lambda: {}, graph=False, token_count=1, warmup=2))
+            prepare.assert_not_called()
+            setup.assert_not_called()
+            self.assertEqual(execute.call_count, 2)
+            self.assertTrue(all(call.args[3] is False for call in execute.call_args_list))
+
+
+class TraceCycleTests(unittest.TestCase):
+    def test_range_and_wall_timer_include_propose_and_npu_drain(self):
+        events = []
+
+        @contextlib.contextmanager
+        def record(name):
+            events.append(("enter", name))
+            try:
+                yield
+            finally:
+                events.append(("exit", name))
+
+        times = iter([10.0, 10.009])
+
+        def clock():
+            events.append("clock")
+            return next(times)
+
+        token_ids = object()
+        torch = SimpleNamespace(autograd=SimpleNamespace(profiler=SimpleNamespace(record_function=record)),
+                                npu=SimpleNamespace(synchronize=lambda: events.append("npu-drain")))
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(mtp_runtime.time, "perf_counter", side_effect=clock), \
+                patch.object(mtp_runtime, "execute", side_effect=lambda *args: events.append("propose") or token_ids) as execute:
+            result, elapsed = mtp_runtime.trace_propose("runner", "proposer", {"inputs": 1}, True, "template")
+        self.assertIs(result, token_ids)
+        self.assertAlmostEqual(elapsed, 0.009)
+        self.assertEqual(events, [("enter", "mtp/propose"), "clock", "propose", "npu-drain", "clock", ("exit", "mtp/propose")])
+        execute.assert_called_once_with("runner", "proposer", {"inputs": 1}, True, "template")
+
+    def test_summary_keeps_baseline_and_reports_profiled_critical_path(self):
+        for topology in ("tp1", "dp8-ep8"):
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                settings = mtp_common.TOPOLOGIES[topology]
+                size = 1 if topology == "tp1" else 8
+                for rank in range(size):
+                    folder = root / f"rank-{rank:03d}"
+                    folder.mkdir()
+                    baseline = 0.007289 + rank * 0.001
+                    trace = 0.009 + rank * 0.002
+                    (folder / "results.json").write_text(json.dumps([{
+                        "latencies_s": [baseline - 0.001, baseline, baseline + 0.001],
+                        "median_s": baseline, "trace_cycle_s": trace}]))
+                plan = {"topology": settings, "total_sequences": settings["dp"],
+                        "options": {"output": str(root), "depths": [7], "repeats": 3}}
+                mtp_runtime.aggregate(plan)
+                result = json.loads((root / "summary.json").read_text())[0]
+                baseline, trace = 0.007289 + (size - 1) * 0.001, 0.009 + (size - 1) * 0.002
+                self.assertAlmostEqual(result["critical_path_median_s"], baseline)
+                self.assertAlmostEqual(result["proposed_tokens_per_s"], settings["dp"] * 7 / baseline)
+                self.assertAlmostEqual(result["trace_cycle_s"], trace)
+                self.assertAlmostEqual(result["trace_s_per_proposed_token"], trace / 7)
+                self.assertAlmostEqual(result["trace_proposed_tokens_per_s"], settings["dp"] * 7 / trace)
+                self.assertAlmostEqual(result["trace_to_baseline_ratio"], trace / baseline)
+                self.assertEqual(len(result["per_rank_trace_cycle_s"]), size)
+                with (root / "summary.csv").open() as stream:
+                    row = next(csv.DictReader(stream))
+                self.assertAlmostEqual(float(row["trace_cycle_s"]), trace)
+                if size > 1:
+                    data = json.loads((root / "rank-000/results.json").read_text())
+                    del data[0]["trace_cycle_s"]
+                    (root / "rank-000/results.json").write_text(json.dumps(data))
+                    with self.assertRaisesRegex(ValueError, "missing on some ranks"):
+                        mtp_runtime.aggregate(plan)
+
+
+class DiagnosticConfigTests(unittest.TestCase):
+    def test_effective_config_writes_dtype_device_and_nested_dataclasses(self):
+        class Dtype:
+            def __str__(self):
+                return "torch.bfloat16"
+
+            def __deepcopy__(self, memo):
+                raise AssertionError("Diagnostic serialization must not deepcopy runtime objects")
+
+        class Device:
+            def __str__(self):
+                return "npu:3"
+
+        class Mode(Enum):
+            EAGER = "eager"
+
+        @dataclass
+        class Nested:
+            device: object
+            enabled: bool = False
+            count: int = 3
+
+        @dataclass
+        class Config:
+            dtype: object
+            operator_opt_config: object
+
+        dtype = Dtype()
+        config = Config(dtype, {"nested": Nested(Device()), "values": (Mode.EAGER, 0.5, None), "path": Path("config.json")})
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"torch": SimpleNamespace(dtype=Dtype, device=Device)}):
+            value = {"operator_config": mtp_runtime.diagnostic_config(config)}
+            path = Path(tmp) / "effective_config.json"
+            mtp_common.write_json(path, value)
+            restored = json.loads(path.read_text())
+        self.assertEqual(restored, {"operator_config": {"dtype": "torch.bfloat16",
+                         "operator_opt_config": {"nested": {"device": "npu:3", "enabled": False, "count": 3},
+                                                 "values": ["eager", 0.5, None], "path": "config.json"}}})
+        self.assertIs(config.dtype, dtype)
+
+    def test_unknown_objects_and_strict_json_paths_still_fail(self):
+        with self.assertRaisesRegex(TypeError, "Unsupported effective-config value"):
+            mtp_runtime.diagnostic_config(object())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "strict.json"
+            with self.assertRaises(TypeError):
+                mtp_common.write_json(path, {"unsupported": object()})
+            self.assertFalse(path.exists())
+        with self.assertRaises(TypeError):
+            mtp_common.digest({"unsupported": object()})
+
 
 class LoaderAdapterTests(unittest.TestCase):
     def test_shared_weights_use_target_globals_and_head_is_tied(self):
         registered = {}
+
+        class PlainEmbedding:
+            weight = SimpleNamespace(dtype="bf16")
+
+            def __call__(self, input_ids):
+                return input_ids
+
+        class NPUEmbedding:
+            def __init__(self, num_embeddings, embedding_dim, *, params_dtype, quant_config, prefix):
+                self.settings = (num_embeddings, embedding_dim, params_dtype, quant_config, prefix)
+                self.calls = []
+
+            def __call__(self, input_ids, enable_scatter=False):
+                self.calls.append(enable_scatter)
+                return input_ids
 
         class Base:
             def __init__(self, *, vllm_config, prefix=""):
@@ -345,6 +1053,7 @@ class LoaderAdapterTests(unittest.TestCase):
                 self.received_prefix = prefix
                 self.model = SimpleNamespace(layers={str(i): SimpleNamespace(
                     shared_head=SimpleNamespace(head=object())) for i in (50, 51, 52)})
+                self.model.embed_tokens = self.original_embedding = PlainEmbedding()
 
             def load_weights(self, weights):
                 self.loaded = dict(weights)
@@ -352,7 +1061,8 @@ class LoaderAdapterTests(unittest.TestCase):
 
         modules = {}
         for path in ("vllm.model_executor.models", "omni_npu.v1.models.pangu.pangu_v2_moe_mtp",
-                     "omni_npu.v1.models.pangu.pangu_ultra_moe_mtp"):
+                     "omni_npu.v1.models.pangu.pangu_ultra_moe_mtp",
+                     "omni_npu.v1.layers.vocab_parallel_embedding"):
             parts = path.split(".")
             for i in range(1, len(parts) + 1):
                 name = ".".join(parts[:i])
@@ -363,6 +1073,7 @@ class LoaderAdapterTests(unittest.TestCase):
             register_model=lambda arch, cls: registered.update({arch: cls}))
         modules["omni_npu.v1.models.pangu.pangu_v2_moe_mtp"].OpenPanguV2MTP = Base
         modules["omni_npu.v1.models.pangu.pangu_ultra_moe_mtp"].OpenPanguMTP = Base
+        modules["omni_npu.v1.layers.vocab_parallel_embedding"].NPUVocabParallelEmbedding = NPUEmbedding
         for arch, registered_name in (("OpenPanguV2ForCausalLM", "OpenPanguV2MTPModel"),
                                        ("PanguUltraMoEForCausalLM", "OpenPanguMTPModel")):
             with self.subTest(arch=arch), patch.dict(sys.modules, modules):
@@ -371,11 +1082,25 @@ class LoaderAdapterTests(unittest.TestCase):
                 # Exercise vLLM's signature-based argument selection, rather
                 # than directly supplying kwargs the real loader might omit.
                 parameters = inspect.signature(cls.__init__).parameters
-                config, prefix = object(), "draft"
+                config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(vocab_size=8, hidden_size=4)),
+                                         quant_config=object())
+                prefix = "draft"
                 kwargs = {"vllm_config": config, "prefix": prefix} if {"vllm_config", "prefix"} <= parameters.keys() else {}
                 model = cls(**kwargs)
                 self.assertIs(model.received_config, config)
                 self.assertEqual(model.received_prefix, prefix)
+                if arch == "PanguUltraMoEForCausalLM":
+                    self.assertIsInstance(model.model.embed_tokens, NPUEmbedding)
+                    self.assertEqual(model.model.embed_tokens.settings,
+                                     (8, 4, "bf16", config.quant_config, "draft.model.embed_tokens"))
+                    for scatter in (False, True):
+                        tokens = [1, 2]
+                        self.assertIs(model.model.embed_tokens(tokens, enable_scatter=scatter), tokens)
+                    self.assertEqual(model.model.embed_tokens.calls, [False, True])
+                    with self.assertRaises(TypeError):
+                        model.original_embedding([1], enable_scatter=False)
+                else:
+                    self.assertIs(model.model.embed_tokens, model.original_embedding)
                 heads = [layer.shared_head.head for layer in model.model.layers.values()]
                 self.assertTrue(all(head is heads[0] for head in heads))
                 head, embedding, scale, local = object(), object(), object(), object()

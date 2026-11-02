@@ -8,11 +8,13 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 ## Что реализовано и что проверено
 
-Инструмент запускает отдельный `torchrun` job на восьми NPU, загружая MTP и необходимые общие веса. HTTP, EngineCore, scheduler и основная 50-слойная модель не запускаются. Используются библиотеки vLLM и OmniInfer: это не независимый перенос модели на чистый PyTorch.
+Инструмент запускает отдельный `torchrun` job на одной или восьми NPU в зависимости от topology, загружая MTP и необходимые общие веса. HTTP, EngineCore, scheduler и основная 50-слойная модель не запускаются. Используются библиотеки vLLM и OmniInfer: это не независимый перенос модели на чистый PyTorch.
 
 Адаптер предназначен для **vLLM 0.25.1**, **OmniInfer `4cd855b2`**, **V1 NPUModelRunner**. Поддержаны ветки V2/Ultra и BF16/MXFP8 в экстракторе. Launcher включает `VLLM_USE_V2_MODEL_RUNNER=0`; recorder нужно подключать к полному запуску с тем же V1 runner. Другие версии private API и V2 runner автоматически не подменяются.
 
 Для bootstrap используется HCCL world с отдельными CPU gloo groups, `VLLM_DISTRIBUTED_USE_SPLIT_GROUP=0`: это обходит CUDA-specific требования split-PG validator vLLM к внешнему launcher. Такой вариант инициализации групп нужно учитывать при сравнении с окружением, где split-PG включён.
+
+Буфер `cu_num_draft_tokens` не считается обязательным атрибутом V1 runner. При выключенном `fix_multi_mtp_kvcache` synthetic и snapshot работают без него. Если этот путь включён, standalone создаёт zero-initialized CPU/NPU buffer через `_make_buffer`; replay при необходимости создаёт его и восстанавливает записанные counts. Recorder полного запуска не подставляет нули вместо отсутствующего обязательного состояния.
 
 **На машине разработки выполнены только CPU-проверки. NPU bootstrap, реальная загрузка MXFP8, распределённые collectives, capture/replay и численная эквивалентность ещё требуют server smoke tests.** Наличие реализации этих путей не означает, что они уже прошли аппаратную проверку. При ошибке адаптер прекращает выполнение; dummy attention, случайные веса вместо checkpoint и незаметный переход на eager не используются.
 
@@ -20,10 +22,11 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 | `--topology` | TP | DP | EP | Batch 1 на DP-rank |
 | --- | --- | --- | --- | --- |
+| `tp1` | 1 | 1 | выключен | Одна последовательность на одной NPU |
 | `tp8` | 8 | 1 | выключен | Одна последовательность на весь job |
 | `dp8-ep8` | 1 | 8 | включён, эксперты распределены на 8 NPU | Восемь независимых последовательностей |
 
-Все восемь процессов должны участвовать в согласованных MTP-вызовах. Multi-node и преобразование реальной записи между topology не реализованы. Для каждого режима нужен соответствующий operator config из рабочего запуска.
+Все процессы выбранной topology должны участвовать в согласованных MTP-вызовах: один для `tp1`, восемь для остальных режимов. Multi-node и преобразование реальной записи между topology не реализованы. Для каждого режима нужен соответствующий operator config из рабочего запуска.
 
 Синтетические defaults: контекст 8192, batch 1 на DP-rank, depths `3 7`, два прогрева, пять измерений, greedy sampling. Все длины и числа повторов доступны в CLI. Заполнение контекста выполняется настоящими MTP-блоками на синтетических token IDs/hidden states. Это формирует согласованное состояние cache, но не воспроизводит распределение активаций target model и нагрузку на экспертов production-запроса.
 
@@ -61,6 +64,8 @@ python -m vllm_bench.mtp_profile.verify_mtp_checkpoint /data/models/pangu505b-mx
 
 В полном запуске [set_shared_weight](https://gitee.com/huting233/omniinfer/blob/4cd855b29b5eb0a78bca645fad39e3181c35d099/omni/v1/models/pangu/pangu_v2_moe_mtp.py#L413) привязывает общие веса target. В standalone используются извлечённые target embedding/lm_head, даже если в checkpoint присутствуют predictor-local дубликаты. Все три predictor head используют один объект общей выходной головы; собственные head norms остаются раздельными. Переименование входных ключей делает локальный adapter загрузчика, исходные файлы OmniInfer не меняются.
 
+Для Ultra standalone также заменяет исходный plain `VocabParallelEmbedding` predictor на `NPUVocabParallelEmbedding` до загрузки весов: в полном запуске такой модуль приходит из target через `set_shared_weight`. Это сохраняет поддержку `enable_scatter` и штатный reduce-scatter при sequence parallelism; параметр не удаляется и не игнорируется. V2 использует свой исходный NPU embedding.
+
 ## Синтетический запуск
 
 Сначала проверьте план — по умолчанию модели и NPU не инициализируются, output не создаётся:
@@ -75,11 +80,41 @@ python -m vllm_bench.mtp_profile.profile_mtp \
   --output /data/profile-results/mtp-dp8-eager
 ```
 
-Для запуска на сервере добавьте `--execute`. Launcher сам вызывает восемь процессов `torch.distributed.run`; оборачивать `profile_mtp.py` ещё одним `torchrun` не нужно. Для TP8 используйте `--topology tp8`, соответствующий operator config и новый output.
+Для запуска на сервере добавьте `--execute`. Launcher сам вызывает `torch.distributed.run` с одним процессом для `tp1` или восемью для остальных topology; оборачивать `profile_mtp.py` ещё одним `torchrun` не нужно. Для TP8 используйте `--topology tp8`, соответствующий operator config и новый output.
+
+На одной карте используйте тот же извлечённый MTP-checkpoint, но operator config для TP1/DP1 без EP:
+
+```bash
+python -m vllm_bench.mtp_profile.profile_mtp \
+  --model /data/models/pangu505b-mxfp8-mtp \
+  --operator-config /data/config/operators-tp1.json \
+  --topology tp1 --context-length 8192 --depths 3 7 \
+  --execution eager \
+  --output /data/profile-results/mtp-tp1-eager --execute
+```
+
+Используется локальная NPU 0 в видимом наборе устройств. Все MTP-эксперты и необходимые общие веса размещаются на этой карте; автоматического переписывания TP8 operator config нет. Компиляция, графы и диагностика включаются теми же параметрами, что для остальных topology. Однокарточные времена не заменяют измерения коммуникаций TP8 или DP8/EP8.
 
 Каждый depth запускается отдельным последовательным torchrun job с собственной загрузкой небольшого MTP-checkpoint и собственными speculative buffers. Это важно: `num_speculative_tokens` влияет на cache и формы буферов, поэтому depth=3 не измеряется с буферами конфигурации depth=7. В replay сохраняется configured depth исходного сервера, даже если записанный вызов запросил меньше токенов.
 
-В режиме `compiled` компиляция сохраняется, а `cudagraph_mode` становится `NONE`. В `graph` используется `FULL` и реальные `ACLGraphWrapper` для predictor-слоёв. Передать целевые настройки можно через `--compilation-config /data/config/compilation.json`; содержимое — JSON object vLLM CompilationConfig. При необходимости передайте также исходный `--additional-config` и `--patches`.
+Для сравнения с полным сервером, где proposer получает `actual=8, padded=8, num_reqs=1`, задайте восемь реальных входных позиций на одну последовательность:
+
+```bash
+python -m vllm_bench.mtp_profile.profile_mtp \
+  --model /data/models/pangu505b-mxfp8-mtp \
+  --operator-config /data/config/operators-tp8.json \
+  --topology tp8 --batch-per-dp-rank 1 --context-length 8192 \
+  --depths 7 --synthetic-query-length 8 --execution graph \
+  --output /data/profile-results/mtp-tp8-q8-graph --execute
+```
+
+При необходимости добавьте прежние `--compilation-config`, `--additional-config` и `--patches`. Параметр `--synthetic-query-length` меняет длину входа измеряемого вызова, а не batch или число предложений: здесь один запрос, вход из восьми позиций, семь выходных draft-токенов. Tokens, positions, hidden states и attention metadata создаются для всех восьми позиций; graph descriptor получает размер 8. В обычной ветке depth=7 этот размер сохраняется для следующих draft-шагов. Позиции начинаются после `--context-length`, поэтому при значении 8192 первый вход занимает позиции 8192–8199. Заполнение истории через `--prefill-chunk` не меняется.
+
+По умолчанию длина остаётся прежней: 1 либо `depth+1` для multi-MTP с включённым `fix_multi_mtp_kvcache`. Явное значение не может быть меньше этого минимума. В `effective_config.json` раздел `synthetic_input` содержит фактические query length, batch, число входных позиций, размер descriptor и depth. Для replay параметр запрещён: там формы берутся из capture. Совпадение форм не воспроизводит реальные target hidden states, историю принятий/отказов или размещение полной модели в памяти; для более точного сравнения нужен replay.
+
+В режиме `compiled` компиляция сохраняется, а `cudagraph_mode` становится `NONE`. В `graph` принимаются настройки `FULL` и `FULL_DECODE_ONLY`; исходное значение сохраняется в конфиге, а измеряемый draft-вызов выполняется с runtime mode `FULL` и реальными `ACLGraphWrapper` для predictor-слоёв. `FULL_DECODE_ONLY` — политика выбора режимов: decode использует `FULL`, mixed/prefill — `NONE`. Это не отдельный режим replay графа. Поэтому запись decode из сервера с `FULL_DECODE_ONLY` не требует ручного изменения capture/конфига; в replay достаточно `--execution graph`. В synthetic предварительное заполнение истории по-прежнему выполняется без графов. Эффективная конфигурация проверяется через `decode_mode()` после bootstrap и после инициализации attention backend; переход decode на `NONE` или `PIECEWISE` завершает запуск ошибкой. `FULL_AND_PIECEWISE` в launcher пока не поддержан. Передать целевые настройки можно через `--compilation-config /data/config/compilation.json`; содержимое — JSON object vLLM CompilationConfig. При необходимости передайте также исходный `--additional-config` и `--patches`.
+
+Standalone `graph` устанавливает `VLLM_USE_AOT_COMPILE=0` до импорта runtime: используется JIT-путь `torch.compile` с теми же выбранными backend/passes, а ACL Graph остаётся включённым. Это учитывает OmniInfer fallback-компиляцию для фактического range/stride: AOT-путь vLLM запрещает backend-компиляцию внутри своего initial profiling run. Проверка vLLM не отключается. Значение переменной сохраняется в launch plan и effective config; для `eager` и `compiled` launcher её не переопределяет. Это настройка standalone-процесса, исходники установленного OmniInfer/vLLM не меняются. См. [vLLM monitor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/compilation/monitor.py) и [выбор AOT/JIT в decorator](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/compilation/decorators.py).
 
 ```bash
 python -m vllm_bench.mtp_profile.profile_mtp \
@@ -107,15 +142,23 @@ python -m vllm_bench.mtp_profile.record_mtp \
 
 Без `--execute` команда только печатает environment и исходную команду. Wrapper не меняет speculative settings полного запуска: depth и parallelism задаются в вашем `launch-full-model.sh`. Для отдельных записей depth=3 и depth=7 нужны соответствующие реальные запуски/вызовы.
 
-У полного запуска должен быть явно задан `OMNI_CUSTOM_MODEL_CONFIG_PATH`. Не сочетайте этот wrapper с нашим `--annotate-layers`: обе инструментации используют `sitecustomize.py`. Для DP8 подавайте сбалансированную нагрузку на все ranks. Первая версия replay принимает записи с одинаковыми input-token counts и batch size на восьми ranks; пустой/незавершённый rank делает запись непригодной.
+У полного запуска должен быть явно задан `OMNI_CUSTOM_MODEL_CONFIG_PATH`. Не сочетайте этот wrapper с нашим `--annotate-layers`: обе инструментации используют `sitecustomize.py`. Для DP8 подавайте сбалансированную нагрузку на все ranks. Replay принимает записи с одинаковыми input-token counts и batch size на всех ranks выбранной topology; пустой/незавершённый rank делает запись непригодной. Recorder автоматически распознаёт `tp1`, `tp8` и `dp8-ep8`.
 
 После двух пропущенных proposer-вызовов на каждом rank записывается один цикл. Граница — **внешний `propose`**, до graph replay, поэтому запись не зависит от повторного вызова Python-кода отдельных слоёв.
 
 Сохраняются входные tokens/positions/hidden states, sampling metadata и RNG, draft KV/MoME caches, используемые runner buffers, block tables, configured depth, настройки cache/компиляции/operator config и контрольные hidden states/logits/tokens. Target cache и target weights не снимаются.
 
-Cache snapshot в этой версии содержит **полные выделенные draft-cache tensors**, а не только занятые блоки. Ограничение 8 GiB применяется к одному snapshot на rank; при превышении recorder явно останавливает запуск. Восемь ranks означают до 64 GiB для такого набора снимков, плюс контрольные выходы и накладные расходы. Компактизация blocks пока не реализована. Если MTP и target делят одну raw cache allocation, запись отклоняется.
+Cache snapshot содержит **только draft-блоки, перечисленные в block tables записываемых запросов**, а не весь backing allocation. Hybrid KV-cache manager может размещать target и draft в одном raw buffer, различая их через block tables: это поддерживается. Для каждого cache tensor записываются исходная shape, номера блоков и их значения; номера не переназначаются, slot mapping и positions сохраняются. Данные блока 0 (reserved null block) и остальных неиспользуемых блоков не снимаются. Gather/restore выполняются порциями с целевым размером до 16 MiB, минимум один блок, чтобы не создавать полный NPU-клон cache при заполненной памяти. Лимит `--max-gib-per-snapshot` по-прежнему ограничивает сериализуемые данные одного snapshot на rank, включая входы и runner state; при превышении запись завершается ошибкой.
+
+В standalone каждой draft layer выделяется отдельный буфер с прежним размером и нумерацией физических блоков. Перед повтором неиспользуемые позиции обнуляются, записанные блоки восстанавливаются; это выполняется вне timing window. Snapshot на диске стал компактнее, но полная ёмкость draft-cache на NPU при replay пока не уменьшается. Физическое sharing с target не воспроизводится. Старые записи с dense cache tensors читаются прежним способом.
+
+Поддержан NPU layout с physical block на оси 0 cache tensor, включая tuple/list MoME states. Неизвестная ось блоков и packed cross-layer allocations с `block_stride`/`offset` отклоняются явно. Новый block snapshot и снятие ограничения общей allocation проверены CPU-тестами; NPU capture/replay требуют server smoke test и успешной численной проверки. Ошибка старой версии `Draft shares a raw cache allocation with target; compact capture unsupported` устраняется обновлением recorder и replay из одной версии checkout. После обновления нужен перезапуск полного сервера под wrapper и новый output-каталог для capture.
 
 Recorder добавляет synchronization и CPU copies: времена этого запуска не являются baseline. Stateful penalties, token constraints и объекты metadata, которые нельзя явно сериализовать, отклоняются. Для первого capture используйте greedy sampling без дополнительных logits processors. JSON tree и tensor-only `torch.save` загружаются с `weights_only=True`, без десериализации произвольных pickle-объектов.
+
+Codec сохраняет shared references и self-references обычных metadata-объектов. Bound methods записываются как имя объявленного метода и ссылка на уже записываемый объект; при replay метод привязывается к восстановленному объекту. Объявленные class methods сохраняются ссылкой на класс. Это устраняет ограничение старого codec `Unsupported state class: <class 'method'>` для таких полей. Произвольные функции/lambda и подменённые instance methods не сериализуются. Если callback ссылается на внешний объект, который ещё не записывается, codec останавливается, чтобы не захватить через него runner или модель. Ошибки сериализации включают путь к полю, например `$['inputs']['sampling_metadata']['cached']`; при отказе нужен этот путь, поскольку одно имя типа `method` не определяет источник. Старые object records без reference IDs поддерживаются. Для повторной записи после обновления перезапустите сервер под wrapper и выберите новый output-каталог.
+
+OmniInfer добавляет в `sampling_metadata.npu_input_batch` обратную ссылку на весь `NPUInputBatch`. Она ведёт к block tables, а через `_omni_req_indices_source` — к callback `NPUModelRunner._slot_mapping_req_indices`. Этот runtime-граф не сериализуется: recorder делает shallow copy sampling metadata и записывает `npu_input_batch=None`, сохраняя tensors, generators, logits processors и прочие поля. Исходная metadata сервера не меняется. Replay перед каждым вызовом привязывает поле к `runner.input_batch` нового процесса, вне измеряемого интервала. Нужные draft block tables и runner buffers восстанавливаются из отдельного runner state. Это исправляет ошибку с путём `sampling_metadata → npu_input_batch → block_table → _omni_req_indices_source`; ограничение `no_penalties=True` сохраняется. Произвольные ссылки на внешний runner по-прежнему отклоняются.
 
 Готовая запись:
 
@@ -125,6 +168,8 @@ Recorder добавляет synchronization и CPU copies: времена это
   …
   rank-007/capture.json, before/, reference/
 ```
+
+Для `tp1` в `cycle-0000` нужен только `rank-000` с `world_size=1`; данные остальных ranks не запрашиваются. Replay такой записи запускайте с `--topology tp1`. Записи TP8/DP8 нельзя переиспользовать как TP1.
 
 `capture.json` появляется только после успешного завершения записи rank. Незавершённые каталоги не переиспользуйте как готовый capture.
 
@@ -144,15 +189,25 @@ python -m vllm_bench.mtp_profile.profile_mtp \
 
 Topology, HF config, operator config и версии пакетов должны совпадать. Runtime limits, cache settings, sampling options и часть draft environment восстанавливаются из capture. Compilation options и additional config по умолчанию также берутся из записи; можно явно передать отдельную compilation config для сравнения режима исполнения. Eager/compiled/graph применяют свои правила отключения графов поверх этих настроек. Произвольные compiler callbacks в capture не поддержаны.
 
+При экспорте/чтении `pass_config` поля со значением `None` опускаются: некоторые поля vLLM, например `enable_qk_norm_rope_fusion`, имеют внутренний default `None`, но аннотацию `bool`, поэтому повторная передача явного JSON `null` вызывает ошибку Pydantic. Пропуск поля оставляет его штатному механизму defaults; это не принудительное отключение fusion. Явные `true`, `false`, нули и прочие значения сохраняются. Нормализация применяется только к непосредственным полям `pass_config`, не к произвольным вложенным словарям. Launcher обрабатывает и старые capture с `null`; повторная запись не нужна. В launch plan список `compilation_pass_defaults` показывает опущенные поля исходного конфига. Runtime повторяет нормализацию перед `EngineArgs` для совместимости со старыми планами; новые записи сразу экспортируются в этом формате.
+
+Для `mode=3` resolved backend `omni_npu.compilation.npugraph_ex.NpuGraphExAdaptor` преобразуется обратно в constructor input `backend=""`. vLLM сначала валидирует допустимые входные имена backend и только затем получает OOT backend через `current_platform.get_compile_backend()`; прямое повторное чтение resolved пути приводит к `Invalid backend for piecewise compilation`. Пустая строка означает штатный выбор backend платформой, не eager и не отключение компиляции. Преобразуется только этот известный backend, остальные имена не подменяются; для явно заданных modes 0/1/2 имя сохраняется. Новые capture содержат исходный resolved backend в `effective_compile_backend`; старые capture с полным путём поддерживаются при чтении. Launcher фиксирует ожидаемое имя в `compilation_platform_backend`, и runtime при включённой компиляции проверяет его после создания конфигурации. При другом backend запуск прекращается. При явно переданном `--compilation-config` выбор определяется этим файлом. Повторная запись capture для исправления этой ошибки не нужна.
+
 Перед таймингами выполняется отдельная численная проверка hidden states/logits и совпадения предложенных tokens. Допуски `--atol` и `--rtol` по умолчанию равны 0.05; для вашей точности/backend их нужно оценить по `comparison-DEPTH.json`. Это не гарантия побитового совпадения MXFP8. При провале проверки timing-прогон прекращается.
 
 ## Границы измерений и результаты
 
 Перед каждым повтором восстанавливаются одинаковые cache, metadata и входы; device input buffers переиспользуются. Восстановление, disk I/O и межранговый barrier находятся вне измеряемого интервала. Wall time измеряется до завершения NPU-работы всего draft-цикла, без промежуточных synchronization между forward/logits/sampling.
 
-Graph capture и прогрев выполняются до измерений. Проверяются стабильность device pointers/layout входов и отсутствие новых graph entries после прогрева. При нарушении вместо потенциально неверного профиля будет ошибка; автоматического eager fallback нет. Такой отказ на сервере требует разбора соответствующего private-API/graph пути.
+Graph-прогрев выполняется в два этапа. Сначала реальные draft-вызовы идут с metadata режима `FULL`, но без ACLGraphWrapper, чтобы JIT-компиляция завершилась вне capture. Режим `NONE` для этого не подходит: OmniInfer обходит в нём компиляцию. Затем подключаются graph-обёртки и выполняются lazy capture и прогрев replay. Оба этапа завершаются до измерений, состояние восстанавливается перед каждым вызовом. Проверяются стабильность device pointers/layout входов, отсутствие новых graph entries и backend-компиляций после прогрева. При нарушении вместо потенциально неверного профиля будет ошибка; автоматического eager fallback нет. Такой отказ на сервере требует разбора соответствующего private-API/graph пути. Сообщение vLLM про initial profiling run относится к его внутреннему этапу компиляции/прогрева и само по себе не означает ошибку экспорта torch_npu trace.
 
 Trace собирается отдельным повтором, чтобы profiler overhead не попадал в baseline latency. Внутри него CPU ranges `mtp/forward`, `mtp/logits`, `mtp/sampling` помогают ориентироваться; они не являются NPU-временами и не размечают слои внутри replay.
+
+Диапазон `mtp/propose` охватывает **весь** профилируемый вызов proposer и завершающую `torch.npu.synchronize()`: все draft steps, межшаговые Python/ATen-хвосты, logits, sampling, обновление metadata и завершение NPU-работы. Восстановление входов/cache, предшествующий barrier, запуск/остановка профайлера и offline export остаются снаружи. Wall time `trace_cycle_s` измеряется внутри этого диапазона; его длительность на CPU timeline также включает небольшие накладные расходы вызовов часов. Эта метка не является NPU kernel range.
+
+В rank-specific `results.json` сохраняются `trace_cycle_s`, `trace_s_per_proposed_token` (`trace_cycle_s / depth`) и `trace_to_baseline_ratio` (`trace_cycle_s / median_s`). Baseline-поля `latencies_s`, `median_s` и `s_per_proposed_token` по-прежнему относятся к прогонам без профайлера.
+
+В `summary.json` и CSV добавлены `trace_cycle_s` (максимум по ranks), `trace_s_per_proposed_token`, `trace_proposed_tokens_per_s` и `trace_to_baseline_ratio` (отношение к `critical_path_median_s`). JSON дополнительно содержит `per_rank_trace_cycle_s`. Так можно сравнить полный trace-цикл с baseline, а не интервал между соседними logits-matmul со средним временем на токен. Это сравнение одного профилируемого вызова с медианой baseline, а не изолированное измерение overhead профайлера. Старые результаты без trace timing можно агрегировать как раньше; смешивать ranks с наличием и отсутствием этого поля нельзя.
 
 `--diagnostic-stages` дополнительно выполняет отдельный запуск с synchronization на границах частей. Его результаты хранятся отдельно от baseline; сумма частей не обязана равняться времени обычного цикла из-за потери перекрытия.
 
@@ -164,6 +219,8 @@ Trace собирается отдельным повтором, чтобы profi
 - `depth-D/rank-NNN/comparison-DEPTH.json` — проверка реального replay.
 - `depth-D/rank-NNN/traces/` — данные torch_npu profiler.
 - `summary.json`/`summary.csv` — median critical-path latency и суммарные proposed tokens/s. Critical path определяется максимумом времени по ranks для каждого повтора.
+
+В диагностическом `effective_config.json` значения `torch.dtype` и `torch.device` записываются строками (например, `torch.bfloat16` и `npu:0`), enum — своим значением. Числа и булевы настройки сохраняют типы JSON. Это представление для отчёта; форматы tensors/capture и вычисление hashes checkpoint не меняются.
 
 Для offline export используйте существующий инструмент:
 

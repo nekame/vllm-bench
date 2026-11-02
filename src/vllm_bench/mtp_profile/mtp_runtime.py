@@ -11,16 +11,46 @@ from contextlib import contextmanager
 from copy import deepcopy
 import csv
 import dataclasses
+from enum import Enum
 import json
 import math
 import os
 from pathlib import Path
 import statistics
+import sys
 import time
 
-from vllm_bench.mtp_profile.mtp_common import layer_sequence, proposer_globals, validate_record, write_json
-from vllm_bench.mtp_profile.mtp_state import (cache_views, copy_tree, load_state, restore_runner,
-                       runner_state, save_state, versions)
+from vllm_bench.mtp_profile.mtp_common import SUMMARY_FIELDS, compilation_input_options, layer_sequence, proposer_globals, topology_world_size, validate_record, write_json
+from vllm_bench.mtp_profile.mtp_state import (bind_sampling_runtime, cache_views, copy_tree, ensure_draft_token_buffer,
+                       load_state, restore_runner, runner_buffers, runner_state, save_state, versions)
+
+
+def diagnostic_config(value):
+    """JSON values for effective-config reporting, without importing ML packages.
+
+    This is intentionally separate from checkpoint/capture serialization and
+    hashing. Unknown objects (including tensors) must not be silently stringified.
+    """
+    if isinstance(value, Enum):
+        return diagnostic_config(value.value)
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: diagnostic_config(getattr(value, field.name))
+                for field in dataclasses.fields(value)}
+    if isinstance(value, dict):
+        return {key: diagnostic_config(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [diagnostic_config(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        scalar_types = tuple(cls for name in ("dtype", "device")
+                             if isinstance(cls := getattr(torch, name, None), type))
+        if scalar_types and isinstance(value, scalar_types):
+            return str(value)
+    raise TypeError(f"Unsupported effective-config value: {type(value).__module__}.{type(value).__qualname__}")
 
 
 def install_standalone_loader(config):
@@ -44,6 +74,17 @@ def install_standalone_loader(config):
         # the new-style constructor. **kwargs alone triggers its legacy path.
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
+            if ultra:
+                # Full Ultra inference replaces draft's plain embedding through
+                # set_shared_weight(target). Reproduce that module type before
+                # loading the target-shared payload, including its SP interface.
+                from omni_npu.v1.layers.vocab_parallel_embedding import NPUVocabParallelEmbedding
+                hf_config = vllm_config.model_config.hf_config
+                embedding_prefix = f"{prefix}.model.embed_tokens" if prefix else "model.embed_tokens"
+                self.model.embed_tokens = NPUVocabParallelEmbedding(
+                    hf_config.vocab_size, hf_config.hidden_size,
+                    params_dtype=self.model.embed_tokens.weight.dtype,
+                    quant_config=vllm_config.quant_config, prefix=embedding_prefix)
             layers = list(self.model.layers.values())
             head = layers[0].shared_head.head
             for layer in layers[1:]:
@@ -74,6 +115,13 @@ def install_standalone_loader(config):
     ModelRegistry.register_model(architecture, StandaloneMTP)
 
 
+def require_full_decode_graph(cfg, stage):
+    from vllm.config import CUDAGraphMode
+    mode = cfg.compilation_config.cudagraph_mode
+    if mode.decode_mode() != CUDAGraphMode.FULL:
+        raise ValueError(f"{stage}: FULL decode graphs required; effective cudagraph_mode={mode}")
+
+
 def create_runtime(plan, record=None):
     import torch
     import torch_npu  # noqa: F401
@@ -93,18 +141,20 @@ def create_runtime(plan, record=None):
 
     a, topology = plan["options"], plan["topology"]
     rank, local_rank = int(os.environ["RANK"]), int(os.environ["LOCAL_RANK"])
-    if int(os.environ["WORLD_SIZE"]) != 8:
-        raise ValueError("Exactly eight torchrun ranks required")
+    world_size = topology_world_size(topology)
+    if int(os.environ["WORLD_SIZE"]) != world_size:
+        raise ValueError(f"Topology {a['topology']} requires {world_size} torchrun ranks")
     device = torch.device(f"npu:{local_rank}")
     torch.npu.set_device(device)
     _patch_npu_triton_capabilities()
     # external_launcher must see the complete torchrun world, including DP ranks.
     torch.distributed.init_process_group(backend="hccl", init_method="env://")
     limits = record["runtime_limits"] if record else {
-        "max_model_len": a["context_length"] + max(a["depths"]) + 32,
+        "max_model_len": a["context_length"] + max(a["depths"]) + 32 + (a.get("synthetic_query_length") or 1) - 1,
         "max_num_seqs": a["batch_per_dp_rank"],
         "max_num_batched_tokens": max(a["prefill_chunk"] * a["batch_per_dp_rank"],
-                                      a["batch_per_dp_rank"] * (max(a["depths"]) + 1))}
+                                      a["batch_per_dp_rank"] * max(max(a["depths"]) + 1,
+                                                                  a.get("synthetic_query_length") or 1))}
     cache_settings = record["cache_settings"] if record else {"enable_prefix_caching": False}
     extra_cache = {key: value for key, value in cache_settings.items() if key != "cache_dtype"}
     if "cache_dtype" in cache_settings:
@@ -121,7 +171,7 @@ def create_runtime(plan, record=None):
                       enforce_eager=a["execution"] == "eager",
                       enable_chunked_prefill=True,
                       speculative_config=speculative,
-                      compilation_config=plan["compilation_config"],
+                      compilation_config=compilation_input_options(plan["compilation_config"]),
                       additional_config=plan["additional_config"], **limits, **extra_cache)
     cfg = args.create_engine_config()
     if cfg.use_v2_model_runner:
@@ -134,8 +184,11 @@ def create_runtime(plan, record=None):
         raise ValueError("Draft architecture is not the expected MTP class; refusing model construction")
     if a["execution"] != "eager" and cfg.compilation_config.mode == CompilationMode.NONE:
         raise ValueError("Compilation was disabled by effective platform config")
-    if a["execution"] == "graph" and cfg.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
-        raise ValueError("Effective runtime config does not support requested FULL graph mode")
+    expected_backend = plan.get("compilation_platform_backend")
+    if expected_backend and a["execution"] != "eager" and cfg.compilation_config.backend != expected_backend:
+        raise ValueError(f"Platform selected compile backend {cfg.compilation_config.backend!r}; expected {expected_backend!r}")
+    if a["execution"] == "graph":
+        require_full_decode_graph(cfg, "Effective runtime config")
     context = set_current_vllm_config(cfg)
     context.__enter__()
     # torch's world is initialized above, so this only creates vLLM groups and
@@ -186,8 +239,8 @@ def create_runtime(plan, record=None):
         kv_config = synthetic_cache_config(runner, limits, a["batch_per_dp_rank"], max(a["depths"]))
     runner.initialize_kv_cache(kv_config)
     proposer.initialize_attn_backend(kv_config, runner._kernel_block_sizes)
-    if a["execution"] == "graph" and cfg.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
-        raise ValueError("Attention backend downgraded FULL graph mode")
+    if a["execution"] == "graph":
+        require_full_decode_graph(cfg, "Attention backend graph configuration")
     if not proposer.draft_attn_groups:
         raise ValueError("No draft attention groups initialized")
     return runner, proposer, cfg, context
@@ -218,6 +271,16 @@ def greedy_metadata(batch, device):
                             frequency_penalties=zeros, presence_penalties=zeros,
                             repetition_penalties=torch.ones_like(zeros), output_token_ids=[[] for _ in range(batch)],
                             allowed_token_ids_mask=None, bad_words_token_ids={}, logitsprocs=LogitsProcessors())
+
+
+def synthetic_query_length(options, depth, *, n_predict, fix_multi_mtp_kvcache):
+    minimum = depth + 1 if fix_multi_mtp_kvcache and depth <= n_predict else 1
+    length = options.get("synthetic_query_length")
+    if length is None:
+        return minimum
+    if length < minimum:
+        raise ValueError(f"Synthetic query length must be >= {minimum} for depth={depth} and this cache configuration")
+    return length
 
 
 def synthetic_inputs(runner, proposer, start, length, depth, seed):
@@ -263,8 +326,9 @@ def initialize_synthetic(runner, proposer, a):
         for row in range(batch):
             runner.input_batch.block_table[gid].add_row(list(range(1 + row * count, 1 + (row + 1) * count)), row)
         runner.input_batch.block_table[gid].commit_block_table(batch)
-    for name in ("num_prompt_tokens", "num_accepted_tokens", "cu_num_draft_tokens"):
-        buf = getattr(runner, name)
+    if proposer.fix_multi_mtp_kvcache:
+        ensure_draft_token_buffer(runner)
+    for name, buf in runner_buffers(runner):
         buf.cpu.zero_()
         buf.cpu[:batch].fill_(a["context_length"] if name == "num_prompt_tokens" else 1 if name == "num_accepted_tokens" else 0)
         buf.copy_to_gpu()
@@ -310,12 +374,16 @@ def execute(runner, proposer, inputs, graph, template=None):
     return proposer.propose(**inputs)
 
 
-def setup_graphs(proposer, cfg, token_count):
-    import torch
-    from vllm.config import CUDAGraphMode
-    from omni_npu.compilation.acl_graph import ACLGraphWrapper, set_graph_params
+def prepare_graph_state(cfg, token_count):
+    from omni_npu.compilation.acl_graph import set_graph_params
     sizes = set(cfg.compilation_config.cudagraph_capture_sizes or []) | {token_count}
     set_graph_params(sizes)
+
+
+def setup_graphs(proposer, cfg):
+    import torch
+    from vllm.config import CUDAGraphMode
+    from omni_npu.compilation.acl_graph import ACLGraphWrapper
     stream = torch.npu.Stream()
     model = proposer.model
 
@@ -346,6 +414,26 @@ def setup_graphs(proposer, cfg, token_count):
                                    attn_layer_names=[n for n in proposer.attn_layer_names if model.get_spec_layer(n) == int(index)])
         for index, layer in model.model.layers.items()}
     return list(model.model.wrapped_layers.values())
+
+
+def warmup_execution(runner, proposer, cfg, restore, *, graph, token_count, warmup, template=None):
+    """Compile on FULL metadata before attaching any lazy-capture wrappers."""
+    import torch
+    wrappers = None
+    if graph:
+        prepare_graph_state(cfg, token_count)
+        # NONE would bypass compilation in omni_npu.compilation.decorators.
+        # FULL without ACLGraphWrapper activates compilation without capture.
+        for _ in range(warmup):
+            inputs = restore()
+            execute(runner, proposer, inputs, True, template)
+            torch.npu.synchronize()
+        wrappers = setup_graphs(proposer, cfg)
+    for _ in range(warmup + (1 if graph else 0)):
+        inputs = restore()
+        execute(runner, proposer, inputs, graph, template)
+        torch.npu.synchronize()
+    return wrappers
 
 
 @contextmanager
@@ -408,10 +496,24 @@ def compare(reference, actual, atol, rtol):
     return result
 
 
+def trace_propose(runner, proposer, inputs, graph, template=None):
+    """Whole profiled cycle, including all inter-step work and NPU drain."""
+    import torch
+    with torch.autograd.profiler.record_function("mtp/propose"):
+        start = time.perf_counter()
+        result = execute(runner, proposer, inputs, graph, template)
+        torch.npu.synchronize()
+        elapsed = time.perf_counter() - start
+    return result, elapsed
+
+
 def run(plan):
+    a = plan["options"]
+    if a["execution"] == "graph":
+        os.environ["VLLM_USE_AOT_COMPILE"] = "0"
     import torch
     import torch_npu  # noqa: F401
-    a = plan["options"]
+    from vllm.compilation.counter import compilation_counter
     if not versions()["vllm"].startswith("0.25.1"):
         raise RuntimeError("Standalone private-API adapter targets vLLM 0.25.1; use its OmniInfer environment")
     rank = int(os.environ["RANK"])
@@ -442,14 +544,14 @@ def run(plan):
                 # Keep baseline on CPU; only copy into existing device allocations.
                 baseline = load_state(output / "baseline", "cpu")
             graph = a["execution"] == "graph"
-            graph_wrappers = None
             results = []
             effective = {"versions": versions(), "compilation": str(cfg.compilation_config),
                          "parallel": str(cfg.parallel_config), "model_class": type(proposer.model).__name__,
                          "attention_layers": proposer.attn_layer_names,
                          "target_weights_loaded": False, "npu_validation": "executing"}
+            effective["runtime_environment"] = {"VLLM_USE_AOT_COMPILE": os.environ.get("VLLM_USE_AOT_COMPILE")}
             from omni_npu.model_config.config_loader.loader import model_extra_config
-            effective["operator_config"] = dataclasses.asdict(model_extra_config)
+            effective["operator_config"] = diagnostic_config(model_extra_config)
             write_json(output / "effective_config.json", effective)
             for depth in a["depths"]:
                 if record:
@@ -458,9 +560,15 @@ def run(plan):
                         raise ValueError("Replay depth must equal the captured depth")
                     reference = load_state(Path(a["capture"]) / f"rank-{rank:03d}" / "reference", "cpu")
                 else:
-                    query_length = depth + 1 if proposer.fix_multi_mtp_kvcache and depth <= proposer.n_predict else 1
+                    query_length = synthetic_query_length(a, depth, n_predict=proposer.n_predict,
+                                                          fix_multi_mtp_kvcache=proposer.fix_multi_mtp_kvcache)
                     inputs = synthetic_inputs(runner, proposer, a["context_length"], query_length, depth, a["seed"])
                     reference = None
+                    effective["synthetic_input"] = {
+                        "query_length": query_length, "batch_per_dp_rank": a["batch_per_dp_rank"],
+                        "input_tokens": inputs["target_token_ids"].numel(),
+                        "descriptor_tokens": inputs["target_token_ids"].numel(), "depth": depth}
+                    write_json(output / "effective_config.json", effective)
                 # Keep CPU encoded inputs: propose mutates metadata and input views.
                 save_state(output / f"inputs-{depth}", inputs)
                 input_buffers = {}
@@ -472,22 +580,22 @@ def run(plan):
                         torch.set_rng_state(record["state"]["rng_cpu"].cpu())
                         torch.npu.set_rng_state(record["state"]["rng_npu"].cpu())
                     restored = load_state(output / f"inputs-{depth}", runner.device, reuse_buffers=input_buffers)
+                    if record:
+                        bind_sampling_runtime(restored, runner)
                     torch.npu.synchronize()
                     return restored
 
                 template = None
                 if record:
                     template = load_state(Path(a["capture"]) / f"rank-{rank:03d}" / "before", runner.device, fields={"batch_execution"})["batch_execution"]
-                if graph and graph_wrappers is None:
-                    graph_wrappers = setup_graphs(proposer, cfg, template[1].num_tokens if template else inputs["target_token_ids"].numel())
-                # Capture is lazy in ACLGraphWrapper; prime all required heads.
-                for _ in range(a["warmup"] + (1 if graph else 0)):
-                    call_inputs = restore()
-                    execute(runner, proposer, call_inputs, graph, template)
-                    torch.npu.synchronize()
+                graph_wrappers = warmup_execution(
+                    runner, proposer, cfg, restore, graph=graph,
+                    token_count=template[1].num_tokens if template else inputs["target_token_ids"].numel(),
+                    warmup=a["warmup"], template=template)
                 if graph and not any(w.concrete_aclgraph_entries for w in graph_wrappers):
                     raise ValueError("Requested graph mode produced no captured ACL graphs")
                 graph_counts = [len(w.concrete_aclgraph_entries) for w in graph_wrappers] if graph else None
+                backend_compilations = compilation_counter.num_backend_compilations
                 if reference:
                     call_inputs = restore()
                     with observe(proposer, references=True) as (_, actual):
@@ -517,8 +625,9 @@ def run(plan):
                         profiler_level=torch_npu.profiler.ProfilerLevel.Level1))
                 with profiler:
                     with observe(proposer):
-                        execute(runner, proposer, call_inputs, graph, template)
+                        torch.distributed.barrier()
                         torch.npu.synchronize()
+                        _, trace_cycle_s = trace_propose(runner, proposer, call_inputs, graph, template)
                 diagnostic = None
                 if a["diagnostic_stages"]:
                     call_inputs = restore()
@@ -526,14 +635,20 @@ def run(plan):
                         execute(runner, proposer, call_inputs, graph, template)
                 if graph and graph_counts != [len(w.concrete_aclgraph_entries) for w in graph_wrappers]:
                     raise ValueError("New ACL graph capture occurred after warmup; timings are invalid")
+                if graph and compilation_counter.num_backend_compilations != backend_compilations:
+                    raise ValueError("Backend compilation occurred after graph warmup; timings are invalid")
                 results.append({"depth": depth, "layer_sequence": layer_sequence(plan["config"], depth),
                                 "latencies_s": latencies, "median_s": statistics.median(latencies),
                                 "s_per_proposed_token": statistics.median(latencies) / depth,
+                                "trace_cycle_s": trace_cycle_s,
+                                "trace_s_per_proposed_token": trace_cycle_s / depth,
+                                "trace_to_baseline_ratio": trace_cycle_s / statistics.median(latencies),
                                 "tokens_shape": list(tokens.shape), "diagnostic_stage_s": diagnostic,
                                 "memory_allocated_bytes": torch.npu.memory_allocated(),
                                 "memory_reserved_bytes": torch.npu.memory_reserved(),
                                 "peak_memory_allocated_bytes": torch.npu.max_memory_allocated(),
                                 "graph_entry_counts": graph_counts,
+                                "backend_compilations_after_warmup": backend_compilations,
                                 "synthetic": record is None})
             write_json(output / "results.json", results)
             torch.distributed.barrier()
@@ -548,20 +663,32 @@ def run(plan):
 def aggregate(plan):
     a = plan["options"]
     output = Path(a["output"])
-    ranks = [json.loads((output / f"rank-{i:03d}" / "results.json").read_text()) for i in range(8)]
+    ranks = [json.loads((output / f"rank-{i:03d}" / "results.json").read_text())
+             for i in range(topology_world_size(plan["topology"]))]
     summary = []
     for index, depth in enumerate(a["depths"]):
         critical = [max(rank[index]["latencies_s"][j] for rank in ranks) for j in range(a["repeats"])]
         seconds = statistics.median(critical)
         batch = plan["total_sequences"]
-        summary.append({"depth": depth, "critical_path_median_s": seconds,
+        row = {"depth": depth, "critical_path_median_s": seconds,
                         "total_sequences": batch, "proposed_tokens_per_s": batch * depth / seconds,
-                        "per_rank_median_s": [rank[index]["median_s"] for rank in ranks]})
+                        "per_rank_median_s": [rank[index]["median_s"] for rank in ranks]}
+        have_trace = ["trace_cycle_s" in rank[index] for rank in ranks]
+        if any(have_trace) and not all(have_trace):
+            raise ValueError("Trace cycle timing is missing on some ranks")
+        if all(have_trace):
+            trace_times = [rank[index]["trace_cycle_s"] for rank in ranks]
+            trace_seconds = max(trace_times)
+            row.update(trace_cycle_s=trace_seconds, trace_s_per_proposed_token=trace_seconds / depth,
+                       trace_proposed_tokens_per_s=batch * depth / trace_seconds,
+                       trace_to_baseline_ratio=trace_seconds / seconds,
+                       per_rank_trace_cycle_s=trace_times)
+        summary.append(row)
     write_json(output / "summary.json", summary)
     with (output / "summary.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["depth", "critical_path_median_s", "total_sequences", "proposed_tokens_per_s"])
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS)
         writer.writeheader()
-        writer.writerows({k: row[k] for k in writer.fieldnames} for row in summary)
+        writer.writerows({k: row.get(k) for k in writer.fieldnames} for row in summary)
 
 
 def main():
