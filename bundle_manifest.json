@@ -2,13 +2,13 @@
   "format": 1,
   "files": {
     ".gitignore": "a45da93488414748e0abcf83611fdbb9982854d659c0cf878b41d4b0f2005487",
-    "README.md": "6a5a7d84e1a88e500b3cdb092b82a9b4996039c192cc2935f88ba7820cc60aa8",
+    "README.md": "48c43c3ec9adf102739a2197e39fa356251b41844f0d18f439eaf50152635f7b",
     "conf/common/reference_config-hf.json": "d92e29c3542c93b0b22432d7c455ac19c7eeec6ec7ce0ed9d8c4508169421189",
     "conf/layer_profile/config-12layers.json": "0ff72a0de585124e7e112d35ef522af9a6b4d23015b455088c84be42292ebc4f",
     "conf/layer_profile/suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
     "doc/CONTRIBUTING.md": "31a88302e4827022ebcc10082d32f94fa66042102711b532f5c21639a6595afd",
     "doc/layer_profile/README.md": "00d918301f9546ee5ec225465139762e47927ec4be60a34de1e18c78c3897a24",
-    "doc/mtp_debug/README.md": "b810fd66a08d87764f6fccdeb86ffd9abfda67c8eda2593fb2eaa6ca4e55bdab",
+    "doc/mtp_debug/README.md": "c3cc5fce4c5c3ec28d0e442c6a03f88012f93e6958c4c702b2908adb3b77bf86",
     "doc/mtp_profile/README.md": "0786195165dc5bf39325e598f61d04e0cfb55ac8987a5fa983bf4e4070fc4401",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
@@ -18,6 +18,7 @@
     "scripts/extract_token_choices.sh": "2fae37bb45c4e414bb406f41d36e5084edbdfa0a4fc468b5222081b2f413c6b8",
     "scripts/find_first_difference.sh": "6e3b2c0611ec1f634ce596fbf1f8d7f8a3adfe450ca09970d1255b4c103bd7eb",
     "scripts/inspect_indexer.sh": "fdd24db1f96b90e77fc91f948693206a7663e7f28c50b398e1c53f8e38ff0736",
+    "scripts/test_indexer_quant_cache.sh": "2e0027e2906d1d2391ff135132d5898383955d8a9194eea60be872ae94f584d6",
     "src/vllm_bench/__init__.py": "4d92c99389ad87fcd0b559f1e3010b8f998e442bdde4d04bce4cb204ebd29039",
     "src/vllm_bench/common/__init__.py": "5045adf0ef5085ec88f6738380d5b7dae95515fe7e2e48d273c938573f6c77f2",
     "src/vllm_bench/common/checkpoint.py": "c76981b9d1bb7561a72a33a9f8d3da324c306f95f13ffd22b479389d20a1633d",
@@ -47,6 +48,7 @@
     "src/vllm_bench/mtp_debug/spec_rejection.py": "1c58aec56da86277448862accda00dfc6f4cccf00579449c5947ac6546e86bd8",
     "src/vllm_bench/mtp_debug/summarize_rejections.py": "c675f9622d18bd139e0f1f22af8359d2520ef2019ae6cd7a0a8e0b9d67707217",
     "src/vllm_bench/mtp_debug/tensor_io.py": "d8b610e34f7c5a10a0181ff8613a64eaade6b1d0de0c4ba2c1e92c1069e51e94",
+    "src/vllm_bench/mtp_debug/test_indexer_quant_cache.py": "c0687cb5d1bc645104dd0bf9510a9598a98e4b0eea4fd7977168c1f5df80a02b",
     "src/vllm_bench/mtp_profile/__init__.py": "6ef0ae80c207d81e67d349d5c8853ed7d4b1c2e296be387e81243e5c492804f3",
     "src/vllm_bench/mtp_profile/instrumentation/sitecustomize.py": "8c83178325c31fbc4d4fc64a2aaf115e67b97dbcfedd707c8e7293b68e6d484f",
     "src/vllm_bench/mtp_profile/mtp_capture.py": "4fbdb68552eec970114921694ef68302081536d56d5086ace7769c56f8aabb43",
@@ -67,6 +69,7 @@
     "tests/test_compare_rejections_cpu.py": "161d32da8ad796b562ec23c60ccdd3b2452d7668cef3e1f9e7c88febeb0adda0",
     "tests/test_cpu.py": "d2e3c60c87ca05d76d6610cb620f9a1c3b8731c920c8024cae7230be12a5ac9c",
     "tests/test_find_divergence_cpu.py": "9c7b1393a1bde440913b748cf0c14710761d5853e65973cee2b7084167787dcb",
+    "tests/test_indexer_quant_cache_cpu.py": "600dd2361865abf750eea57a5194bc8ff42105da998325e2bced1435279ddafa",
     "tests/test_inspect_indexer_cpu.py": "2e890bb939a474960823010590844931f8dfb341163c1bdbcaac8720ce1f0f51",
     "tests/test_layout_cpu.py": "e9dedc355ce1a5e122e62a96e71b6f4d11a53a8d91ab99fc26f0c47cd9af5a8c",
     "tests/test_locate_output_cpu.py": "56e9fd6e7054d98d5f91a5626715d3f30b301e73e5e456a91db22597ad215593",
@@ -76,7 +79,7 @@
     "tests/test_spec_rejection_cpu.py": "9e180edd4d2e85dd8ae490df50d70cdce25df4a5fef0b5ae3645fe4b206a290d"
   },
   "validation": {
-    "cpu_tests": 112,
+    "cpu_tests": 120,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python3 -m unittest discover -s tests",
     "npu_execution_performed": false,
@@ -92,6 +95,8 @@
     "mtp_attention_trace_validation": "CPU-only: 8-rank stage diagnosis, logical paging, HiF8 byte components, index ordering, TP reconstruction, rejected rows, gaps, legacy/missing payloads, nonfinite/protocol failures, scoped actual-operator mocks, positional QLI2, return preservation, quotas, integer codec and ULP/L2; actual torch/NPU hooks and execution pending smoke tests",
     "mtp_attention_npu_validation": "not performed; requires A5 DP1/TP8 PP1 hif8_ds_mla server smoke test",
     "mtp_attention_paged_copy_validation": "CPU mocks: prohibit NPU advanced indexing, copy referenced pages once with basic slices, preserve selected FP32/HiF8 bytes and row order, validate empty selection and limits before copy; NPU server rerun pending",
-    "mtp_indexer_inspector_validation": "CPU tests: default/explicit selectors, query_scale alias, missing/unavailable/ambiguous fields, byte offsets to actual logical positions with truncated-sample warning, operator/quant-mode extraction and three-line history summary; full comparison JSON only"
+    "mtp_indexer_inspector_validation": "CPU tests: default/explicit selectors, query_scale alias, missing/unavailable/ambiguous fields, byte offsets to actual logical positions with truncated-sample warning, operator/quant-mode extraction and three-line history summary; full comparison JSON only",
+    "mtp_indexer_quant_cache_standalone_validation": "CPU tests: logical row extraction across shared/contiguous/padded/permuted/shifted layouts, guards, input mutation, repeat vs scenario differences, reuse, chunking, actual operator call signature and storage views via mocks, raw-input integrity, dry run and runtime failure reporting; independent MXFP8 numerical reference absent",
+    "mtp_indexer_quant_cache_npu_validation": "not executed locally; one A5 NPU with torch_npu/CANN/cann_ops_transformer required; no checkpoint or vLLM server required"
   }
 }

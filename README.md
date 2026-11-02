@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `layer_profile` | Подготовка checkpoint на 12 слоях (также 6/9), HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
 | `mtp_profile` | MTP checkpoint, synthetic profiling, запись и replay реальных входов без target model | [Профилирование MTP](doc/mtp_profile/README.md) |
-| `mtp_debug` | Greedy acceptance, rejection windows, точные MoME/HiF8 attention тензоры и автоматическое сравнение TP8 | [Отладка MTP](doc/mtp_debug/README.md) |
+| `mtp_debug` | Greedy acceptance, MoME/HiF8 attention, сравнение TP8 и standalone-тест indexer quant cache без модели | [Отладка MTP](doc/mtp_debug/README.md) |
 
 ## Начало работы
 
