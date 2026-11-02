@@ -92,8 +92,26 @@ def paged(frame, item, name, tensor, positions, table, opaque=False):
     if tensor is None or tensor.dim() < 2:
         return {"status": "not_recorded", "reason": "unsupported_paged_tensor"}
     pages, slots = page_coordinates(positions, table, tensor.shape[1], tensor.shape[0])
+    return page_rows(frame, item, name, tensor, pages, slots, opaque, positions)
+
+
+def paged_by_slots(frame, item, name, tensor, absolute_slots, opaque=False):
+    """Gather actual write destinations without guessing a logical block table."""
+    if tensor is None or tensor.dim() < 2:
+        return {"status": "not_recorded", "reason": "unsupported_paged_tensor"}
+    if any(slot < 0 or slot >= tensor.shape[0] * tensor.shape[1] for slot in absolute_slots):
+        raise ValueError("Write slot outside indexer cache")
+    pages, slots = [], []
+    for slot in absolute_slots:
+        page, offset = divmod(slot, tensor.shape[1])
+        pages.append(page)
+        slots.append(offset)
+    return page_rows(frame, item, name, tensor, pages, slots, opaque)
+
+
+def page_rows(frame, item, name, tensor, pages, slots, opaque=False, logical_positions=None):
     row_bytes = math.prod(tensor.shape[2:]) * tensor.element_size()
-    expected = len(positions) * row_bytes
+    expected = len(pages) * row_bytes
     if not writer().can_save(expected):
         return {"status": "not_recorded", "reason": writer().stopped_reason}
     source_dtype = str(tensor.dtype)
@@ -117,15 +135,16 @@ def paged(frame, item, name, tensor, positions, table, opaque=False):
             raise ValueError("Copied KV page byte size mismatch")
         for index, slot in rows:
             raw[index * row_bytes:(index + 1) * row_bytes] = content[slot * row_bytes:(slot + 1) * row_bytes]
-    shape = [len(positions), *tensor.shape[2:]]
+    shape = [len(pages), *tensor.shape[2:]]
     if opaque:
-        shape = [len(positions), *tensor.shape[2:-1], tensor.shape[-1] * tensor.element_size()] if tensor.dim() > 2 else [len(positions), tensor.element_size()]
+        shape = [len(pages), *tensor.shape[2:-1], tensor.shape[-1] * tensor.element_size()] if tensor.dim() > 2 else [len(pages), tensor.element_size()]
         dtype = "uint8"
     descriptor = writer().save_bytes(raw, dtype, shape, frame["forward_index"], item["slot"], name)
     if opaque:
         descriptor.update(comparison_mode="bytes_only", source_dtype=source_dtype)
     descriptor["gather_method"] = "basic_page_slice_to_cpu_then_byte_offsets"
-    descriptor["logical_positions"] = positions
+    if logical_positions is not None:
+        descriptor["logical_positions"] = logical_positions
     # Physical mappings are audit data, never used as equality evidence.
     descriptor["physical_pages"] = pages
     descriptor["page_slots"] = slots

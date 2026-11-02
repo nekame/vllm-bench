@@ -281,6 +281,63 @@ bash scripts/inspect_indexer.sh attention-comparison.json
 
 CPU-тесты используют синтетические файлы всех восьми rank и mocks фактических wrappers, проверяют позиционную сигнатуру indexer, `None`/tuple returns, paging, квоты/лимиты, пропуск отвергнутых строк, пропуски истории, диагностику каждого участка и TP reconstruction. На NPU требуется smoke test: подтвердить отсутствие дампов до ARM, полные indexer/attention/projection stages после него, покрытие восьми rank, новые отчёты и явную остановку при малом budget. Синхронные копирования могут скрыть гонку и меняют TPOT; измерять производительность с этим режимом нельзя.
 
+## Равенство исходного ki до квантования
+
+Если standalone-тест проходит, следующий срез — настоящий неквантованный вход `ki` оператора `indexer_quant_cache`. Для него нужен **новый запуск сервера** с дополнительным `--indexer-ki`. Старый capture содержит quantized cache, но не этот вход.
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python -m vllm_bench.mtp_debug.debug_spec \
+  --output /data/profile-results/indexer-ki \
+  --rejection-windows --indexer-ki --mome-layers 0 \
+  --execute -- bash /data/scripts/launch-full-model-eager.sh
+```
+
+`--indexer-ki` включает прежние attention/MoME tensors и все восемь rank по умолчанию. Сохраняйте DP=1/TP=8/PP=1, `--enforce-eager --no-enable-prefix-caching`, выбранный depth и greedy sampling. Требуется именно ветка QLIv2 MXFP8; другой indexer явно отвергается при установке hooks. После прогрева задайте `LABEL=request-01`, создайте `ARM` **до подачи первого тестового запроса**, дождитесь его полного завершения, смените LABEL на `request-02` и подайте тот же вход. Это важно для захвата всего prefill с позиции 0.
+
+Новый hook снимает аргументы **фактического** `indexer_quant_cache` внутри выбранного target `_update_cache`, включая prefill и decode:
+
+- `ki_before` — точный `ki[T,128]` после projection/norm/RoPE, перед квантованием;
+- `ki_after` — вход после вызова для проверки отсутствия модификации;
+- `key_after`, `scales_after` — результат непосредственно после вызова, собранный по реальным активным write slots;
+- полные input IDs/positions текущего forward, отображение строк Ki в позиции, активные и padding slots, параметры оператора, shape/strides/storage offsets кэшей.
+
+Все NPU-копирования используют прежний безопасный basic-page-slice → CPU → byte offsets путь, без advanced indexing. Возвращаемое значение оригинального оператора, включая `None`, не изменяется. Для decode ссылки на уже снятые cache operands indexer добавляются к новой записи без повторного дампа истории.
+
+Записи лежат в отдельных `ki-rank-R-pid-P.jsonl`: они записываются после target forward **независимо от sampler**, поэтому prefill не потеряется из-за отсутствия speculative verification. В прежних sampler-логах сохраняется ограничение snapshots до 64 значений; для Ki sidecars IDs/positions снимаются полностью. До ARM Ki-снимки не выполняются. `--indexer-ki-steps-per-request 32` ограничивает число target forwards на request ID **вместе с prefill-чанками**. При большом числе чанков увеличьте квоту, чтобы захватить первый decode. Общие лимиты `.bin` прежние: 16 МиБ на тензор, 512 МиБ на worker, на Ki/MoME/attention совместно; настройки `--tensor-max-mib` и `--tensor-budget-mib`.
+
+После двух запросов:
+
+```bash
+bash scripts/compare_indexer_ki.sh /data/profile-results/indexer-ki \
+  --output ki-comparison.json
+```
+
+По умолчанию выбираются `request-01`/`request-02`, восемь rank и все захваченные слои. Другие LABEL/request ID задаются через `--left`/`--right`; `--expected-ranks` меняет проверяемое количество rank, а не восстанавливает отсутствующие данные.
+
+Анализатор сопоставляет **prefill** по абсолютным позициям, проверяет полноту префикса от нуля и точное совпадение input IDs, затем сравнивает Ki и записанные key/scales. Разные границы prefill-чанков допустимы и отражаются через export provenance. Внутри каждого запроса prompt-кэш после записи сопоставляется с его чтением перед первым decode indexer, с учётом захваченных записей того же decode. Изменение Ki оператором проверяется и для prefill, и для decode. Между запросами decode Ki не объявляется равным/разным по совпадению отдельных токенов: различающиеся speculative conditioning и ненаблюдаемая история требуют отдельной проверки.
+
+Результат сохраняется в `ki-comparison.json`, `.summary.json` и `.summary.txt`. Пришлите **только три строки из summary.txt**: `result`, `first_difference`, `evidence`. Величина ошибки первой различающейся строки Ki, её позиция, число отличающихся строк и байтов вычисляются автоматически. Неполнота, повреждённые payloads, другой prompt, пропущенный prefill/первый decode и отсутствие rank отмечаются явно.
+
+| Result | Наблюдение |
+| --- | --- |
+| `KI_INPUT_DIFFERS` | Неквантованный Ki уже различается перед оператором; дальше проверяем формирование `wk → norm → RoPE` |
+| `KI_MUTATED_BY_CACHE_CALL` | Вход Ki изменился между снимками до/после вызова |
+| `CACHE_OUTPUT_DIFFERS_WITH_EQUAL_RECORDED_KI` | Записанные key/scales различаются при равном записанном Ki; физическая адресация/layout могут различаться, это не доказательство недетерминизма kernel |
+| `CACHE_CHANGED_AFTER_WRITE` | Prompt-кэш при первом decode-чтении отличается от последней захваченной записи; возможны последующая запись, lifetime или адресация |
+| `NO_DIFFERENCE_IN_CAPTURED_PREFILL_KI` | Различия исходного Ki, записи prompt-кэша и его сохранности не воспроизвелись в сравнимом срезе |
+| `INCOMPLETE_CAPTURE` | Не хватает данных для полного вывода; обнаруженное отличие и причины ограничений остаются в отчёте |
+
+Анализатор также экспортирует пару реальных входов из выбранных prefill-вызовов в `ki-comparison-replays/left/input.json` и `right/input.json`, с собственными `.bin`. При найденном различии выбирается prefill-вызов, содержащий его позицию; при отсутствии различия — первый полный prefill. Для случая мутации decode входа export остаётся prefill-парой. Метаданные содержат исходные позиции, slots, параметры и layout. Экспорт не требует переноса исходного capture при дальнейшем replay:
+
+```bash
+bash scripts/test_indexer_quant_cache.sh \
+  --input ki-comparison-replays/left/input.json \
+  --output /data/profile-results/real-ki-left --execute
+```
+
+В standalone сохраняется точный Ki выбранного вызова; slots/layout варьируются по standalone-сценариям, это не полное воспроизведение allocator/streams модели. Отчёты и каталоги replay не перезаписываются. CPU-тесты проверяют независимый prefill sidecar, полный snapshot сверх 64 токенов, сопоставление чанков, различение трёх источников расхождения, scale reshape `[1,4] → [1,2,2]`, реальную сигнатуру и inplace-снимки через mocks, ошибки/лимиты и переносимость replay. На NPU новый hook ещё требует smoke test; синхронные снимки могут скрыть гонку.
+
 ## Standalone-тест indexer_quant_cache без модели
 
 Для отдельной проверки записи MXFP8 K-кэша QLI v2 не нужны checkpoint, сервер vLLM или TP8. Нужен один A5 NPU и серверное Python-окружение с `torch`, `torch_npu`, CANN и установленным `cann_ops_transformer`, содержащим `indexer_quant_cache`.
@@ -326,7 +383,7 @@ bash scripts/test_indexer_quant_cache.sh \
   --output /data/profile-results/indexer-quant-cache-replay --execute
 ```
 
-`--input` также принимает descriptor реального **неквантованного** `ki` в формате `TensorWriter`, shape `[T,128]` или `[T,1,128]`. Пути `.bin` должны разрешаться относительно JSON, SHA256/размеры проверяются. Нынешний attention capture такого `ki` не сохраняет: quantized `key_rows` и `key_scales` не подходят для точного восстановления входа. Для real-input replay потребуется один раз захватить `ki` перед вызовом оператора в модели.
+`--input` также принимает descriptor реального **неквантованного** `ki` в формате `TensorWriter`, shape `[T,128]` или `[T,1,128]`. Пути `.bin` должны разрешаться относительно JSON, SHA256/размеры проверяются. Для real-input replay используйте export нового `--indexer-ki` capture и `compare_indexer_ki.sh`, описанный выше. Обычный attention capture без этого флага не содержит исходный Ki: quantized `key_rows` и `key_scales` не подходят для его точного восстановления.
 
 CPU-проверки покрывают layout, адресацию, guard-проверки, repeat/scenario классификацию, загрузку raw-входа, планирование и сигнатуру вызова через контролируемые mocks. Численного независимого эталона MXFP8 здесь нет. Успешный standalone-тест исключает наблюдаемое расхождение только в проверенных условиях: он не доказывает равенство исходных `ki` модели и не воспроизводит её конкурирующие streams. Сам NPU-прогон здесь не выполнялся.
 

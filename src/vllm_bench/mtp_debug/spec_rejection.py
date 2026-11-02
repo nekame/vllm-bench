@@ -179,6 +179,9 @@ def install_runner(runner):
         if os.environ.get("PANGU_SPEC_DEBUG_ATTENTION") == "1":
             from vllm_bench.mtp_debug.attention_trace import prepare_frame
             prepare_frame(runner, frame, context.attn_metadata)
+        if os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI") == "1":
+            from vllm_bench.mtp_debug.indexer_ki_trace import prepare_ki_frame
+            prepare_ki_frame(runner, frame, bound, context.attn_metadata)
         rec.forward_index += 1
         token = TARGET.set(frame)
         try:
@@ -188,6 +191,9 @@ def install_runner(runner):
             if "attention_trace" in frame:
                 from vllm_bench.mtp_debug.attention_trace import finalize_frame
                 finalize_frame(frame)
+            if "_indexer_ki" in frame:
+                from vllm_bench.mtp_debug.indexer_ki_trace import finalize_ki_frame
+                finalize_ki_frame(frame)
             rec.latest_target = frame
 
     runner._model_forward = forward
@@ -220,6 +226,9 @@ def install_runner(runner):
     if os.environ.get("PANGU_SPEC_DEBUG_ATTENTION") == "1":
         from vllm_bench.mtp_debug.attention_trace import install_attention
         manifest["attention_trace"] = install_attention(runner, allowed)
+    if os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI") == "1":
+        from vllm_bench.mtp_debug.indexer_ki_trace import install_ki
+        manifest["indexer_ki"] = install_ki(runner, allowed)
     rec.output.mkdir(parents=True, exist_ok=True)
     (rec.output / f"hooks-pid-{os.getpid()}.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"[spec-debug] target hook installed; {len(hooked)} MoME convolutions; pid={os.getpid()}", flush=True)
