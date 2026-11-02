@@ -1,10 +1,10 @@
 # vllm-bench
 
-Инструменты для профилирования и отладки vLLM/OmniInfer на Ascend NPU. Сейчас сценарии рассчитаны на Pangu 505B: сокращённый стек основных слоёв, standalone MTP и диагностика speculative decoding.
+Инструменты для профилирования и отладки vLLM/OmniInfer на Ascend NPU. Сейчас сценарии рассчитаны на Pangu 505B: сокращённый или полный стек с опциональным MTP, standalone MTP и диагностика speculative decoding.
 
 | Направление | Назначение | Руководство |
 | --- | --- | --- |
-| `layer_profile` | Подготовка checkpoint на 12 слоях (также 6/9), HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
+| `layer_profile` | Сокращённый checkpoint на 12 слоях (также 6/9) с опциональным сохранением MTP, полная модель; HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
 | `mtp_profile` | MTP checkpoint, synthetic profiling, запись и replay реальных входов без target model | [Профилирование MTP](doc/mtp_profile/README.md) |
 | `mtp_debug` | Проверка greedy acceptance, rejection windows и состояния MoME в полном запуске | [Отладка MTP](doc/mtp_debug/README.md) |
 
