@@ -23,10 +23,11 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 | `--topology` | TP | DP | EP | Batch 1 на DP-rank |
 | --- | --- | --- | --- | --- |
 | `tp1` | 1 | 1 | выключен | Одна последовательность на одной NPU |
+| `tp2` | 2 | 1 | выключен | Одна последовательность на две NPU |
 | `tp8` | 8 | 1 | выключен | Одна последовательность на весь job |
 | `dp8-ep8` | 1 | 8 | включён, эксперты распределены на 8 NPU | Восемь независимых последовательностей |
 
-Все процессы выбранной topology должны участвовать в согласованных MTP-вызовах: один для `tp1`, восемь для остальных режимов. Multi-node и преобразование реальной записи между topology не реализованы. Для каждого режима нужен соответствующий operator config из рабочего запуска.
+Все процессы выбранной topology должны участвовать в согласованных MTP-вызовах: один для `tp1`, два для `tp2`, восемь для `tp8` и `dp8-ep8`. Multi-node и преобразование реальной записи между topology не реализованы. Для каждого режима нужен соответствующий operator config из рабочего запуска.
 
 Синтетические defaults: контекст 8192, batch 1 на DP-rank, depths `3 7`, два прогрева, пять измерений, greedy sampling. Все длины и числа повторов доступны в CLI. Заполнение контекста выполняется настоящими MTP-блоками на синтетических token IDs/hidden states. Это формирует согласованное состояние cache, но не воспроизводит распределение активаций target model и нагрузку на экспертов production-запроса.
 
@@ -80,7 +81,7 @@ python -m vllm_bench.mtp_profile.profile_mtp \
   --output /data/profile-results/mtp-dp8-eager
 ```
 
-Для запуска на сервере добавьте `--execute`. Launcher сам вызывает `torch.distributed.run` с одним процессом для `tp1` или восемью для остальных topology; оборачивать `profile_mtp.py` ещё одним `torchrun` не нужно. Для TP8 используйте `--topology tp8`, соответствующий operator config и новый output.
+Для запуска на сервере добавьте `--execute`. Launcher сам вызывает `torch.distributed.run` с одним процессом для `tp1`, двумя для `tp2` или восемью для `tp8`/`dp8-ep8`; оборачивать `profile_mtp.py` ещё одним `torchrun` не нужно. Для TP8 используйте `--topology tp8`, соответствующий operator config и новый output.
 
 На одной карте используйте тот же извлечённый MTP-checkpoint, но operator config для TP1/DP1 без EP:
 
@@ -96,6 +97,21 @@ python -m vllm_bench.mtp_profile.profile_mtp \
 Используется локальная NPU 0 в видимом наборе устройств. Все MTP-эксперты и необходимые общие веса размещаются на этой карте; автоматического переписывания TP8 operator config нет. Компиляция, графы и диагностика включаются теми же параметрами, что для остальных topology. Однокарточные времена не заменяют измерения коммуникаций TP8 или DP8/EP8.
 
 Каждый depth запускается отдельным последовательным torchrun job с собственной загрузкой небольшого MTP-checkpoint и собственными speculative buffers. Это важно: `num_speculative_tokens` влияет на cache и формы буферов, поэтому depth=3 не измеряется с буферами конфигурации depth=7. В replay сохраняется configured depth исходного сервера, даже если записанный вызов запросил меньше токенов.
+
+Для двух NPU используется тот же извлечённый MTP-checkpoint и operator config для TP2/DP1 без EP:
+
+```bash
+python -m vllm_bench.mtp_profile.profile_mtp \
+  --model /data/models/pangu505b-mxfp8-mtp \
+  --operator-config /data/config/operators-tp2.json \
+  --topology tp2 --batch-per-dp-rank 1 --context-length 8192 \
+  --depths 7 --synthetic-query-length 8 --execution graph \
+  --output /data/profile-results/mtp-tp2-graph --execute
+```
+
+Launcher создаёт два процесса на локальных NPU 0 и 1 в видимом наборе устройств. Один запрос распределяется между двумя TP-rank; `total_sequences=1`, throughput не умножается на число TP-rank. Eager, compiled, graph, trace и stage diagnostics используют общий runtime. Operator config автоматически из TP8 не преобразуется. TP2 проверен CPU-тестами; NPU-прогон требует проверки на сервере.
+
+Recorder полного TP2-запуска сохраняет `topology=tp2`, `world_size=2` и каталоги `rank-000`/`rank-001`. Replay такой записи запускайте с `--topology tp2 --input replay --capture /data/mtp-capture/cycle-0000`. Capture от TP8 нельзя воспроизвести на TP2: для этого нужна отдельная запись полного запуска с TP2. В synthetic все ranks используют один и тот же каталог MTP-checkpoint; повторное извлечение весов для смены TP не требуется.
 
 Для сравнения с полным сервером, где proposer получает `actual=8, padded=8, num_reqs=1`, задайте восемь реальных входных позиций на одну последовательность:
 
@@ -142,7 +158,7 @@ python -m vllm_bench.mtp_profile.record_mtp \
 
 Без `--execute` команда только печатает environment и исходную команду. Wrapper не меняет speculative settings полного запуска: depth и parallelism задаются в вашем `launch-full-model.sh`. Для отдельных записей depth=3 и depth=7 нужны соответствующие реальные запуски/вызовы.
 
-У полного запуска должен быть явно задан `OMNI_CUSTOM_MODEL_CONFIG_PATH`. Не сочетайте этот wrapper с нашим `--annotate-layers`: обе инструментации используют `sitecustomize.py`. Для DP8 подавайте сбалансированную нагрузку на все ranks. Replay принимает записи с одинаковыми input-token counts и batch size на всех ranks выбранной topology; пустой/незавершённый rank делает запись непригодной. Recorder автоматически распознаёт `tp1`, `tp8` и `dp8-ep8`.
+У полного запуска должен быть явно задан `OMNI_CUSTOM_MODEL_CONFIG_PATH`. Не сочетайте этот wrapper с нашим `--annotate-layers`: обе инструментации используют `sitecustomize.py`. Для DP8 подавайте сбалансированную нагрузку на все ranks. Replay принимает записи с одинаковыми input-token counts и batch size на всех ranks выбранной topology; пустой/незавершённый rank делает запись непригодной. Recorder автоматически распознаёт `tp1`, `tp2`, `tp8` и `dp8-ep8`.
 
 После двух пропущенных proposer-вызовов на каждом rank записывается один цикл. Граница — **внешний `propose`**, до graph replay, поэтому запись не зависит от повторного вызова Python-кода отдельных слоёв.
 
