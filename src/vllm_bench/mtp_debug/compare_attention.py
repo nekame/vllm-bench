@@ -8,7 +8,7 @@ from vllm_bench.mtp_debug.attention_layout import bytes_difference
 from vllm_bench.mtp_debug.compare_mome import capture_root
 from vllm_bench.mtp_debug.compare_rejections import load_events, timeline
 from vllm_bench.mtp_debug.find_divergence import analyze, select_request
-from vllm_bench.mtp_debug.ranks import filter_rank
+from vllm_bench.mtp_debug.ranks import filter_rank, expected_rank_count
 from vllm_bench.mtp_debug.tensor_io import json_safe
 
 
@@ -145,7 +145,8 @@ def projection_link(reader, layer, position):
         return {"status": "unavailable", "reason": str(error)}
 
 
-def compare_capture(root, events, left_name, right_name, expected_ranks=8):
+def compare_capture(root, events, left_name, right_name, expected_ranks=None):
+    expected_ranks = expected_rank_count((item["event"].get("target_forward", {}).get("attention_trace", {}).get("topology") for item in events), expected_ranks)
     selected, coverage, protocols = {}, [], []
     for rank in range(expected_ranks):
         try:
@@ -341,11 +342,11 @@ def main(argv=None):
     parser.add_argument("path", type=Path)
     parser.add_argument("--left", default="request-01")
     parser.add_argument("--right", default="request-02")
-    parser.add_argument("--expected-ranks", type=int, default=8)
+    parser.add_argument("--expected-ranks", type=int, help="Default: captured TP size, legacy captures: 8")
     parser.add_argument("--capture-root", type=Path)
     parser.add_argument("--output", type=Path, default=Path("attention-comparison.json"))
     args = parser.parse_args(argv)
-    if args.expected_ranks < 1:
+    if args.expected_ranks is not None and args.expected_ranks < 1:
         parser.error("--expected-ranks must be positive")
     paths = [args.output, args.output.with_suffix(".summary.json"), args.output.with_suffix(".summary.txt")]
     try:

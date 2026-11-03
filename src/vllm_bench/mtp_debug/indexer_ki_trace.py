@@ -28,6 +28,7 @@ def prepare_ki_frame(runner, frame, bound, metadata):
     prefills = [getattr(meta, "num_prefills", None) for meta in (metadata or {}).values()]
     phase = "prefill" if any(isinstance(n, int) and n > 0 for n in prefills) else "decode"
     trace = {"format": "pangu-indexer-ki-v1", "rank": frame["rank"], "pid": os.getpid(),
+             "topology": frame.get("attention_trace", {}).get("topology", {}),
              "request_ids": list(request), "label": label.read_text().strip() if label.exists() else None,
              "forward_index": frame["forward_index"], "phase": phase, "step": step,
              "status": "capturing", "calls": []}

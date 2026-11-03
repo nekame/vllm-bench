@@ -6,6 +6,7 @@ from pathlib import Path
 from vllm_bench.mtp_debug.attention_compare import Reader
 from vllm_bench.mtp_debug.attention_layout import bytes_difference
 from vllm_bench.mtp_debug.tensor_io import compare_bytes, read_tensor
+from vllm_bench.mtp_debug.ranks import expected_rank_count
 
 
 def load_frames(path):
@@ -133,7 +134,8 @@ def retention(reader, frames, prefill, layer, side, issues):
     return results
 
 
-def compare(root, frames, left_name, right_name, expected_ranks=8):
+def compare(root, frames, left_name, right_name, expected_ranks=None):
+    expected_ranks = expected_rank_count((frame.get("topology") for frame in frames), expected_ranks)
     issues, records, candidates, pairs = [], [], [], {}
     replay = None
     for rank in range(expected_ranks):
@@ -234,14 +236,14 @@ def main(argv=None):
     parser.add_argument("path", type=Path)
     parser.add_argument("--left", default="request-01")
     parser.add_argument("--right", default="request-02")
-    parser.add_argument("--expected-ranks", type=int, default=8)
+    parser.add_argument("--expected-ranks", type=int, help="Default: captured TP size, legacy captures: 8")
     parser.add_argument("--capture-root", type=Path)
     parser.add_argument("--output", type=Path, default=Path("ki-comparison.json"))
     args = parser.parse_args(argv)
     outputs = [args.output, args.output.with_suffix(".summary.json"), args.output.with_suffix(".summary.txt")]
     replays = args.output.parent / (args.output.stem + "-replays")
     try:
-        if args.expected_ranks < 1:
+        if args.expected_ranks is not None and args.expected_ranks < 1:
             raise ValueError("--expected-ranks must be positive")
         if any(path.exists() for path in [*outputs, replays]):
             raise FileExistsError("Use new report/replay paths")

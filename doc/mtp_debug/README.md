@@ -1,18 +1,68 @@
 # Отладка greedy MTP verification и MoME
 
-Этот сценарий подключает диагностику к существующему **полному** запуску Pangu с MTP. Он записывает draft tokens, target argmax, bonus token, результат acceptance и проверку относительно CPU-эталона greedy prefix acceptance. Дополнительный режим сохраняет target inputs и MoME metadata вокруг rejection.
+Этот сценарий подключает диагностику к полной или сокращённой модели Pangu с MTP. Он записывает draft tokens, target argmax, bonus token, результат acceptance и проверку относительно CPU-эталона greedy prefix acceptance. Дополнительные режимы сохраняют target inputs, MoME, attention и исходный Ki indexer. Для Ultra на TP2/TP8 есть собственный сервер без профайлера и автоматическое воспроизведение одной командой.
 
 Для замеров времени standalone MTP используйте [профилирование MTP](../mtp_profile/README.md). Диагностические копии на CPU и синхронизации меняют тайминги и могут скрывать гонки; результаты этого запуска не являются baseline производительности.
 
 ## Требования
 
 - Python 3.10+ и рабочее окружение OmniInfer/vLLM/torch_npu с V1 NPUModelRunner.
-- Полная модель с настроенными MTP и topology в вашем серверном launch script. Wrapper эти настройки не меняет.
+- Для wrapper — модель с настроенными MTP и topology в вашем серверном launch script. Wrapper эти настройки не меняет. Новый launcher ниже сам формирует отладочный запуск Ultra.
 - Только greedy sampling (`all_greedy`); после включения записи другой sampling вызывает явную ошибку.
 - Для `--rejection-windows` необходимы eager (`--enforce-eager`), отключённый prefix caching (`--no-enable-prefix-caching`) и один активный запрос. Не посылайте постороннюю нагрузку.
 - Новая директория результатов. По умолчанию записывается rank 0; другой rank выбирается переменной `PANGU_SPEC_DEBUG_RANK`.
 
 Отдельных конфигов этого сценария пока нет. Используются настройки вашего полного запуска и параметры CLI. Исходники OmniInfer не изменяются. Не сочетайте wrapper с MTP recorder или `--annotate-layers`: каждый использует свой `sitecustomize.py`, конфликт отклоняется до старта.
+
+## Воспроизведение на двух NPU одной командой
+
+`mtp_debug.reproduce` сам запускает сервер, дожидается API, прогревает, отправляет одинаковые запросы, сравнивает Ki и завершает собственный сервер с workers. Нужен Linux, рабочее окружение A5/OmniInfer и checkpoint Ultra, который помещается на двух доступных NPU. Сокращённый checkpoint можно подготовить средствами `layer_profile.prepare_checkpoint --keep-mtp`; уменьшение TP не требует перекопирования весов, но operator config должен быть согласован с TP2. `layer_profile` остаётся отдельным инструментом профилирования.
+
+Из корня checkout полная команда:
+
+```bash
+bash scripts/reproduce_ki.sh \
+  --model /data/models/pangu505b-mxfp8-12layers-mtp \
+  --operator-config /data/profile-configs/pangu-target-operators-tp2.json \
+  --output /data/profile-results/tp2-ki-repro \
+  --execute
+```
+
+Без `--execute` команда только печатает план: каталог output не создаётся, модель/ML runtime не импортируются. Эквивалентный Python entrypoint после настройки `PYTHONPATH`: `python3 -m vllm_bench.mtp_debug.reproduce`. Пути модели и operator config замените на свои; output должен быть новым. В operator JSON требуются `operator_optimization_config.use_quant_lightning_indexer_v2=true` и `use_noncontiguous_kv=true`. Полный рабочий JSON с TP2-настройками операторов нужно предоставить явно, launcher не переписывает его.
+
+Defaults: TP2/DP1/PP1, сокращённая `PanguUltraMoEForCausalLM`, MTP depth=1, eager, prefix cache выключен, `hif8_ds_mla`, block size=128, один активный запрос. Сервер получает `profiler=null`; legacy `VLLM_TORCH_PROFILER_DIR` и автоматический token profiler выключаются. Profiler endpoints и layer annotations не используются. Штатное определение объёма памяти/KV при инициализации vLLM выполняется как обычно. **Ki-копии и синхронизации всё равно добавляют overhead: это диагностический запуск.** Для него MTP-веса обязательны, число predictor-слоёв в checkpoint не изменяется.
+
+Один synthetic prompt длиной 8192 token IDs генерируется по seed=123 и сохраняется в `prompt.json` с SHA256. Два прогрева и два тестовых запроса получают один и тот же prompt, `temperature=0`, `top_p=1`, `top_k=0`, `seed=123`, выход ровно 128 токенов (`ignore_eos`, одинаковые min/max tokens). Между запросами меняется только request ID. Прогрев не захватывается; затем launcher сам выставляет ARM до первого тестового prefill и LABEL `request-01`, `request-02`. Вручную переключать ARM/LABEL не нужно.
+
+Изменяемые параметры: `--input-tokens`, `--output-tokens`, `--seed`, `--requests` (>=2), `--warmup-requests`, `--num-speculative-tokens`, `--tp 2|8`, `--port`, настройки памяти и capture. Например, `--requests 16 --tensor-budget-mib 2048` увеличивает число запросов и per-worker budget. Token IDs с тем же seed/config повторяются между запусками; полный массив хранится в файле. `max-model-len` по умолчанию равен сумме входа и выхода, `max-num-batched-tokens` — длине входа, чтобы prompt поместился в один prefill. При явном переопределении лимиты проверяются. Число разрешённых sampler cycles автоматически увеличивается для выбранного количества запросов.
+
+Полные returned token IDs и hashes находятся в `requests.jsonl`. Каждый тестовый запрос после первого сравнивается с `request-01`; Ki-отчёты и переносимые реальные входы сохраняются в `comparisons/`. Основные файлы:
+
+- `run_manifest.json`, `prompt.json` — параметры, фактическая команда и вход;
+- `server.log`, `server/server_manifest.json` — startup/runtime logs и серверный manifest;
+- `capture/` — Ki sidecars, verification, tensors и лимиты обоих rank;
+- `result.json`, `summary.txt` — общий результат и три короткие строки для передачи.
+
+Пришлите только `result`, `first_difference`, `evidence` из `summary.txt`. Результат `OUTPUT_TOKENS_DIFFER` означает, что ответы различаются при отсутствии найденного отличия в захваченном prefill Ki. Частичный capture имеет `INCOMPLETE_CAPTURE`; отсутствие rank не считается успешным сравнением. Различия — диагностический результат, exit code=0; ошибки запуска/HTTP/анализа/остановки или неполный capture дают код 1. Полные сведения остаются в JSON/logs, не нужно переписывать длинные массивы.
+
+Сервер работает отдельной группой процессов. При нормальном завершении, ошибке, Ctrl+C или SIGTERM launcher удаляет ARM и завершает только свою группу: SIGTERM, ожидание `--shutdown-timeout 30`, затем SIGKILL при необходимости. Занятый порт вызывает отказ; существующий сервер не используется и не останавливается. Startup timeout задаётся `--startup-timeout 1800`, timeout запроса — `--request-timeout 1800`. Запросы автоматически не повторяются. Ход запуска/запросов виден в stderr, подробности старта — в `server.log`.
+
+### Отдельный отладочный сервер
+
+Для ручной подачи запросов используйте `mtp_debug.serve`:
+
+```bash
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python3 -m vllm_bench.mtp_debug.serve \
+  --model /data/models/pangu505b-mxfp8-12layers-mtp \
+  --operator-config /data/profile-configs/pangu-target-operators-tp2.json \
+  --output /data/profile-results/tp2-debug-server \
+  --execute
+```
+
+Этот entrypoint только запускает постоянный сервер без profiler. По умолчанию capture лежит в `OUTPUT/capture`; здесь ARM/LABEL нужно переключать вручную по инструкции ниже. Общая сборка engine command/env используется обоими server CLI, но `layer_profile.serve` сохраняет прежний profiler, defaults и manifest. В `--engine-cli-json` нового debug-сервера разрешены только дополнительные параметры: управляемые topology, profiler, cache, адрес API и лимиты меняются именованными флагами, а не дублирующими overrides.
+
+CPU-тесты проверяют legacy CLI, TP2/TP8, фиксированные payloads, ARM/LABEL, SSE/token IDs, неполный capture, ошибки и очистку процессов, включая принудительное завершение дочернего процесса. Loopback HTTP integration test может пропускаться в sandbox без сокетов. Запуск настоящего vLLM на двух NPU здесь не выполнен. Отсутствие различия на сокращённой TP2-модели не исключает проблему полной TP8-модели.
 
 ## План и запуск
 
@@ -198,7 +248,7 @@ CPU-проверки покрывают dtype/целостность, лимит
 
 ## Автоматический срез HiF8 DSA attention
 
-Этот режим предназначен для поиска расхождения между выходами `qa_conv`/`compresskv_conv` и входом `o_conv`. Поддерживается текущая реализация OmniInfer на A5: `hif8_ds_mla`, noncontiguous KV, latent 512, rotary 64, sparse count 2048, DP=1/TP=8, без CP/KVSP. При неподдерживаемой конфигурации запуск отказывается включать этот режим; неподдерживаемый формат фактического вызова отмечается в capture. Исходники OmniInfer не меняются: hooks устанавливаются только в workers запущенного процесса.
+Этот режим предназначен для поиска расхождения между выходами `qa_conv`/`compresskv_conv` и входом `o_conv`. Поддерживается текущая реализация OmniInfer на A5: `hif8_ds_mla`, noncontiguous KV, latent 512, rotary 64, sparse count 2048, DP=1/TP=2 или 8/PP=1, без CP/KVSP. При неподдерживаемой конфигурации запуск отказывается включать этот режим; неподдерживаемый формат фактического вызова отмечается в capture. Исходники OmniInfer не меняются: hooks устанавливаются только в workers запущенного процесса.
 
 Нужен **новый** capture, старые дампы MoME не содержат аргументы attention. Запускайте из корня checkout:
 
@@ -224,7 +274,7 @@ touch /data/profile-results/attention-tensors/ARM
 printf '%s\n' request-02 > /data/profile-results/attention-tensors/LABEL
 ```
 
-`--attention-tensors` включает `--mome-tensors` и по умолчанию записывает **все восемь rank**. `--attention-ranks 0,3` позволяет снять часть rank, но полное TP-сравнение будет отмечено как неполное. Без нового режима прежний default rank=0 сохраняется. Старые анализаторы получили `--rank`, по умолчанию 0, чтобы выбирать нужную копию события в многопроцессном capture.
+`--attention-tensors` включает `--mome-tensors` и по умолчанию записывает **все rank текущего TP**. `--attention-ranks 0,3` позволяет снять часть rank, но полное TP-сравнение будет отмечено как неполное. Без нового режима прежний default rank=0 сохраняется. Старые анализаторы получили `--rank`, по умолчанию 0, чтобы выбирать нужную копию события в многопроцессном capture.
 
 В `target_forward.attention_trace` сохраняются:
 
@@ -234,7 +284,7 @@ printf '%s\n' request-02 > /data/profile-results/attention-tensors/LABEL
 
 KV сохраняется через действующий `block_table` и реальный размер страницы аргумента оператора. Физические номера страниц остаются для аудита; сравнение идёт по логическим позициям. Для копирования используется basic slice каждой нужной страницы на CPU, затем выбор строк по байтовым смещениям: NPU advanced indexing (`tensor[pages, slots]` / `aclnnIndex`) не вызывается. Каждая нужная физическая страница копируется один раз за снимок; весь cache на CPU не переносится. Indexer получает всю действующую историю, attention — объединение реально выбранных строк. Неиспользуемая аллокация KV не дампится. Для attention payloads сохраняется SHA256 полного файла, без тысяч отдельных строковых samples/hashes; точные строки сравниваются offline по `.bin`.
 
-Ограничение `--attention-steps-per-request` относится к первым decode-проходам каждого request ID после включения записи; prefill не расходует квоту. После квоты точные attention/MoME snapshots пропускаются с явной причиной. Лимиты payloads общие для MoME и attention: по умолчанию 16 МиБ на один тензор и 512 МиБ **на worker**, то есть до 4 ГиБ для TP8. При необходимости увеличьте `--tensor-max-mib`/`--tensor-budget-mib`; достигнутый лимит останавливает точные дампы этого worker до перезапуска. Проверяйте `tensor-status-rank-*-pid-*.json` и `hooks-pid-*.json`.
+Ограничение `--attention-steps-per-request` относится к первым decode-проходам каждого request ID после включения записи; prefill не расходует квоту. После квоты точные attention/MoME snapshots пропускаются с явной причиной. Лимиты payloads общие для MoME и attention: по умолчанию 16 МиБ на один тензор и 512 МиБ **на worker**, то есть до 1 ГиБ для TP2 и 4 ГиБ для TP8. При необходимости увеличьте `--tensor-max-mib`/`--tensor-budget-mib`; достигнутый лимит останавливает точные дампы этого worker до перезапуска. Проверяйте `tensor-status-rank-*-pid-*.json` и `hooks-pid-*.json`.
 
 После получения двух запросов:
 
@@ -243,7 +293,7 @@ bash scripts/compare_attention.sh /data/profile-results/attention-tensors \
   --left request-01 --right request-02 --output attention-comparison.json
 ```
 
-Команда сама находит первое отличие принятых токенов и сравнивает захваченные операнды на одинаковом записанном префиксе до него. Из диагностики исключаются строки с отвергнутым speculative conditioning и позиции после расхождения. Разные границы forward и пробелы истории не угадываются, а отмечаются как недостаточное покрытие. Проверяются все выбранные слои и восемь rank; локальные выходы проекции соединяются в порядке TP rank и сверяются с входом `o_conv` каждого rank. Внутри каждого запроса дополнительно проверяется передача выхода attention во вход проекции.
+Команда сама находит первое отличие принятых токенов и сравнивает захваченные операнды на одинаковом записанном префиксе до него. Из диагностики исключаются строки с отвергнутым speculative conditioning и позиции после расхождения. Разные границы forward и пробелы истории не угадываются, а отмечаются как недостаточное покрытие. Проверяются все выбранные слои и rank текущего TP; локальные выходы проекции соединяются в порядке TP rank и сверяются с входом `o_conv` каждого rank. Внутри каждого запроса дополнительно проверяется передача выхода attention во вход проекции.
 
 Создаются три файла, существующие файлы не перезаписываются:
 
@@ -293,7 +343,7 @@ python -m vllm_bench.mtp_debug.debug_spec \
   --execute -- bash /data/scripts/launch-full-model-eager.sh
 ```
 
-`--indexer-ki` включает прежние attention/MoME tensors и все восемь rank по умолчанию. Сохраняйте DP=1/TP=8/PP=1, `--enforce-eager --no-enable-prefix-caching`, выбранный depth и greedy sampling. Требуется именно ветка QLIv2 MXFP8; другой indexer явно отвергается при установке hooks. После прогрева задайте `LABEL=request-01`, создайте `ARM` **до подачи первого тестового запроса**, дождитесь его полного завершения, смените LABEL на `request-02` и подайте тот же вход. Это важно для захвата всего prefill с позиции 0.
+`--indexer-ki` включает прежние attention/MoME tensors и все rank по умолчанию. Сохраняйте DP=1/TP=2 или 8/PP=1, `--enforce-eager --no-enable-prefix-caching`, выбранный depth и greedy sampling. Требуется именно ветка QLIv2 MXFP8; другой indexer явно отвергается при установке hooks. После прогрева задайте `LABEL=request-01`, создайте `ARM` **до подачи первого тестового запроса**, дождитесь его полного завершения, смените LABEL на `request-02` и подайте тот же вход. Это важно для захвата всего prefill с позиции 0.
 
 Новый hook снимает аргументы **фактического** `indexer_quant_cache` внутри выбранного target `_update_cache`, включая prefill и decode:
 
@@ -313,7 +363,7 @@ bash scripts/compare_indexer_ki.sh /data/profile-results/indexer-ki \
   --output ki-comparison.json
 ```
 
-По умолчанию выбираются `request-01`/`request-02`, восемь rank и все захваченные слои. Другие LABEL/request ID задаются через `--left`/`--right`; `--expected-ranks` меняет проверяемое количество rank, а не восстанавливает отсутствующие данные.
+По умолчанию выбираются `request-01`/`request-02`, число rank из topology capture и все захваченные слои. Старые sidecars без topology используют default TP8. Другие LABEL/request ID задаются через `--left`/`--right`; `--expected-ranks` задаёт явное ожидаемое число rank и не может противоречить записанному TP. Отсутствующий worker не уменьшает ожидаемый TP.
 
 Анализатор сопоставляет **prefill** по абсолютным позициям, проверяет полноту префикса от нуля и точное совпадение input IDs, затем сравнивает Ki и записанные key/scales. Разные границы prefill-чанков допустимы и отражаются через export provenance. Внутри каждого запроса prompt-кэш после записи сопоставляется с его чтением перед первым decode indexer, с учётом захваченных записей того же decode. Изменение Ki оператором проверяется и для prefill, и для decode. Между запросами decode Ki не объявляется равным/разным по совпадению отдельных токенов: различающиеся speculative conditioning и ненаблюдаемая история требуют отдельной проверки.
 

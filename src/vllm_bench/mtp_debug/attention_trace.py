@@ -29,8 +29,8 @@ def topology(runner):
     from vllm.distributed import get_tp_group
     group = get_tp_group()
     config = runner.vllm_config.parallel_config
-    if config.data_parallel_size != 1 or group.world_size != 8 or getattr(config, "pipeline_parallel_size", 1) != 1:
-        raise RuntimeError("attention trace v1 requires DP=1, TP=8, PP=1")
+    if config.data_parallel_size != 1 or group.world_size not in (2, 8) or getattr(config, "pipeline_parallel_size", 1) != 1:
+        raise RuntimeError("attention trace requires DP=1, TP=2 or 8, PP=1")
     return {"rank": current_rank(), "tp_rank": group.rank_in_group, "tp_size": group.world_size}
 
 

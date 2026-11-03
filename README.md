@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `layer_profile` | Сокращённый checkpoint на 12 слоях (также 6/9) с опциональным сохранением MTP, полная модель; HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
 | `mtp_profile` | MTP checkpoint, synthetic profiling, запись и replay реальных входов без target model | [Профилирование MTP](doc/mtp_profile/README.md) |
-| `mtp_debug` | Greedy acceptance, MoME/HiF8 attention, исходный indexer ki при prefill и standalone-тест quant cache | [Отладка MTP](doc/mtp_debug/README.md) |
+| `mtp_debug` | Отладочный сервер и воспроизведение Ki на TP2/TP8 одной командой; MoME, acceptance и standalone quant cache | [Отладка MTP](doc/mtp_debug/README.md) |
 
 ## Начало работы
 
@@ -20,6 +20,7 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 python -m vllm_bench.layer_profile.serve --help
 python -m vllm_bench.mtp_profile.profile_mtp --help
 python -m vllm_bench.mtp_debug.debug_spec --help
+python -m vllm_bench.mtp_debug.reproduce --help
 ```
 
 Команды запуска модели и wrappers по умолчанию показывают план; фактический запуск требует `--execute`. Экстракторы checkpoint используют `--dry-run` для планирования и записывают файлы без этого флага. Подробные команды и требования к model/operator config приведены в руководствах.
