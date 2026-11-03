@@ -157,8 +157,10 @@ sys.exit(main())
             with tempfile.TemporaryDirectory() as tmp:
                 args = self.fixture(Path(tmp))
                 plan = run.make_plan(run.parser().parse_args([*args, "--engine", engine, "--tp", "2"]))
-                with patch.object(run.subprocess, "run") as child:
-                    child.return_value.returncode = 0
+                with patch.object(run.subprocess, "Popen") as child:
+                    process = child.return_value.__enter__.return_value
+                    process.stdout = iter(())
+                    process.wait.return_value = 0
                     self.assertEqual(run.launch(plan), 0)
                 command = child.call_args.args[0]
                 self.assertEqual("torch.distributed.run" in command, engine == "direct")
@@ -168,6 +170,29 @@ sys.exit(main())
                 self.assertEqual(env["VLLM_USE_V2_MODEL_RUNNER"], "0")
                 self.assertTrue({"omni-npu", "omni_npu_patches", "omni_custom_models"}
                                 <= set(env["VLLM_PLUGINS"].split(",")))
+
+    def test_launch_streams_stdout_and_stderr_to_console_and_log(self):
+        original_popen = subprocess.Popen
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as tmp:
+                args = self.fixture(Path(tmp))
+                plan = run.make_plan(run.parser().parse_args(args))
+                script = ("import sys\nprint('stdout', flush=True)\n"
+                          "sys.stderr.write('stderr\\n'); sys.stderr.flush()\n"
+                          f"sys.stdout.write('tail'); sys.stdout.flush()\nraise SystemExit({exit_code})\n")
+                def launch_child(command, **kwargs):
+                    self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
+                    return original_popen([sys.executable, "-c", script], **kwargs)
+                console = io.StringIO()
+                with patch.object(run.subprocess, "Popen", side_effect=launch_child), contextlib.redirect_stdout(console):
+                    self.assertEqual(run.launch(plan), exit_code)
+                expected = "stdout\nstderr\ntail"
+                self.assertEqual(console.getvalue(), expected)
+                output = Path(plan["options"]["output"])
+                self.assertEqual((output / "runtime.log").read_text(), expected)
+                self.assertEqual((output / "failure.json").exists(), exit_code != 0)
+                if exit_code:
+                    self.assertEqual(json.loads((output / "failure.json").read_text())["returncode"], exit_code)
 
     def test_plugin_allowlist_keeps_platform_plugin_and_user_plugins(self):
         with tempfile.TemporaryDirectory() as tmp:

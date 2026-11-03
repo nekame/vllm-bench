@@ -180,7 +180,8 @@ def child_environment(plan):
         env.pop(name, None)
     env.update(OMNI_CUSTOM_MODEL_CONFIG_PATH=plan["options"]["operator_config"],
                OMNI_VLLM_PATCHES_DIR="high_throughout", OMNI_PANGU_V2_HIGH_THROUGHOUT="1",
-               VLLM_USE_V2_MODEL_RUNNER="0", VLLM_USE_AOT_COMPILE="0", OMNI_DRAFT_TOP_K="-1")
+               VLLM_USE_V2_MODEL_RUNNER="0", VLLM_USE_AOT_COMPILE="0", OMNI_DRAFT_TOP_K="-1",
+               PYTHONUNBUFFERED="1")
     if plan["options"]["engine"] == "omni":
         env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     plugins = [name for name in env.get("VLLM_PLUGINS", "").split(",") if name]
@@ -211,8 +212,15 @@ def launch(plan):
                    f"--nproc-per-node={plan['options']['tp']}", "--module", module, "--plan", str(plan_path)]
     else:
         command = [sys.executable, "-m", module, "--plan", str(plan_path)]
-    with (output / "runtime.log").open("w") as log:
-        code = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+    with (output / "runtime.log").open("w", encoding="utf-8") as log:
+        with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace", bufsize=1) as process:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            code = process.wait()
     if code:
         write_json(output / "failure.json", {"returncode": code, "log": str(output / "runtime.log")})
     return code

@@ -59,6 +59,10 @@ python -m vllm_bench.pangu_infer.run \
 Output должен быть новым каталогом. Явные относительные пути отсчитываются
 от текущего рабочего каталога.
 
+Вывод worker-процессов (stdout и stderr) одновременно показывается на экране
+и сохраняется в `runtime.log`, с немедленным сбросом каждой строки. Это работает
+для direct, offline baseline и каждого запуска матрицы.
+
 Для baseline замените `--engine direct` на `--engine omni` и выберите другой
 output. По умолчанию используется direct. Baseline запускает stock offline
 LLMEngine, без HTTP; в его время входят engine scheduling и IPC.
