@@ -21,8 +21,10 @@ def compare(reference, candidate, *, correctness=False):
     for record in (reference, candidate):
         if record.get("format") != "pangu-direct-result-v1":
             raise ValueError("Unexpected result format")
-        if record.get("measurement") != "benchmark":
-            raise ValueError("Diagnostic traces cannot be used for benchmark comparison")
+        if record.get("measurement") not in ("benchmark", "diagnostic"):
+            raise ValueError("Unexpected measurement type")
+        if not correctness and record["measurement"] != "benchmark":
+            raise ValueError("Diagnostic runs cannot be used for benchmark comparison; use --correctness to check tokens")
     ra, ca = reference["options"], candidate["options"]
     if correctness:
         if ra["temperature"] != 0 or ca["temperature"] != 0:

@@ -27,7 +27,7 @@ def save_result(output, plan, records, effective, details):
     tokens = sum(r["decode_tokens"] for r in records)
     accepted = [n for r in records for n in r.get("accepted_drafts", [])]
     summary = {"format": "pangu-direct-result-v1", "engine": a["engine"],
-               "measurement": "diagnostic" if a["profile"] else "benchmark",
+               "measurement": "diagnostic" if a["profile"] or a.get("model_timing", False) else "benchmark",
                "comparison_sha256": plan["comparison_sha256"],
                "prompt_sha256": plan["prompt_sha256"], "model_scope": plan["model_scope"],
                "checkpoint_identity": plan["checkpoint_identity"],
@@ -39,6 +39,9 @@ def save_result(output, plan, records, effective, details):
                "empty_decode_requests": sum(r["decode_tokens"] == 0 for r in records),
                "acceptance_rate": sum(accepted) / (len(accepted) * a["depth"]) if accepted and a["depth"] else None,
                "records": records, "validation": "NPU executed; correctness requires comparison with target-only"}
+    if a.get("model_timing", False):
+        from vllm_bench.pangu_infer.model_timing import summarize_model_timings
+        summary["model_timing_summary"] = summarize_model_timings(records)
     write_json(Path(output) / "result.json", summary)
     with (Path(output) / "summary.csv").open("w", newline="") as handle:
         fields = ["engine", "measurement", "model_scope", "decode_tokens_per_second", "median_tpot_ms", "acceptance_rate"]

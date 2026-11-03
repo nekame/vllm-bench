@@ -69,7 +69,8 @@ class Execution:
                 update_stream=torch.npu.Stream(), attn_layer_names=names)
             self.runnable = self.wrapper
 
-    def __call__(self, ids, start, accepted, prompt, *, hidden=None, sample_index=None, draft_index=None):
+    def __call__(self, ids, start, accepted, prompt, *, hidden=None, sample_index=None, draft_index=None,
+                 model_timing=None):
         import torch
         from vllm.config import CUDAGraphMode
         from vllm.forward_context import set_forward_context, get_forward_context, BatchDescriptor
@@ -100,7 +101,13 @@ class Execution:
             started = time.perf_counter() if capturing else None
             label = "direct/graph_replay_update" if self.wrapper else "direct/model_launch"
             with torch.profiler.record_function(label) if self.profile else nullcontext():
-                result = self.runnable(self.ids, self.lane.positions, self.hidden, self.sample_index)
+                if model_timing is not None and model_timing.cycle is not None:
+                    result = model_timing.measure(
+                        self.runnable, (self.ids, self.lane.positions, self.hidden, self.sample_index),
+                        model="target" if self.head is None else "mtp", input_tokens=self.size,
+                        step=draft_index, head=self.head)
+                else:
+                    result = self.runnable(self.ids, self.lane.positions, self.hidden, self.sample_index)
             if capturing:
                 torch.npu.synchronize()
                 self.capture_seconds += time.perf_counter() - started

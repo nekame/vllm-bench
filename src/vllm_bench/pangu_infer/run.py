@@ -76,6 +76,8 @@ def parser():
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--respect-eos", action="store_true", help="Default: ignore EOS for fixed-length benchmarks")
     p.add_argument("--profile", action="store_true", help="Diagnostic CPU/NPU traces; not benchmark timings")
+    p.add_argument("--model-timing", action="store_true",
+                   help="Direct-only diagnostic: synchronized decode forward + LM head times, logged after each request")
     p.add_argument("--additional-config", type=Path)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Offline engine memory budget")
     p.add_argument("--execute", action="store_true")
@@ -85,6 +87,8 @@ def parser():
 def make_plan(a):
     options = {key: str(value.resolve()) if isinstance(value, Path) else value
                for key, value in vars(a).items()}
+    if a.model_timing and a.engine != "direct":
+        raise ValueError("--model-timing requires --engine direct; stock OmniInfer instrumentation is not supported")
     if a.engine == "omni" and a.mode == "compile":
         raise ValueError("Stock OmniInfer bypasses compile-only without FULL graphs; use a direct run or another baseline mode")
     if min(a.context_length, a.repeats, a.warmup) < 1 or a.max_new_tokens < 2:

@@ -223,6 +223,52 @@ baseline включает штатный worker profiler. Такие резул�
 `diagnostic`, и compare не использует их для speedup. Логирование внутри
 измеряемого decode не выполняется.
 
+### Время вызовов target и MTP
+
+Для direct добавьте `--model-timing` и новый `--output`. Флаг по умолчанию
+выключен; для `--engine omni` он отклоняется при планировании. Для матрицы
+укажите `"engines": ["direct"]` и `"options": ["--model-timing"]`.
+
+Измеряется существующий model step: forward + LM head (`compute_logits`),
+включая ACL replay/update при включённых графах. Копирование входов, построение
+metadata и sampling находятся вне границы этого замера. На каждом TP-rank
+выполняется `torch.npu.synchronize()` перед началом таймера и после model step;
+время включает Python dispatch и завершение NPU-работы.
+
+Учитываются только вызовы decode измеряемых запросов. Warmup, target prefill
+и всё первоначальное заполнение MTP исключены, в том числе однотокенные MTP
+продолжения начального prefill. При `--no-mtp` измеряется только target.
+
+После завершения decode каждого запроса длительности соответствующих вызовов
+агрегируются максимумом по TP-rank. До агрегации проверяется совпадение числа
+записей; коммуникации для этой агрегации и печать не входят в decode wall time.
+Только rank 0 выводит строки, которые launcher показывает на экране и сохраняет
+в `runtime.log`:
+
+```text
+[model-time] repeat=1 cycle=0 model=target input_tokens=8 wall_ms_max_tp=12.345
+[model-time] repeat=1 cycle=1 model=mtp step=0 head=0 input_tokens=8 wall_ms_max_tp=1.234
+```
+
+`repeat` начинается с 1, `cycle`, `step` и `head` — с 0. `input_tokens` —
+фактическая длина входного вектора token IDs, включая все позиции verification,
+а не длина KV-контекста и не число принятых предложений. Для target обычно
+это 1 без MTP, 4 при depth 3 и 8 при depth 7. Для MTP отдельно показаны шаг
+предложения и используемый predictor head; при depth 7 первый шаг decode
+обычно получает 8 токенов, следующие — по одному.
+
+В конце печатается `[model-time-summary]`: количество вызовов и median/min/max
+в миллисекундах, сгруппированные по модели, input_tokens и head. Каждое значение
+в этой статистике уже является максимумом по TP. Записи сохраняются в
+`result.json` в `records[].model_timings`, сводка — в `model_timing_summary`.
+Если decode отсутствует из-за начального EOS, лог содержит `no_decode_calls`.
+
+Синхронизации меняют перекрытие операций, поэтому `--model-timing` помечает
+результат как `diagnostic`. Его TPOT не является обычным benchmark; сравнение
+speedup запрещено. `compare --correctness` допускает diagnostic результаты
+для проверки совпадения greedy token IDs с обычным запуском. Без флага
+дополнительных синхронизаций, агрегации и вывода замеров нет.
+
 Разность wall time — разность двух путей исполнения, не готовая оценка чистого
 Python overhead. Проверяйте одинаковые operator configs, kernel workload,
 acceptance и trace: CPU launch gaps, preparation, sampling/commit и graph task
@@ -244,6 +290,10 @@ updates. Нельзя вычитать сумму длительностей NPU
    greedy или ошибке API остановить интерпретацию performance до исправления.
 6. Затем полная модель и матрица 8192/256, не менее трёх повторов, без profiler;
    отдельные profiler runs использовать для атрибуции overhead.
+7. Проверить `--model-timing` при TP1/TP8, без MTP и с depth 3/7, в eager,
+   compile и ACL-режимах. Сверить target `input_tokens=1/4/8`, исключение warmup
+   и начального MTP, отсутствие новых compilation/capture. Через
+   `compare --correctness` проверить greedy token IDs против запуска без флага.
 
 ```bash
 PYTHONPATH="$PWD/src" python -m unittest discover -s tests

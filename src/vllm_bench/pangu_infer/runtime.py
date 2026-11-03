@@ -215,6 +215,7 @@ class DirectEngine:
         self.plan, self.cfg, self.device = plan, cfg, device
         self.a = plan["options"]
         self.target, self.draft = target, draft
+        self.model_timings = None
         if plan["config"].get("use_mome"):
             current_platform._align_hybrid_block_size(cfg, None)
         self.caches = Caches(cfg, device)
@@ -243,7 +244,8 @@ class DirectEngine:
                 names, size, self.device, head=head if kind == "draft" else None,
                 mode="eager" if prefill else self.a["mode"], profile=self.a["profile"])
         return self.executions[key](ids, start, accepted, self.a["context_length"],
-                                    hidden=hidden, sample_index=index, draft_index=draft_index)
+                                    hidden=hidden, sample_index=index, draft_index=draft_index,
+                                    model_timing=self.model_timings)
 
     def propose(self, ids, hidden, start, index, index_value, anchor, accepted):
         import torch
@@ -287,9 +289,14 @@ class DirectEngine:
                 "replays": sum(e.replays for e in self.executions.values()),
                 "calls": sum(e.calls for e in self.executions.values())}
 
-    def generate(self, limit, *, profile=False):
+    def generate(self, limit, *, profile=False, model_timing=False):
         import torch
 
+        if model_timing:
+            from vllm_bench.pangu_infer.model_timing import ModelTimings
+            self.model_timings = ModelTimings()
+        else:
+            self.model_timings = None
         self.caches.reset()
         self.sampler.reset()
         torch.npu.synchronize()
@@ -314,6 +321,8 @@ class DirectEngine:
         stopped = self.a["respect_eos"] and int(anchor.item()) in eos
         decode_start = time.perf_counter()
         while produced < limit and not stopped:
+            if self.model_timings is not None:
+                self.model_timings.cycle = cycles
             if self.a["depth"]:
                 with torch.profiler.record_function("direct/draft") if profile else nullcontext():
                     drafts, q = (initial_proposal if cycles == 0 else
@@ -351,18 +360,23 @@ class DirectEngine:
                     break
         torch.npu.synchronize()
         decode_seconds = time.perf_counter() - decode_start
+        if self.model_timings is not None:
+            self.model_timings.cycle = None
         tokens = torch.cat(output).tolist()[:limit]
         if self.a["respect_eos"]:
             first_eos = next((i for i, token in enumerate(tokens) if token in eos), None)
             if first_eos is not None:
                 tokens = tokens[:first_eos + 1]
-        return {"token_ids": tokens, "prefill_seconds": prefill_seconds,
+        record = {"token_ids": tokens, "prefill_seconds": prefill_seconds,
                 "decode_seconds": decode_seconds, "decode_tokens": len(tokens) - 1,
                 "cycles": cycles, "accepted_drafts": cycle_counts,
                 "decode_target_calls": cycles,
                 "decode_draft_calls": max(0, cycles - 1) * self.a["depth"],
                 "acceptance_measurement": "exact verification counts before terminal length truncation",
                 "initial_context": self.a["context_length"], "final_computed_context": cursor}
+        if self.model_timings is not None:
+            record["model_timings"] = self.model_timings.records
+        return record
 
 
 def main(argv=None):
@@ -400,6 +414,9 @@ def main(argv=None):
                     raise RuntimeError(f"Decode lane {key} did not compile")
                 if "acl" in execution.mode and not execution.replays:
                     raise RuntimeError(f"Decode lane {key} did not replay an ACL graph")
+            if rank == 0 and a.get("model_timing", False):
+                print("[model-time] diagnostic=sync_wall boundary=forward+lm_head"
+                      " aggregation=max_tp output=after_decode", flush=True)
             if a["profile"]:
                 import torch_npu
                 activities = [torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU]
@@ -410,7 +427,16 @@ def main(argv=None):
             else:
                 profiler = nullcontext()
             with profiler:
-                records = [engine.generate(a["max_new_tokens"], profile=a["profile"]) for _ in range(a["repeats"])]
+                records = []
+                for repeat in range(1, a["repeats"] + 1):
+                    record = engine.generate(a["max_new_tokens"], profile=a["profile"],
+                                             model_timing=a.get("model_timing", False))
+                    if a.get("model_timing", False):
+                        from vllm_bench.pangu_infer.model_timing import reduce_model_timings, log_model_timings
+                        reduce_model_timings(record["model_timings"], device, a["tp"])
+                        if rank == 0:
+                            log_model_timings(record["model_timings"], repeat)
+                    records.append(record)
             after = engine.counters()
             if any(after[k] != before[k] for k in ("compiles", "captures")):
                 raise RuntimeError("Compilation/capture occurred during measured requests; increase warmup or fix specialization")
@@ -428,6 +454,9 @@ def main(argv=None):
                          "mamba_block_size": cfg.cache_config.mamba_block_size}
             from vllm_bench.pangu_infer.results import save_result, versions
             if rank == 0:
+                if a.get("model_timing", False):
+                    from vllm_bench.pangu_infer.model_timing import summarize_model_timings, log_model_timing_summary
+                    log_model_timing_summary(summarize_model_timings(records))
                 save_result(output, plan, records, effective, {
                     **loading, "warmup_seconds": warmup_seconds,
                     "setup_seconds": setup_seconds, "load_seconds": load_seconds,

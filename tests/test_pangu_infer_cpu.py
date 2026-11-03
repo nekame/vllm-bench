@@ -103,6 +103,26 @@ class DirectPlanningTests(unittest.TestCase):
                 run.parser().parse_args([*args, "--depth", "7", "--no-mtp"])
             self.assertEqual(error.exception.code, 2)
 
+    def test_model_timing_is_optional_direct_only_and_supported_by_direct_matrix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.fixture(root)
+            self.assertFalse(run.make_plan(run.parser().parse_args(args))["options"]["model_timing"])
+            timed = run.make_plan(run.parser().parse_args([*args, "--model-timing"]))
+            self.assertTrue(timed["options"]["model_timing"])
+            self.assertNotIn("model_timing", engine_options(timed, direct=True))
+            with self.assertRaisesRegex(ValueError, "requires --engine direct"):
+                run.make_plan(run.parser().parse_args([*args, "--engine", "omni", "--model-timing"]))
+            spec = {"models": ["full"], "operator_configs": {"1": "operator.json"},
+                    "output": "matrix", "tp": [1], "modes": ["eager"],
+                    "engines": ["direct"], "options": ["--model-timing"]}
+            _, items = matrix.plans(spec, root)
+            self.assertEqual(len(items), 2)
+            self.assertTrue(all(item["options"]["model_timing"] for item in items))
+            spec["engines"] = ["omni"]
+            with self.assertRaisesRegex(ValueError, "requires --engine direct"):
+                matrix.plans(spec, root)
+
     def test_matrix_no_mtp_overrides_json_depths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -455,6 +475,17 @@ class ResultComparisonTests(unittest.TestCase):
         result = compare(reference, candidate, correctness=True)
         self.assertTrue(result["greedy_tokens_match"])
         self.assertIsNone(result["speedup"])
+
+    def test_diagnostic_model_times_allow_only_correctness_comparison(self):
+        reference, candidate = self.fixture(), self.fixture()
+        candidate["measurement"] = "diagnostic"
+        candidate["options"]["model_timing"] = True
+        self.assertTrue(compare(reference, candidate, correctness=True)["greedy_tokens_match"])
+        self.assertIsNone(compare(reference, candidate, correctness=True)["speedup"])
+        with self.assertRaisesRegex(ValueError, "Diagnostic runs"):
+            compare(reference, candidate)
+        candidate["records"][0]["token_ids"][1] = 42
+        self.assertFalse(compare(reference, candidate, correctness=True)["greedy_tokens_match"])
 
     def test_refuse_different_workload_operators_versions_or_diagnostics(self):
         reference = self.fixture()
