@@ -184,7 +184,11 @@ def child_environment(plan):
     if plan["options"]["engine"] == "omni":
         env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     plugins = [name for name in env.get("VLLM_PLUGINS", "").split(",") if name]
-    env["VLLM_PLUGINS"] = ",".join(dict.fromkeys([*plugins, "omni_npu_patches", "omni_custom_models"]))
+    # vLLM applies this allow-list to platform plugins as well as general
+    # plugins. Omitting omni-npu leaves current_platform.device_type empty.
+    env["VLLM_PLUGINS"] = ",".join(dict.fromkeys([
+        *plugins, "omni-npu", "omni_npu_patches", "omni_custom_models",
+    ]))
     return env
 
 

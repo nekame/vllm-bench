@@ -57,11 +57,24 @@ def engine_options(plan, *, direct):
     return options
 
 
+def require_npu_platform():
+    from vllm.platforms import current_platform
+
+    if current_platform.device_type != "npu":
+        raise RuntimeError(
+            f"Expected vLLM NPU platform, got device_type={current_platform.device_type!r}. "
+            "VLLM_PLUGINS must include omni-npu, omni_npu_patches and omni_custom_models; "
+            "the installed OmniInfer must register the omni-npu platform entry point. "
+            "Restart through vllm_bench.pangu_infer.run after fixing the environment."
+        )
+
+
 def setup(plan):
     import torch
     import torch_npu  # noqa: F401
     from vllm.plugins import load_general_plugins
 
+    require_npu_platform()
     load_general_plugins()
     from vllm.config import set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs

@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import time
 
-from vllm_bench.pangu_infer.runtime import engine_options, config_json
+from vllm_bench.pangu_infer.runtime import engine_options, config_json, require_npu_platform
 from vllm_bench.pangu_infer.results import save_result, versions
 
 
@@ -79,6 +79,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     plan = json.loads(args.plan.read_text())
     from vllm.plugins import load_general_plugins
+    require_npu_platform()
     load_general_plugins()
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.engine.llm_engine import LLMEngine

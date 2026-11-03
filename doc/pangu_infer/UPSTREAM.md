@@ -19,7 +19,9 @@
 Изменения в OmniInfer не требуются. Зависимости на его startup-регистрации
 остаются: NPU platform, linear/quantization/custom operators, cache specs,
 static sinks и необходимые vLLM adaptations загружаются обычными плагинами
-`omni_npu_patches,omni_custom_models` с `OMNI_VLLM_PATCHES_DIR=high_throughout`.
+`omni-npu,omni_npu_patches,omni_custom_models` с `OMNI_VLLM_PATCHES_DIR=high_throughout`.
+Плагин `omni-npu` обязателен и в allow-list `VLLM_PLUGINS`: vLLM применяет
+этот фильтр к platform entry points, а не только к general plugins.
 Это штатные patches установленного OmniInfer, а не новые подмены PoC.
 
 Только определения нейросети в `model/` требуют ML-пакетов уже при импорте,
@@ -39,6 +41,7 @@ ACL wrapper обслуживает обновление graph tasks с дина�
 
 Проверенные upstream-интерфейсы vLLM 0.25.1:
 [LLMEngine](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/engine/llm_engine.py),
+[plugin loader](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/plugins/__init__.py),
 [forward context](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/forward_context.py),
 [LogitsProcessor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/model_executor/layers/logits_processor.py),
 [MambaBase](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/model_executor/layers/mamba/abstract.py).

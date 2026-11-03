@@ -166,6 +166,23 @@ sys.exit(main())
                 env = child.call_args.kwargs["env"]
                 self.assertEqual(env["OMNI_DRAFT_TOP_K"], "-1")
                 self.assertEqual(env["VLLM_USE_V2_MODEL_RUNNER"], "0")
+                self.assertTrue({"omni-npu", "omni_npu_patches", "omni_custom_models"}
+                                <= set(env["VLLM_PLUGINS"].split(",")))
+
+    def test_plugin_allowlist_keeps_platform_plugin_and_user_plugins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            plan = run.make_plan(run.parser().parse_args(args))
+            for inherited in ("", "omni_npu_patches,omni_custom_models", "custom,omni-npu,custom"):
+                with self.subTest(inherited=inherited), patch.dict(os.environ, {"VLLM_PLUGINS": inherited}):
+                    plugins = run.child_environment(plan)["VLLM_PLUGINS"].split(",")
+                # This is the entry-point filter used by vLLM for every group.
+                available_platforms = [SimpleNamespace(name="omni-npu", device_type="npu")]
+                selected = [entry for entry in available_platforms if entry.name in plugins]
+                self.assertEqual([entry.device_type for entry in selected], ["npu"])
+                self.assertEqual(plugins.count("omni-npu"), 1)
+                if "custom" in inherited.split(","):
+                    self.assertEqual(plugins.count("custom"), 1)
 
 
 class RejectionMathTests(unittest.TestCase):
@@ -194,6 +211,17 @@ class RejectionMathTests(unittest.TestCase):
 
 
 class LoadingAndBaselineTests(unittest.TestCase):
+    def test_platform_check_rejects_empty_device_before_engine_config(self):
+        from vllm_bench.pangu_infer.runtime import require_npu_platform
+        for device_type in ("", "cpu", "cuda", "npu"):
+            platform = SimpleNamespace(current_platform=SimpleNamespace(device_type=device_type))
+            with self.subTest(device_type=device_type), patch.dict(sys.modules, {"vllm.platforms": platform}):
+                if device_type == "npu":
+                    require_npu_platform()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "VLLM_PLUGINS must include omni-npu"):
+                        require_npu_platform()
+
     def test_metadata_grouping_preserves_backend_and_full_spec(self):
         from vllm_bench.pangu_infer.cache import compatible_groups
         mla, dsa = object(), object()
