@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 
 from vllm_bench.mtp_debug.spec_debug import values
+from vllm_bench.mtp_debug.ranks import current_rank, rank_selected
 
 TARGET = contextvars.ContextVar("pangu_spec_target", default=None)
 _RECORDER = None
@@ -34,7 +35,7 @@ def snapshot(value, limit=64):
 
 
 META_FIELDS = ("num_reqs", "num_actual_tokens", "num_decodes", "num_prefills",
-               "max_query_len", "seq_lens", "query_start_loc", "slot_mapping",
+               "max_query_len", "B_size", "pad_slot_id", "seq_lens", "query_start_loc", "slot_mapping",
                "block_table_tensor", "num_accepted_tokens", "num_computed_tokens",
                "cache_indices", "block_idx_last_computed_token",
                "block_idx_first_scheduled_token", "block_idx_last_scheduled_token")
@@ -69,6 +70,7 @@ class Recorder:
         self.pending = []
         self.forward_index = 0
         self.cycles = 0
+        self.tensor_writer = None
         self.limit = int(os.environ.get("PANGU_SPEC_DEBUG_LIMIT", "1000"))
 
     def enabled(self):
@@ -123,6 +125,9 @@ class Recorder:
             self.pending.append(window)
         self.previous = event
         self.cycles += 1
+        if self.cycles >= self.limit and self.tensor_writer is not None and not self.tensor_writer.stopped_reason:
+            self.tensor_writer.stopped_reason = "cycle_limit"
+            self.tensor_writer.write_status()
 
 
 def recorder():
@@ -133,9 +138,7 @@ def recorder():
 
 
 def selected_rank():
-    import torch.distributed as dist
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    return rank == int(os.environ.get("PANGU_SPEC_DEBUG_RANK", "0"))
+    return rank_selected(current_rank())
 
 
 def install_runner(runner):
@@ -161,6 +164,7 @@ def install_runner(runner):
         if count != 1:
             raise RuntimeError("spec-debug rejection windows require exactly one in-flight request")
         frame = {"forward_index": rec.forward_index,
+                 "rank": current_rank(),
                  "request_ids": list(batch.req_ids[:count]),
                  "input_ids": snapshot(bound.get("input_ids")),
                  "positions": snapshot(bound.get("positions")),
@@ -172,18 +176,31 @@ def install_runner(runner):
                  "attention": {name: metadata_snapshot(meta) for name, meta in
                                (context.attn_metadata or {}).items()},
                  "mome_calls": []}
+        if os.environ.get("PANGU_SPEC_DEBUG_ATTENTION") == "1":
+            from vllm_bench.mtp_debug.attention_trace import prepare_frame
+            prepare_frame(runner, frame, context.attn_metadata)
+        if os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI") == "1":
+            from vllm_bench.mtp_debug.indexer_ki_trace import prepare_ki_frame
+            prepare_ki_frame(runner, frame, bound, context.attn_metadata)
         rec.forward_index += 1
         token = TARGET.set(frame)
         try:
             return original(*args, **kwargs)
         finally:
             TARGET.reset(token)
+            if "attention_trace" in frame:
+                from vllm_bench.mtp_debug.attention_trace import finalize_frame
+                finalize_frame(frame)
+            if "_indexer_ki" in frame:
+                from vllm_bench.mtp_debug.indexer_ki_trace import finalize_ki_frame
+                finalize_ki_frame(frame)
             rec.latest_target = frame
 
     runner._model_forward = forward
     layers = os.environ.get("PANGU_SPEC_DEBUG_MOME_LAYERS", "0")
     allowed = None if layers == "all" else {int(x) for x in layers.split(",")}
     hooked = []
+    tensor_parameters = {}
     for name, module in runner.get_model().named_modules():
         if type(module).__name__ != "ColumnParallelMOMERL":
             continue
@@ -191,7 +208,9 @@ def install_runner(runner):
         match = re.search(r"layers\.(\d+)(?:\.|$)", prefix)
         if allowed is not None and (not match or int(match[1]) not in allowed):
             continue
-        install_conv(module, prefix)
+        info = install_conv(module, prefix)
+        if info is not None:
+            tensor_parameters[prefix] = info
         hooked.append(prefix)
     runner._pangu_rejection_installed = True
     manifest = {"format": "pangu-rejection-hooks-v1", "mome_hooks": hooked,
@@ -200,6 +219,16 @@ def install_runner(runner):
                 "runner_forward": f"{original.__module__}.{original.__qualname__}",
                 "note": "Only selected target MoME layers; fingerprints optional; no attention KV payloads.",
                 "fingerprint_scope": "Full referenced MoME block, including speculative/unused slots; hash inequality alone is not a correctness failure."}
+    if os.environ.get("PANGU_SPEC_DEBUG_MOME_TENSORS") == "1":
+        from vllm_bench.mtp_debug.mome_tensors import runtime_info
+        manifest["tensor_capture"] = {"runtime": runtime_info(), "parameters": tensor_parameters,
+                                      "phase": "decode_only", "history_mapping_verified": False}
+    if os.environ.get("PANGU_SPEC_DEBUG_ATTENTION") == "1":
+        from vllm_bench.mtp_debug.attention_trace import install_attention
+        manifest["attention_trace"] = install_attention(runner, allowed)
+    if os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI") == "1":
+        from vllm_bench.mtp_debug.indexer_ki_trace import install_ki
+        manifest["indexer_ki"] = install_ki(runner, allowed)
     rec.output.mkdir(parents=True, exist_ok=True)
     (rec.output / f"hooks-pid-{os.getpid()}.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"[spec-debug] target hook installed; {len(hooked)} MoME convolutions; pid={os.getpid()}", flush=True)
@@ -210,13 +239,20 @@ def install_runner(runner):
 def install_conv(module, prefix):
     original = module.forward
     signature = inspect.signature(original)
+    tensor_mode = os.environ.get("PANGU_SPEC_DEBUG_MOME_TENSORS") == "1"
+    params = None
+    if tensor_mode:
+        from vllm_bench.mtp_debug.mome_tensors import parameters
+        params = parameters(module, original)
 
     @functools.wraps(original)
     def forward(*args, **kwargs):
         frame = TARGET.get()
         if frame is None:
             return original(*args, **kwargs)
-        bound = signature.bind(*args, **kwargs).arguments
+        binding = signature.bind(*args, **kwargs)
+        binding.apply_defaults()
+        bound = binding.arguments
         meta = bound["mome_metadata"]
         event = {"prefix": prefix, "metadata": metadata_snapshot(meta)}
         cache = bound["conv_states"]
@@ -226,12 +262,25 @@ def install_conv(module, prefix):
             blocks = sorted({int(i) for i in indices if 0 <= int(i) < cache.shape[0]})[:4]
             event["states_before"] = [{"block": i, **fingerprint(cache[i])} for i in blocks]
         frame["mome_calls"].append(event)
-        result = original(*args, **kwargs)
+        capture = None
+        try:
+            if tensor_mode:
+                from vllm_bench.mtp_debug.mome_tensors import begin_capture
+                capture = begin_capture(recorder(), frame, event, bound, params)
+            result = original(*args, **kwargs)
+            if tensor_mode:
+                from vllm_bench.mtp_debug.mome_tensors import end_capture
+                end_capture(capture, bound, result)
+        except Exception as error:
+            if "tensor_capture" in event:
+                event["tensor_capture"].update(status="error", reason=repr(error))
+            raise
         if blocks:
             event["states_after"] = [{"block": i, **fingerprint(cache[i])} for i in blocks]
         return result
 
     module.forward = forward
+    return params
 
 
 def patch_runner(module):

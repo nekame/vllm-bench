@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 
 from vllm_bench.common.runtime_env import instrumentation_pythonpath
+from vllm_bench.mtp_debug.ranks import parse_ranks
 
 
 def main():
@@ -18,9 +19,19 @@ def main():
     parser.add_argument("--mome-layers", default="0", help="Target layer indices, comma-separated, or all")
     parser.add_argument("--state-fingerprints", action="store_true",
                         help="Hash active MoME blocks before/after selected target convolutions; adds synchronization")
+    parser.add_argument("--mome-tensors", action="store_true", help="Save exact selected decode MoME states, inputs and outputs")
+    parser.add_argument("--attention-tensors", action="store_true", help="Exact HiF8 DSA trace; implies MoME tensors, requires rejection windows")
+    parser.add_argument("--attention-ranks", default="all", help="Global ranks to trace: all or comma-separated integers")
+    parser.add_argument("--attention-steps-per-request", type=int, default=32)
+    parser.add_argument("--indexer-ki", action="store_true", help="Capture raw QLIv2 ki and written cache in prefill/decode; implies attention tensors")
+    parser.add_argument("--indexer-ki-steps-per-request", type=int, default=32)
+    parser.add_argument("--tensor-max-mib", type=int, default=16)
+    parser.add_argument("--tensor-budget-mib", type=int, default=512)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.indexer_ki:
+        args.attention_tensors = True
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command or args.limit < 1:
         parser.error("Supply a server command and positive --limit")
@@ -33,6 +44,18 @@ def main():
             parser.error("--mome-layers must be nonnegative integers separated by commas, or all")
     if args.state_fingerprints and not args.rejection_windows:
         parser.error("--state-fingerprints requires --rejection-windows")
+    if args.mome_tensors and not args.rejection_windows:
+        parser.error("--mome-tensors requires --rejection-windows")
+    if args.attention_tensors and not args.rejection_windows:
+        parser.error("--attention-tensors requires --rejection-windows")
+    try:
+        parse_ranks(args.attention_ranks)
+    except ValueError as error:
+        parser.error(str(error))
+    if min(args.attention_steps_per_request, args.indexer_ki_steps_per_request) < 1:
+        parser.error("Attention/ki step limits must be positive")
+    if min(args.tensor_max_mib, args.tensor_budget_mib) < 1:
+        parser.error("Tensor size limits must be positive")
     output = args.output.resolve()
     if output.exists():
         parser.error("Use a new output directory")
@@ -42,7 +65,16 @@ def main():
         parser.error(str(error))
     settings = {"PANGU_SPEC_DEBUG_DIR": str(output),
                 "PANGU_SPEC_DEBUG_LIMIT": str(args.limit),
+                "PANGU_SPEC_DEBUG_MOME_TENSORS": "1" if args.mome_tensors or args.attention_tensors else "0",
+                "PANGU_SPEC_DEBUG_ATTENTION": "1" if args.attention_tensors else "0",
+                "PANGU_SPEC_DEBUG_ATTENTION_STEPS": str(args.attention_steps_per_request),
+                "PANGU_SPEC_DEBUG_INDEXER_KI": "1" if args.indexer_ki else "0",
+                "PANGU_SPEC_DEBUG_INDEXER_KI_STEPS": str(args.indexer_ki_steps_per_request),
+                "PANGU_SPEC_DEBUG_TENSOR_MAX_MIB": str(args.tensor_max_mib),
+                "PANGU_SPEC_DEBUG_TENSOR_BUDGET_MIB": str(args.tensor_budget_mib),
                 "PYTHONPATH": child_pythonpath}
+    if args.attention_tensors:
+        settings["PANGU_SPEC_DEBUG_RANK"] = args.attention_ranks
     if args.rejection_windows:
         settings.update({"PANGU_SPEC_DEBUG_REJECTIONS": "1",
                          "PANGU_SPEC_DEBUG_MOME_LAYERS": args.mome_layers,
