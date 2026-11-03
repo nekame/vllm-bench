@@ -59,8 +59,11 @@ def parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--engine", choices=("direct", "omni"), default="direct")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
-    p.add_argument("--depth", type=int, choices=(0, 3, 7), default=3,
-                   help="0 runs target-only, for greedy correctness checks")
+    mtp = p.add_mutually_exclusive_group()
+    mtp.add_argument("--depth", type=int, choices=(0, 3, 7), default=3,
+                     help="MTP proposal depth; 0 disables MTP for greedy or sampled generation")
+    mtp.add_argument("--no-mtp", dest="depth", action="store_const", const=0,
+                     help="Run only the target model; equivalent to --depth 0")
     p.add_argument("--mode", choices=MODES, default="eager")
     p.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
     p.add_argument("--context-length", type=int, default=8192)
@@ -134,7 +137,7 @@ def make_plan(a):
         raise ValueError("Use a pure TP operator config without SP/CP/FlashComm2/DP LM head")
     if config.get("use_mome") and not opt.get("use_noncontiguous_kv", False):
         raise ValueError("Direct MoME adapter requires use_noncontiguous_kv=true in BOTH compared runs")
-    if opt.get("fix_multi_mtp_kvcache", False):
+    if a.depth and opt.get("fix_multi_mtp_kvcache", False):
         raise ValueError("This adapter implements the default fix_multi_mtp_kvcache=false proposal policy")
     if config.get("cla_explicit_mapping"):
         raise ValueError("CLA cache aliases are not supported by this PoC")

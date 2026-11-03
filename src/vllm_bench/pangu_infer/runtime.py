@@ -163,7 +163,6 @@ def load_models(plan, cfg, device):
     from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
     from omni_npu.v1.layers.attention.weight_utils import refresh_mla_wrappers
     from vllm_bench.pangu_infer.model.pangu_ultra_moe import PanguUltraMoEForCausalLM
-    from vllm_bench.pangu_infer.model.pangu_ultra_moe_mtp import OpenPanguMTP
 
     a = plan["options"]
     original_dtype = torch.get_default_dtype()
@@ -171,7 +170,10 @@ def load_models(plan, cfg, device):
         torch.set_default_dtype(cfg.model_config.dtype)
         with torch.device(device):
             target = PanguUltraMoEForCausalLM(vllm_config=cfg)
-            draft = OpenPanguMTP(vllm_config=cfg, prefix="draft_model", shared_target=target) if a["depth"] else None
+            draft = None
+            if a["depth"]:
+                from vllm_bench.pangu_infer.model.pangu_ultra_moe_mtp import OpenPanguMTP
+                draft = OpenPanguMTP(vllm_config=cfg, prefix="draft_model", shared_target=target)
     finally:
         torch.set_default_dtype(original_dtype)
     start = plan["config"]["num_hidden_layers"]

@@ -61,11 +61,66 @@ class DirectPlanningTests(unittest.TestCase):
                                 options = engine_options(plan, direct=True)
                                 self.assertFalse(options["enforce_eager"])
                                 self.assertFalse(options["enable_expert_parallel"])
+                                if depth == 0:
+                                    self.assertNotIn("speculative_config", options)
+                                    self.assertEqual(options["compilation_config"]["cudagraph_capture_sizes"], [1])
                                 self.assertEqual(options["compilation_config"]["mode"], 0)
                                 self.assertEqual(options["max_model_len"], 8192 + 256 + 8)
                                 self.assertGreaterEqual(options["max_num_batched_tokens"], options["max_model_len"])
                                 self.assertFalse(options["async_scheduling"])
                     self.assertFalse((Path(tmp) / "output").exists())
+
+    def test_no_mtp_alias_accepts_checkpoints_with_or_without_predictors(self):
+        for engine in ("direct", "omni"):
+            for predictors in (3, 0, None):
+                for temperature in (0, 1):
+                    with self.subTest(engine=engine, predictors=predictors, temperature=temperature), tempfile.TemporaryDirectory() as tmp:
+                        args = self.fixture(Path(tmp))
+                        parsed = run.parser().parse_args(args)
+                        config_path = parsed.model / "config.json"
+                        config = json.loads(config_path.read_text())
+                        if predictors is None:
+                            del config["num_nextn_predict_layers"]
+                        else:
+                            config["num_nextn_predict_layers"] = predictors
+                        config_path.write_text(json.dumps(config))
+                        operator = json.loads(parsed.operator_config.read_text())
+                        operator["operator_optimization_config"]["fix_multi_mtp_kvcache"] = True
+                        parsed.operator_config.write_text(json.dumps(operator))
+                        common = [*args, "--engine", engine, "--temperature", str(temperature)]
+                        plan = run.make_plan(run.parser().parse_args([*common, "--no-mtp"]))
+                        explicit = run.make_plan(run.parser().parse_args([*common, "--depth", "0"]))
+                        self.assertEqual(plan["options"]["depth"], 0)
+                        self.assertEqual(plan["predictor_layers"], [])
+                        self.assertEqual(plan["comparison_sha256"], explicit["comparison_sha256"])
+                        self.assertNotIn("speculative_config", engine_options(plan, direct=engine == "direct"))
+
+    def test_no_mtp_and_explicit_depth_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            self.assertEqual(run.parser().parse_args(args).depth, 3)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                run.parser().parse_args([*args, "--depth", "7", "--no-mtp"])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_matrix_no_mtp_overrides_json_depths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.fixture(root)
+            config_path = root / "full/config.json"
+            config = json.loads(config_path.read_text())
+            config["num_nextn_predict_layers"] = 0
+            config_path.write_text(json.dumps(config))
+            spec = root / "matrix.json"
+            spec.write_text(json.dumps({"models": ["full"], "operator_configs": {"1": "operator.json"},
+                                        "output": "matrix", "tp": [1], "depths": [3, 7], "modes": ["eager"]}))
+            console = io.StringIO()
+            with contextlib.redirect_stdout(console):
+                self.assertEqual(matrix.main([str(spec), "--no-mtp"]), 0)
+            cases = json.loads(console.getvalue())["cases"]
+            self.assertEqual({case["engine"] for case in cases}, {"direct", "omni"})
+            self.assertTrue(all(case["depth"] == 0 for case in cases))
+            self.assertFalse((root / "matrix").exists())
 
     def test_cli_without_ml_from_another_directory(self):
         code = '''

@@ -14,7 +14,7 @@ def plans(spec, root):
     options = spec.get("options", [])
     if not isinstance(options, list) or not all(isinstance(x, str) for x in options):
         raise ValueError("Matrix options must be an array of CLI strings")
-    blocked = ("--model", "--operator-config", "--tp", "--depth", "--mode", "--engine", "--output", "--execute")
+    blocked = ("--model", "--operator-config", "--tp", "--depth", "--no-mtp", "--mode", "--engine", "--output", "--execute")
     if any(option.split("=")[0] in blocked for option in options):
         raise ValueError("Matrix options cannot override workload axes or execution")
     def resolve(value):
@@ -46,10 +46,14 @@ def plans(spec, root):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("spec", type=Path, help="JSON matrix file")
+    p.add_argument("--no-mtp", action="store_true", help="Run depth 0 only, overriding the JSON depths")
     p.add_argument("--execute", action="store_true")
     a = p.parse_args(argv)
     try:
-        output, items = plans(json.loads(a.spec.read_text()), a.spec.resolve().parent)
+        spec = json.loads(a.spec.read_text())
+        if a.no_mtp:
+            spec["depths"] = [0]
+        output, items = plans(spec, a.spec.resolve().parent)
         if not items:
             raise ValueError("Empty matrix")
         print(json.dumps({"runs": len(items), "output": str(output),

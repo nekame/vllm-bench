@@ -16,8 +16,9 @@ compile и ACL replay требуют проверки на сервере Ascend
   `4cd855b29b5eb0a78bca645fad39e3181c35d099`. Ничего устанавливать инструмент не будет.
 - Архитектура checkpoint — строго `PanguUltraMoEForCausalLM`. Поддерживаются
   MXFP8 и BF16 safetensors; конфигурация квантизации и scales не преобразуются.
-- Полная модель либо 12 target-слоёв с исходными MTP, подготовленные существующим
-  `layer_profile.prepare_checkpoint --layers 12 --keep-mtp`. Перенос индексов
+- Полная модель либо сокращённый checkpoint. Для MTP нужны сохранённые predictor
+  layers: `layer_profile.prepare_checkpoint --layers 12 --keep-mtp`. Без MTP
+  подходит и checkpoint, подготовленный без `--keep-mtp`. Перенос индексов
   повторно не выполняется. Checkpoint только с MTP не подходит.
 - Чистый TP 1/2/4/8, DP=PP=1, EP выключен. Operator config должен соответствовать
   выбранному TP и содержать `use_noncontiguous_kv=true` при включённом MoME.
@@ -66,6 +67,12 @@ Output должен быть новым каталогом. Явные отно�
 Для baseline замените `--engine direct` на `--engine omni` и выберите другой
 output. По умолчанию используется direct. Baseline запускает stock offline
 LLMEngine, без HTTP; в его время входят engine scheduling и IPC.
+
+Для запуска без MTP замените `--depth 3` / `--depth 7` на `--no-mtp`
+(или `--depth 0`). Флаг работает для обоих engines, greedy и sampling, всех
+поддерживаемых режимов compile/ACL. Predictor не создаётся, его веса не
+загружаются, speculative decoding отключён. Подходит checkpoint как с MTP,
+так и без predictor layers. По умолчанию MTP остаётся включённым с depth 3.
 
 `--prompt-ids /data/prompt.json` принимает JSON-массив ровно из 8192 token IDs
 при стандартном context-length. Без файла оба engine получают одинаковый
@@ -176,6 +183,9 @@ Defaults: TP1/2/4/8 × depth3/7 × четыре direct modes и три baseline 
 ошибки/OOM записываются, оставшиеся комбинации продолжаются. Успешные direct/omni
 пары автоматически сравниваются. `matrix_results.json` обновляется после
 каждого запуска; неподходящие пары не получают оценки overhead.
+
+Для всей матрицы без MTP добавьте `--no-mtp` к команде `pangu_infer.matrix`:
+это заменяет JSON `depths` на `[0]`, сохраняя выбранные TP, engines и modes.
 
 ## Метрики и профили
 
