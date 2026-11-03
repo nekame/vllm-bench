@@ -211,6 +211,68 @@ class RejectionMathTests(unittest.TestCase):
 
 
 class LoadingAndBaselineTests(unittest.TestCase):
+    def test_runtime_initialization_and_execution_use_no_grad(self):
+        from unittest.mock import Mock
+        from vllm_bench.pangu_infer import runtime
+
+        state = {"grad_enabled": True}
+        checked = []
+
+        @contextlib.contextmanager
+        def no_grad():
+            state["grad_enabled"] = False
+            try:
+                yield
+            finally:
+                state["grad_enabled"] = True
+
+        def check(label):
+            self.assertFalse(state["grad_enabled"], label)
+            checked.append(label)
+
+        def load(*args):
+            check("weight construction/loading/post-processing")
+            return object(), None, {}
+
+        def generate(*args, **kwargs):
+            check("warmup/decode")
+            return {"decode_seconds": .25}
+
+        engine = SimpleNamespace(
+            generate=Mock(side_effect=generate), executions={},
+            counters=lambda: {"compiles": 0, "captures": 0, "replays": 0, "calls": 1})
+
+        def create_engine(*args):
+            check("cache/buffer construction")
+            return engine
+
+        fake_torch = SimpleNamespace(
+            no_grad=no_grad, inference_mode=Mock(side_effect=AssertionError("Inference tensors lose version counters")),
+            tensor=lambda values, **kwargs: SimpleNamespace(tolist=lambda: values), float64="float64",
+            npu=SimpleNamespace(synchronize=lambda: check("synchronize")),
+            distributed=SimpleNamespace(all_reduce=lambda *args, **kwargs: None,
+                                        ReduceOp=SimpleNamespace(MAX="max"), is_initialized=lambda: False))
+        cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=128),
+                              compilation_config=SimpleNamespace(mode=0, cudagraph_mode="NONE"))
+        context = SimpleNamespace(__exit__=Mock())
+        extra = SimpleNamespace(operator_opt_config={}, parall_config={})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plan.json"
+            path.write_text(json.dumps({"options": {"output": tmp, "mode": "eager", "depth": 3,
+                                                   "warmup": 1, "repeats": 1, "max_new_tokens": 32,
+                                                   "profile": False}}))
+            with patch.dict(sys.modules, {"torch": fake_torch}), \
+                    patch.object(runtime, "setup", return_value=(cfg, "npu:1", 1, context, extra)), \
+                    patch.object(runtime, "load_models", side_effect=load), \
+                    patch.object(runtime, "DirectEngine", side_effect=create_engine):
+                runtime.main(["--plan", str(path)])
+        fake_torch.inference_mode.assert_not_called()
+        self.assertTrue(state["grad_enabled"])
+        self.assertIn("weight construction/loading/post-processing", checked)
+        self.assertIn("cache/buffer construction", checked)
+        self.assertEqual(engine.generate.call_count, 2)
+        context.__exit__.assert_called_once_with(None, None, None)
+
     def test_platform_check_rejects_empty_device_before_engine_config(self):
         from vllm_bench.pangu_infer.runtime import require_npu_platform
         for device_type in ("", "cpu", "cuda", "npu"):

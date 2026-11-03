@@ -78,6 +78,9 @@ LLMEngine, без HTTP; в его время входят engine scheduling и I
 | `compile-acl` | Compile, затем ACLGraphWrapper | Штатная compilation + FULL graphs |
 
 Prefill идёт eager. Начальное заполнение MTP входит в prefill, не в decode.
+Инициализация и выполнение идут под `torch.no_grad()`: веса и runtime buffers
+сохраняют version counters, необходимые NPU post-processing и компиляции.
+`torch.inference_mode()` для этого пути не используется.
 Модель, LM head и выбор нужных logits включены в прямой model step; sampling,
 metadata preparation и фиксация принятого префикса находятся снаружи него.
 У direct остаётся один host read accepted count на speculative cycle и

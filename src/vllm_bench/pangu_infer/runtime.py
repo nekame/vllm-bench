@@ -374,7 +374,9 @@ def main(argv=None):
     cfg, device, rank, context, extra = setup(plan)
     setup_seconds = time.perf_counter() - started
     try:
-        with torch.inference_mode():
+        # NPU weight packing and compilation may inspect tensor version
+        # counters. Disable autograd without creating inference tensors.
+        with torch.no_grad():
             started = time.perf_counter()
             target, draft, loading = load_models(plan, cfg, device)
             load_seconds = time.perf_counter() - started
