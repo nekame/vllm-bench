@@ -1,0 +1,231 @@
+"""Plan or launch direct Pangu Ultra inference / an offline OmniInfer baseline."""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+from vllm_bench.common.checkpoint import quantization_method
+from vllm_bench.common.runtime_env import instrumentation_pythonpath, RESET_ENV
+
+
+MODES = ("eager", "compile", "acl", "compile-acl")
+UPSTREAM = "4cd855b29b5eb0a78bca645fad39e3181c35d099"
+
+
+def write_json(path, value):
+    Path(path).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+
+
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def predictor_sequence(config, depth):
+    start, count = config["num_hidden_layers"], config["num_nextn_predict_layers"]
+    return [start + i for i in range(depth)] if 1 < count and depth <= count else [start] * depth
+
+
+def checkpoint_identity(model):
+    """Cheap change detection; do not hash terabytes of tensor payloads."""
+    index = model / "model.safetensors.index.json"
+    if index.exists():
+        raw = index.read_bytes()
+        names = sorted(set(json.loads(raw)["weight_map"].values()))
+    else:
+        raw = b""
+        names = sorted(path.name for path in model.glob("*.safetensors"))
+    shards = {}
+    for name in names:
+        path = (model / name).resolve()
+        if not path.is_relative_to(model.resolve()):
+            raise ValueError("Checkpoint index references an external shard")
+        stat = path.stat()
+        shards[name] = {"bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    manifest = model / "extraction_manifest.json"
+    return {"index_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+            "extraction_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None,
+            "shard_metadata": shards, "payload_hashes_verified": False}
+
+
+def parser():
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    p.add_argument("--model", type=Path, required=True)
+    p.add_argument("--operator-config", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--engine", choices=("direct", "omni"), default="direct")
+    p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
+    p.add_argument("--depth", type=int, choices=(0, 3, 7), default=3,
+                   help="0 runs target-only, for greedy correctness checks")
+    p.add_argument("--mode", choices=MODES, default="eager")
+    p.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
+    p.add_argument("--context-length", type=int, default=8192)
+    p.add_argument("--max-new-tokens", type=int, default=256)
+    p.add_argument("--temperature", type=float, default=1)
+    p.add_argument("--top-k", type=int, default=0)
+    p.add_argument("--top-p", type=float, default=1)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--warmup", type=int, default=2, help="Complete warmup requests")
+    p.add_argument("--repeats", type=int, default=3)
+    p.add_argument("--respect-eos", action="store_true", help="Default: ignore EOS for fixed-length benchmarks")
+    p.add_argument("--profile", action="store_true", help="Diagnostic CPU/NPU traces; not benchmark timings")
+    p.add_argument("--additional-config", type=Path)
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Offline engine memory budget")
+    p.add_argument("--execute", action="store_true")
+    return p
+
+
+def make_plan(a):
+    options = {key: str(value.resolve()) if isinstance(value, Path) else value
+               for key, value in vars(a).items()}
+    if a.engine == "omni" and a.mode == "compile":
+        raise ValueError("Stock OmniInfer bypasses compile-only without FULL graphs; use a direct run or another baseline mode")
+    if min(a.context_length, a.repeats, a.warmup) < 1 or a.max_new_tokens < 2:
+        raise ValueError("Context, warmup and repeats must be positive; max-new-tokens must be >= 2")
+    if (not math.isfinite(a.temperature) or a.temperature < 0 or
+            not math.isfinite(a.top_p) or not 0 < a.top_p <= 1 or a.top_k < 0):
+        raise ValueError("Require finite temperature >= 0, 0 < top-p <= 1 and top-k >= 0")
+    if not 0 < a.gpu_memory_utilization <= 1:
+        raise ValueError("gpu-memory-utilization must be in (0, 1]")
+    config = json.loads((a.model / "config.json").read_text())
+    if config.get("architectures") != ["PanguUltraMoEForCausalLM"]:
+        raise ValueError("This tool requires PanguUltraMoEForCausalLM; no architecture substitution")
+    quantization = quantization_method(config)
+    if type(config.get("num_hidden_layers")) is not int or config["num_hidden_layers"] <= 0:
+        raise ValueError("Invalid target layer count")
+    if a.depth and (type(config.get("num_nextn_predict_layers")) is not int or config["num_nextn_predict_layers"] < 1):
+        raise ValueError("MTP layers missing; prepare the reduced checkpoint with --layers 12 --keep-mtp")
+    vocab = config["vocab_size"]
+    if type(vocab) is not int or vocab <= 1 or a.top_k > vocab:
+        raise ValueError("Invalid vocabulary or top-k exceeds vocabulary")
+    if a.prompt_ids:
+        prompt = json.loads(a.prompt_ids.read_text())
+    else:
+        # Deterministic synthetic prompt, shared byte-for-byte by both engines.
+        import random
+        rng = random.Random(a.seed)
+        excluded = config.get("eos_token_id", [])
+        excluded = set(excluded if isinstance(excluded, list) else [excluded])
+        prompt = []
+        while len(prompt) < a.context_length:
+            token = rng.randrange(vocab)
+            if token not in excluded:
+                prompt.append(token)
+    if (not isinstance(prompt, list) or len(prompt) != a.context_length or
+            any(type(t) is not int or not 0 <= t < vocab for t in prompt)):
+        raise ValueError("prompt-ids must contain context-length valid integer token IDs")
+    operator = json.loads(a.operator_config.read_text())
+    if (not isinstance(operator, dict) or
+            not {"model_parallel_config", "operator_optimization_config"} <= operator.keys()):
+        raise ValueError("Operator config needs model_parallel_config and operator_optimization_config")
+    parallel = operator["model_parallel_config"]
+    opt = operator["operator_optimization_config"]
+    if not isinstance(parallel, dict) or not isinstance(opt, dict):
+        raise ValueError("Operator config sections must be objects")
+    # These paths require additional batch/state protocols and are deliberately
+    # rejected rather than silently changing the user's operator configuration.
+    forbidden = ("ena_seq_parallel", "ena_context_parallel", "ena_swa_attn_seq_parallel",
+                 "enable_flashcomm2", "ena_dp_lmhead_parallel", "ena_local_lmhead_parallel")
+    if any(parallel.get(key) for key in forbidden):
+        raise ValueError("Use a pure TP operator config without SP/CP/FlashComm2/DP LM head")
+    if config.get("use_mome") and not opt.get("use_noncontiguous_kv", False):
+        raise ValueError("Direct MoME adapter requires use_noncontiguous_kv=true in BOTH compared runs")
+    if opt.get("fix_multi_mtp_kvcache", False):
+        raise ValueError("This adapter implements the default fix_multi_mtp_kvcache=false proposal policy")
+    if config.get("cla_explicit_mapping"):
+        raise ValueError("CLA cache aliases are not supported by this PoC")
+    additional = json.loads(a.additional_config.read_text()) if a.additional_config else {}
+    if not isinstance(additional, dict):
+        raise ValueError("additional-config must be an object")
+    extension = additional.setdefault("npugraph_ex_config", {})
+    if not isinstance(extension, dict):
+        raise ValueError("npugraph_ex_config must be an object")
+    extension.setdefault("enable", True)
+    if "compile" in a.mode and extension["enable"] is not True:
+        raise ValueError("Compile modes require npugraph_ex_config.enable=true")
+    if extension.get("merge_dynamic_quant", False):
+        raise ValueError("merge_dynamic_quant requires vLLM piecewise pass context; not supported by direct fullgraph compilation")
+    # Reserve the largest supported verification window in every run. Besides
+    # allowing warmup of short benchmarks, this keeps APC-off MoME block sizes
+    # identical for target-only and MTP correctness comparisons.
+    max_len = a.context_length + max(a.max_new_tokens, 17) + 8
+    if max_len > config.get("max_position_embeddings", max_len):
+        raise ValueError("Prompt + generation + speculative window exceeds model position limit")
+    scope = "reduced" if (a.model / "extraction_manifest.json").is_file() else "full"
+    identity = checkpoint_identity(a.model)
+    match = {"model": options["model"], "config": config, "operator": operator,
+             "checkpoint_identity": identity,
+             "additional": additional, "prompt_sha256": fingerprint(prompt),
+             "tp": a.tp, "depth": a.depth, "mode": a.mode,
+             "temperature": a.temperature, "top_k": a.top_k, "top_p": a.top_p,
+             "seed": a.seed, "max_new_tokens": a.max_new_tokens, "respect_eos": a.respect_eos}
+    return {"format": "pangu-direct-plan-v1", "options": options, "config": config,
+            "operator_config": operator, "additional_config": additional,
+            "prompt_ids": prompt, "prompt_sha256": fingerprint(prompt),
+            "comparison_sha256": fingerprint(match), "max_model_len": max_len,
+            "checkpoint_identity": identity,
+            "quantization": quantization, "model_scope": scope,
+            "predictor_layers": predictor_sequence(config, a.depth) if a.depth else [],
+            "upstream_commit": UPSTREAM, "validation": "NPU execution not yet performed"}
+
+
+def child_environment(plan):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = instrumentation_pythonpath(env, None)
+    for name in RESET_ENV:
+        env.pop(name, None)
+    env.update(OMNI_CUSTOM_MODEL_CONFIG_PATH=plan["options"]["operator_config"],
+               OMNI_VLLM_PATCHES_DIR="high_throughout", OMNI_PANGU_V2_HIGH_THROUGHOUT="1",
+               VLLM_USE_V2_MODEL_RUNNER="0", VLLM_USE_AOT_COMPILE="0", OMNI_DRAFT_TOP_K="-1")
+    if plan["options"]["engine"] == "omni":
+        env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    plugins = [name for name in env.get("VLLM_PLUGINS", "").split(",") if name]
+    env["VLLM_PLUGINS"] = ",".join(dict.fromkeys([*plugins, "omni_npu_patches", "omni_custom_models"]))
+    return env
+
+
+def launch(plan):
+    output = Path(plan["options"]["output"])
+    if output.exists():
+        raise ValueError("Output already exists; use a fresh directory")
+    model = Path(plan["options"]["model"])
+    if checkpoint_identity(model) != plan["checkpoint_identity"] or json.loads((model / "config.json").read_text()) != plan["config"]:
+        raise ValueError("Checkpoint changed after planning")
+    if json.loads(Path(plan["options"]["operator_config"]).read_text()) != plan["operator_config"]:
+        raise ValueError("Operator config changed after planning")
+    env = child_environment(plan)
+    output.mkdir(parents=True)
+    plan_path = output / "launch_plan.json"
+    write_json(plan_path, plan)
+    module = "vllm_bench.pangu_infer.runtime" if plan["options"]["engine"] == "direct" else "vllm_bench.pangu_infer.baseline"
+    if plan["options"]["engine"] == "direct":
+        command = [sys.executable, "-m", "torch.distributed.run", "--standalone",
+                   f"--nproc-per-node={plan['options']['tp']}", "--module", module, "--plan", str(plan_path)]
+    else:
+        command = [sys.executable, "-m", module, "--plan", str(plan_path)]
+    with (output / "runtime.log").open("w") as log:
+        code = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+    if code:
+        write_json(output / "failure.json", {"returncode": code, "log": str(output / "runtime.log")})
+    return code
+
+
+def main(argv=None):
+    p = parser()
+    a = p.parse_args(argv)
+    try:
+        plan = make_plan(a)
+        # Validate inherited hooks even in dry-run, without importing torch.
+        child_environment(plan)
+        print(json.dumps({k: v for k, v in plan.items() if k != "prompt_ids"}, indent=2, ensure_ascii=False))
+        return launch(plan) if a.execute else 0
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        p.error(str(error))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
