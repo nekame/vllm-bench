@@ -18,13 +18,21 @@ from vllm_bench.common.runtime_env import RESET_ENV, instrumentation_pythonpath,
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", type=Path, required=True)
+    p.add_argument("--model-scope", choices=["reduced", "full"], default="reduced",
+                   help="reduced: extracted target checkpoint; full: original target checkpoint")
+    p.add_argument("--enable-mtp", action="store_true",
+                   help="Enable MTP speculative decoding; requires a checkpoint retaining MTP weights")
+    p.add_argument("--num-speculative-tokens", type=int,
+                   help="MTP depth (default: 3 with --enable-mtp); requires --enable-mtp")
     p.add_argument("--operator-config", type=Path, required=True,
                    help="Your target OmniInfer operator/parallel config, with the same TP settings")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--name", default="pangu12")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--tp", type=int, default=8)
+    p.add_argument("--tp", type=int, default=8,
+                   help="Tensor parallel size (e.g. 2 for two NPUs; default: 8); DP stays 1. "
+                        "Supply an operator config matching the selected TP")
     p.add_argument("--max-model-len", type=int, default=33024)
     p.add_argument("--max-num-seqs", type=int, default=32)
     p.add_argument("--max-num-batched-tokens", type=int, default=4096)
@@ -45,8 +53,31 @@ def main():
     a = p.parse_args()
     model, operator, output = a.model.resolve(), a.operator_config.resolve(), a.output.resolve()
     cfg = json.loads((model / "config.json").read_text())
-    if cfg.get("architectures") not in SUPPORTED_ARCHITECTURES or cfg.get("num_nextn_predict_layers") != 0:
-        p.error("Expected an extracted V2 or Ultra checkpoint with MTP disabled")
+    if cfg.get("architectures") not in SUPPORTED_ARCHITECTURES:
+        p.error("Expected a supported V2 or Ultra checkpoint")
+    if a.num_speculative_tokens is not None and not a.enable_mtp:
+        p.error("--num-speculative-tokens requires --enable-mtp")
+    if a.model_scope == "reduced":
+        if not a.enable_mtp and cfg.get("num_nextn_predict_layers") != 0:
+            p.error("Expected an extracted V2 or Ultra checkpoint with MTP disabled; "
+                    "use --enable-mtp for a checkpoint prepared with --keep-mtp")
+    else:
+        layers = cfg.get("num_hidden_layers")
+        if type(layers) is not int or layers <= 0:
+            p.error("Full checkpoint needs a positive integer num_hidden_layers")
+        if any((model / name).exists() for name in
+               ("extraction_manifest.json", "mtp_checkpoint_manifest.json")):
+            p.error("Full mode requires the original target checkpoint, not an extracted checkpoint")
+    speculative = None
+    if a.enable_mtp:
+        predictors = cfg.get("num_nextn_predict_layers")
+        if type(predictors) is not int or predictors <= 0:
+            p.error("MTP requires a positive integer num_nextn_predict_layers in the checkpoint")
+        if a.num_speculative_tokens is None:
+            a.num_speculative_tokens = 3
+        if a.num_speculative_tokens <= 0:
+            p.error("--num-speculative-tokens must be positive")
+        speculative = {"method": "mtp", "num_speculative_tokens": a.num_speculative_tokens}
     quantization = quantization_method(cfg)
     ultra = cfg["architectures"] == ["PanguUltraMoEForCausalLM"]
     if a.attention_backend == "auto":
@@ -82,6 +113,8 @@ def main():
                "--no-enable-prefix-caching", "--api-server-count", "1",
                "--enable-chunked-prefill" if a.chunked_prefill else "--no-enable-chunked-prefill",
                "--profiler-config", json.dumps(profiler)]
+    if speculative is not None:
+        command += ["--speculative-config", json.dumps(speculative)]
     for key, value in [("--kv-cache-memory-bytes", a.kv_cache_memory_bytes),
                        ("--num-gpu-blocks-override", a.num_gpu_blocks_override)]:
         if value is not None:
@@ -96,7 +129,7 @@ def main():
             p.error("engine-cli-json must be an array of CLI argument strings")
         blocked = ("--model", "--hf-overrides", "--speculative-config", "--data-parallel",
                    "--profiler-config", "--enable-prefix-caching", "--tensor-parallel-size")
-        if any(s.startswith(blocked) for s in extra):
+        if any(s.replace("_", "-").startswith(blocked) for s in extra):
             p.error("Extra CLI arguments cannot replace architecture, parallelism, cache or profiler settings")
         command += extra
     env = os.environ.copy()
@@ -128,6 +161,7 @@ def main():
             "settings": settings, "cleared_environment": RESET_ENV,
             "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
             "model_config": cfg, "operator_config": opt, "quantization": quantization,
+            "model_scope": a.model_scope, "speculative_config": speculative,
             "annotation_overhead": a.annotate_layers}
     print("Environment:", json.dumps(settings, indent=2), flush=True)
     print("Command:", shlex.join(command), flush=True)

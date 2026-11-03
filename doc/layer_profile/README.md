@@ -1,4 +1,4 @@
-# Профилирование Pangu 505B на первых 12 слоях
+# Профилирование Pangu 505B: сокращённая и полная модель
 
 Набор предназначен для Pangu 505B с 50 основными слоями, 3 MTP, 384 экспертами и top-8. Поддерживаются BF16 и MXFP8 checkpoint с архитектурой `OpenPanguV2ForCausalLM` или `PanguUltraMoEForCausalLM`; архитектура источника сохраняется. Приложенный reference config описывает исходный вариант V2/BF16, а quantization metadata берётся из настоящего checkpoint. Набор сохраняет настоящие слои 0–11 и позволяет запускать нагрузку и собирать NPU traces без изменения исходников OmniInfer. Целевой интерфейс сервера — vLLM 0.25.1 и просмотренный OmniInfer `4cd855b2`.
 
@@ -9,6 +9,8 @@
 Отдельный MTP-профайлер без HTTP-сервера и загрузки target model: [подготовка MTP checkpoint, synthetic, capture и replay](../mtp_profile/README.md). CPU-проверки выполнены; NPU runtime требует server smoke tests. Это отдельный инструмент, существующий 12-слойный benchmark не меняется.
 
 Подготовка checkpoint, клиент бенчмарка, проверка файлов и анализ trace требуют только Python 3.10+. Запуск сервера требует уже установленного рабочего окружения OmniInfer/vLLM/torch_npu на NPU-машине. Скрипты ничего не устанавливают.
+
+По умолчанию используется сокращённая модель без MTP (`--model-scope reduced`). Для 12 основных слоёв вместе с MTP извлеките checkpoint с `--keep-mtp` и запустите сервер с `--enable-mtp`, как описано ниже. Для исходного полного checkpoint есть отдельный `--model-scope full`.
 
 ## Файлы
 
@@ -67,9 +69,9 @@ python -m vllm_bench.layer_profile.prepare_checkpoint \
 
 Скрипт читает заголовки исходных shards, затем копирует только выбранные диапазоны байтов. RAM под tensor payload ограничена размером буфера; отдельно нужны память под заголовки, имена и index. Ненужные слои не читаются целиком. Содержимое выбранных тензоров не преобразуется. Для MXFP8 сохраняются исходные `F8_E4M3` веса, scales `U8`/`F8_E8M0`, BF16/FP32 тензоры, их имена и формы; веса не деквантуются и не квантуются повторно. Все тензоры scales сохраняемого слоя копируются вместе с его весами, а scales удалённых слоёв исключаются тем же правилом. Никакого импорта torch или создания модели нет.
 
-Сохраняются все тензоры `model.layers.0.*` — `model.layers.11.*` и тензоры вне `model.layers.*`, включая embedding, LM head, финальные нормализации и mHC merge. Тензоры слоёв 12 и выше, в том числе MTP 50–52, исключаются. Для другого допустимого checkpoint prefix есть `--layer-prefix`; для этого checkpoint следует оставить стандартный `model.layers.`.
+Сохраняются все тензоры `model.layers.0.*` — `model.layers.11.*` и тензоры вне `model.layers.*`, включая embedding, LM head, финальные нормализации и mHC merge. Без `--keep-mtp` тензоры слоёв 12 и выше, в том числе MTP 50–52, исключаются. Для другого допустимого checkpoint prefix есть `--layer-prefix`; для этого checkpoint следует оставить стандартный `model.layers.`.
 
-Новый `config.json` содержит:
+Новый `config.json` без `--keep-mtp` содержит:
 
 ```json
 {
@@ -117,15 +119,158 @@ python -m vllm_bench.layer_profile.serve \
 
 Без `--execute` выводится только план. После проверки добавьте `--execute`. Сервер работает в foreground; stdout/stderr можно записывать через `tee`, сохранив проверку exit status через `set -o pipefail`.
 
-`low_latency` в примере — набор patches для стандартного V2-пути. Если рабочая полная модель использует другой набор, передайте именно его. `--attention-backend deepseek` включает `OMNI_PANGU_V2_HIGH_THROUGHOUT=1`, но не меняет архитектуру на Ultra. Этот вариант требует соответствующего набора patches и operator config. Значение `--patches` по умолчанию берётся из уже заданного окружения, иначе используется `low_latency` для V2 и `high_throughout` для Ultra. `--attention-backend auto` выбирает `pangu` для V2 и `deepseek` для Ultra. Явно заданный `pangu` для Ultra отклоняется; архитектура не переписывается.
+### Запуск на двух NPU: TP2
+
+Для TP2 используйте существующий параметр `--tp 2`. Получается TP2/DP1, expert parallelism по умолчанию выключен. Значение TP по умолчанию остаётся 8. Поддерживаются те же V2/Ultra и BF16/MXFP8 checkpoint; повторное извлечение весов из-за смены TP не требуется.
+
+Подготовьте внешний operator config, согласованный с TP2 и вашим оборудованием. Скрипт проверяет наличие разделов JSON, но не соответствие внутренних настроек операторов выбранному TP. Простая смена `--tp` при сохранении operator config для TP8 не гарантирует корректного запуска. Также проверьте, что веса и KV cache помещаются в память двух NPU.
+
+План запуска с автоматическим выбором attention backend и стандартного набора patches для архитектуры (если `OMNI_VLLM_PATCHES_DIR` уже задан, используется он):
+
+```bash
+python -m vllm_bench.layer_profile.serve \
+  --model /data/models/pangu505b-mxfp8-12layers \
+  --operator-config /data/profile-configs/pangu-target-operators-tp2.json \
+  --output /data/profile-results/pangu12-tp2-server \
+  --tp 2
+```
+
+Для запуска выполните ту же команду с `--execute` в окружении OmniInfer, которому доступны два выбранных NPU. Для benchmark и профиля используйте manifest именно этого сервера:
+
+```bash
+python -m vllm_bench.layer_profile.benchmark \
+  --model-dir /data/models/pangu505b-mxfp8-12layers \
+  --server-manifest /data/profile-results/pangu12-tp2-server/server_manifest.json \
+  --mode benchmark --select decode-8k-c1 \
+  --output /data/profile-results/pangu12-tp2-benchmark
+
+python -m vllm_bench.layer_profile.benchmark \
+  --model-dir /data/models/pangu505b-mxfp8-12layers \
+  --server-manifest /data/profile-results/pangu12-tp2-server/server_manifest.json \
+  --mode profile --profile-kind generation --profile-tokens 8 \
+  --select decode-8k-c1 \
+  --output /data/profile-results/pangu12-tp2-profile
+```
+
+Аппаратная проверка TP2 пока не выполнена. На сервере последовательно проверьте: загрузку модели двумя workers с TP2/DP1, успешную генерацию в benchmark, сбор raw-профиля и получение непустого `trace_view.json` в rank sessions под `pangu12-tp2-server/traces`. Если автоматический экспорт не создал timeline, используйте offline export из раздела ниже. Сохраните startup logs и сведения об окружении рядом с manifest. CPU-тесты подтверждают формирование команды и manifest, но не исполнение модели на NPU. Сравнивайте результаты TP2 с полной моделью при той же топологии.
+
+`low_latency` в примере TP8 — набор patches для стандартного V2-пути. Если рабочая полная модель использует другой набор, передайте именно его. `--attention-backend deepseek` включает `OMNI_PANGU_V2_HIGH_THROUGHOUT=1`, но не меняет архитектуру на Ultra. Этот вариант требует соответствующего набора patches и operator config. Значение `--patches` по умолчанию берётся из уже заданного окружения, иначе используется `low_latency` для V2 и `high_throughout` для Ultra. `--attention-backend auto` выбирает `pangu` для V2 и `deepseek` для Ultra. Явно заданный `pangu` для Ultra отклоняется; архитектура не переписывается.
 
 Для MXFP8 `serve.py` добавляет в `VLLM_PLUGINS` необходимые `omni-npu`, `omni_npu_patches` и `omni_custom_models`, сохраняя уже перечисленные plugins. Quantization method vLLM определяет из сохранённого `config.json`; принудительного переключения на BF16 weights нет. Аргумент сервера `--dtype bfloat16` оставлен для активаций, как требует реализация MXFP8 OmniInfer.
 
-Сервер всегда запускается с DP1, без MTP, с отключённым prefix cache. Для expert parallelism дополнительно передайте `--enable-expert-parallel`, только если он нужен и в полном запуске. По умолчанию остаётся чистый tensor parallelism. Графы не отключаются автоматически; `--enforce-eager` предназначен для отдельного диагностического сравнения.
+Сервер всегда запускается с DP1 и отключённым prefix cache. MTP по умолчанию выключен; его можно включить через `--enable-mtp` для сокращённого checkpoint с сохранёнными MTP либо полной модели. Для expert parallelism дополнительно передайте `--enable-expert-parallel`, только если он нужен и в полном запуске. По умолчанию остаётся чистый tensor parallelism. Графы не отключаются автоматически; `--enforce-eager` предназначен для отдельного диагностического сравнения.
 
 Скрипт удаляет из дочернего окружения переменные Hybrid/PD aligned decode, DP round-robin, force MoE load balance и автоматического token-trigger profiler. Конфликтующие benchmark patch directories отклоняются. Это предотвращает блокировку decode при DP1 и сохраняет естественный router. Дополнительные параметры vLLM задаются JSON-массивом CLI arguments через `--engine-cli-json`; изменение архитектуры, MTP, profiler и parallelism этим способом запрещено.
 
 `server_manifest.json` содержит точную команду, HF config, operator config и параметры запуска. Он сохраняется до старта; существующий manifest не перезаписывается. Секреты окружения и API keys в него не выгружаются. Точные версии пакетов, NPU, драйвера, CANN и сетевую топологию следует сохранить рядом с логом запуска средствами вашего серверного окружения.
+
+## 12 основных слоёв вместе с MTP
+
+Нужен исходный полный checkpoint с MTP-весами. Уже извлечённый checkpoint без MTP использовать нельзя: удалённые веса нужно заново скопировать из источника в новый каталог.
+
+```bash
+python -m vllm_bench.layer_profile.prepare_checkpoint \
+  --source /data/models/pangu505b-mxfp8 \
+  --output /data/models/pangu505b-mxfp8-12layers-mtp \
+  --layers 12 --keep-mtp --hash-tensors
+
+python -m vllm_bench.layer_profile.verify_checkpoint \
+  /data/models/pangu505b-mxfp8-12layers-mtp --hashes
+```
+
+Для предварительного плана извлечения добавьте `--dry-run`. Экстрактор сохраняет основные слои 0–11 и все три исходных MTP-слоя 50–52. В выходном checkpoint MTP перенумерованы в 12–14: именно с `num_hidden_layers` OmniInfer начинает загружать predictor. Веса и scales копируются побайтово, меняются только имена MTP-тензоров и связанные метаданные.
+
+Выходной config содержит `num_hidden_layers=12`, `num_nextn_predict_layers=3`; MTP-индексы добавлены в соответствующие DSA/SWA списки. Для приложенного reference config SWA-слои 12–14 получают исходные окна MTP 2048, а основные SWA-слои сохраняют окна 512. Сохраняются predictor-specific веса (`enorm`, `hnorm`, `eh_proj`, `shared_head`), attention и MLP со scales. Явные ссылки на модули в quantization metadata перенумеровываются; ссылки на удалённые слои исключаются. Mapping 50→12, 51→13, 52→14 записывается в `extraction_manifest.json` и проверяется verifier вместе с config и payload hashes.
+
+Запуск на двух NPU с подходящим внешним operator config:
+
+```bash
+python -m vllm_bench.layer_profile.serve \
+  --model /data/models/pangu505b-mxfp8-12layers-mtp \
+  --operator-config /data/profile-configs/pangu-target-operators-tp2.json \
+  --output /data/profile-results/pangu12-mtp-server \
+  --tp 2 --enable-mtp --num-speculative-tokens 3
+```
+
+`--model-scope reduced` остаётся default, менять его на `full` не нужно. После проверки плана добавьте `--execute`. Глубина MTP по умолчанию равна 3. Для checkpoint с сохранённым MTP флаг `--enable-mtp` обязателен; для запуска без MTP используйте обычный checkpoint, извлечённый без `--keep-mtp`.
+
+Запись совместного профиля target и MTP:
+
+```bash
+python -m vllm_bench.layer_profile.benchmark \
+  --model-dir /data/models/pangu505b-mxfp8-12layers-mtp \
+  --server-manifest /data/profile-results/pangu12-mtp-server/server_manifest.json \
+  --mode profile --profile-kind generation --profile-tokens 128 \
+  --select decode-8k-c1 --profile-waves 1 \
+  --output /data/profile-results/pangu12-mtp-profile
+```
+
+Для benchmark используйте тот же model-dir и manifest, `--mode benchmark` и отдельный output. Traces сохраняются в `pangu12-mtp-server/traces`; offline export выполняется так же, как для других режимов.
+
+При depth=3 просмотренный OmniInfer использует MTP-слои 12 → 13 → 14; depth=7 выбирает другую ветку proposer и повторно использует слой 12. Выходные токены могут приниматься группами, поэтому их число не равно числу target forward, а клиентский TPOT не равен времени одного NPU decode-step. Prefill-профиль с включённым MTP также может содержать predictor.
+
+Это профиль сокращённого speculative pipeline: MTP получает hidden states после 12 основных слоёв вместо 50. Качество генерации, acceptance rate и скорость speculative decoding не представляют полную модель. CPU-тесты проверяют payload bytes, mapping, config, manifest и клиент; аппаратная проверка пока не выполнена. На NPU проверьте загрузку 12 target + 3 MTP слоёв, генерацию и generation trace с несколькими speculative циклами. С `--annotate-layers` ожидаются основные индексы 0–11 и MTP 12–14, с учётом ограничений видимости Python ranges в graph mode.
+
+## Полная модель и MTP
+
+Используйте исходный полный HF checkpoint V2 или Ultra (BF16/MXFP8). Скрипт передаёт его vLLM напрямую: config и веса не обрезаются, не копируются и не изменяются. Каталоги с `extraction_manifest.json` или `mtp_checkpoint_manifest.json` в режиме `full` отклоняются. Это проверка известных результатов наших экстракторов, а не полная проверка наличия всех весов: загрузку исходного checkpoint проверяет runtime.
+
+Пример полного запуска без MTP, даже если в исходном config есть predictor-слои:
+
+```bash
+python -m vllm_bench.layer_profile.serve \
+  --model /data/models/pangu505b-mxfp8 \
+  --model-scope full \
+  --operator-config /data/profile-configs/pangu-target-operators.json \
+  --output /data/profile-results/pangu-full-no-mtp \
+  --tp 8
+```
+
+Полная модель с MTP:
+
+```bash
+python -m vllm_bench.layer_profile.serve \
+  --model /data/models/pangu505b-mxfp8 \
+  --model-scope full --enable-mtp \
+  --num-speculative-tokens 3 \
+  --operator-config /data/profile-configs/pangu-target-operators.json \
+  --output /data/profile-results/pangu-full-mtp \
+  --tp 8
+```
+
+Обе команды сначала показывают план. Для запуска добавьте `--execute`. Используйте operator config и число NPU из рабочего запуска полной модели; наличие TP2 в CLI не гарантирует, что полная модель поместится на двух NPU. Attention backend, patches, plugins и графы выбираются по тем же правилам, что выше.
+
+`--enable-mtp` требует положительное целое `num_nextn_predict_layers` в HF config. При включении MTP глубина по умолчанию равна 3; явный `--num-speculative-tokens` без `--enable-mtp` отклоняется. В vLLM передаётся `--speculative-config` с `method="mtp"`. Глубина может превышать число predictor-слоёв: в просмотренном OmniInfer при трёх predictor-слоях depth=3 использует слои 50 → 51 → 52 полной модели, а depth=7 — другую ветку proposer с повторным использованием слоя 50. Подробности — в [руководстве MTP](../mtp_profile/README.md#важная-развилка-depth3-и-depth7). Изменение глубины требует перезапуска сервера.
+
+В manifest записываются `model_scope`, эффективный `speculative_config` (либо `null` без MTP), параметры запуска и исходный HF config. Для benchmark и записи trace передайте полный model-dir и manifest соответствующего сервера:
+
+```bash
+python -m vllm_bench.layer_profile.benchmark \
+  --model-dir /data/models/pangu505b-mxfp8 \
+  --server-manifest /data/profile-results/pangu-full-mtp/server_manifest.json \
+  --mode benchmark --select decode-8k-c1 \
+  --output /data/profile-results/pangu-full-mtp-benchmark
+
+python -m vllm_bench.layer_profile.benchmark \
+  --model-dir /data/models/pangu505b-mxfp8 \
+  --server-manifest /data/profile-results/pangu-full-mtp/server_manifest.json \
+  --mode profile --profile-kind generation --profile-tokens 128 \
+  --select decode-8k-c1 --profile-waves 1 \
+  --output /data/profile-results/pangu-full-mtp-profile
+```
+
+Окно записи содержит target forward/verify, MTP predictor, sampling и коммуникации. Это профиль полного speculative pipeline. При MTP число выходных токенов не равно числу target forward: один verify может принять несколько draft-токенов. Клиентский TPOT отражает приходы токенов, в том числе выдачу группами в SSE; это не время одного NPU decode-step. Даже `--profile-kind prefill` с одним выходным токеном при включённом MTP может содержать работу predictor.
+
+Порядок аппаратной проверки: загрузить полную модель без MTP и проверить генерацию; повторить с MTP глубины 3 и новым output; записать generation trace с достаточной длиной для нескольких speculative циклов; проверить наличие target и predictor на timeline и startup logs. CPU-проверки подтверждают команды, manifest и совместимость клиента; исполнение полной модели и MTP на NPU пока не проверено. Для сравнения используйте одинаковые workload, topology и настройки графов.
+
+Если raw-данные есть, но timeline не экспортирован автоматически:
+
+```bash
+python -m vllm_bench.tools.export_profile /data/profile-results/pangu-full-mtp/traces
+python -m vllm_bench.tools.export_profile /data/profile-results/pangu-full-mtp/traces --execute
+```
+
+Первая команда проверяет файлы, вторая выполняет offline export без загрузки модели. Детали и ограничения приведены в разделе «Если raw данные есть а trace нет».
 
 ## Память и KV cache
 
@@ -266,6 +411,8 @@ python -m vllm_bench.tools.export_profile /data/profile-results/pangu12-server/t
 
 Опциональный `python -m vllm_bench.layer_profile.serve --annotate-layers` поддерживает V2 и Ultra и добавляет через отдельный `sitecustomize.py` ranges `pangu12/layer_000/forward`, ..., `pangu12/layer_011/forward` и `mhc_head`. Он не меняет файлы OmniInfer. В stderr должно появиться `[pangu12] CPU layer annotations installed`.
 
+В полном режиме тот же hook покрывает все decoder-слои, включая внутренние decoder-блоки MTP: для данного checkpoint основные индексы 0–49, MTP — 50–52. Префикс `pangu12/` сохранён для совместимости анализа. Эти метки охватывают decoder forward/`mhc_head`, а не весь proposer, sampling или отдельные стадии verify; полную работу pipeline смотрите на device timeline. Видимость Python ranges при графах может отличаться от eager.
+
 Это дополнительная Python-инструментация: её overhead входит в измерения, а графы/компиляция могут менять видимость ranges. Для baseline performance оставьте её выключенной; для разбора слоёв при необходимости проведите отдельный annotated запуск. `--enforce-eager` может помочь диагностике, но eager-профиль нельзя выдавать за профиль целевого graph mode.
 
 ```bash
@@ -280,7 +427,7 @@ python -m vllm_bench.tools.analyze_trace \
 
 12 слоёв сохраняют исходный префикс и его размеры. В полном стеке 1 dense+DSA, 2 dense+SWA, 17 MoE+DSA и 30 MoE+SWA. Для приблизительной оценки фиксированного шага можно использовать времена представительных блоков с такими весами, отдельно учитывая extra norms, embedding/LM head, границы стека, коммуникации и перекрытие.
 
-Ограничения: нет последних слоёв 48/49, отсутствует MTP, финальная нормализация получает другое представление, меньше суммарный working set и давление на HBM/KV. MoE routing корректен для сохранённого префикса, но не описывает распределение экспертов поздних слоёв. Поэтому линейное умножение полного времени 12 слоёв на 50/12 недостоверно.
+Ограничения сокращённой модели: нет последних слоёв 48/49, MTP отсутствует без `--keep-mtp` либо получает представление сокращённого стека, финальная нормализация получает другое представление, меньше суммарный working set и давление на HBM/KV. MoE routing корректен для сохранённого префикса, но не описывает распределение экспертов поздних слоёв. Поэтому линейное умножение полного времени 12 слоёв на 50/12 недостоверно.
 
 Для проверки масштабирования экстрактор поддерживает `--layers 6` и `--layers 9`; соответствующие checkpoint и конфиги создаются отдельно. Сравнивать их следует при одинаковых workload, TP/EP, kernels и режимах графов. Финальный эффект оптимизации нужно подтвердить одним контрольным запуском полной модели.
 
