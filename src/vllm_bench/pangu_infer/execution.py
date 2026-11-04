@@ -5,13 +5,17 @@ import time
 
 
 class Execution:
-    def __init__(self, model, cfg, caches, names, size, device, *, head=None, mode="eager", profile=False):
+    def __init__(self, model, cfg, caches, names, size, device, *, head=None, mode="eager", profile=False,
+                 query_size=None, isolate_graph_tasks=False):
         import torch
 
         self.cfg, self.size, self.head = cfg, size, head
+        self.query_size = size if query_size is None else query_size
+        if not 1 <= self.query_size <= size or (self.query_size < size and head is None):
+            raise ValueError("Padding requires an MTP execution with a valid query size")
         self.mode = mode
         self.profile = profile
-        self.lane = caches.lane(names, size)
+        self.lane = caches.lane(names, size, query_size=self.query_size)
         self.ids = torch.empty(size, dtype=torch.int64, device=device)
         self.hidden = (torch.empty(size, cfg.model_config.hf_config.hidden_size,
                                    dtype=cfg.model_config.dtype, device=device)
@@ -63,6 +67,10 @@ class Execution:
             from vllm.compilation.cuda_graph import CUDAGraphOptions
             from omni_npu.compilation.acl_graph import ACLGraphWrapper
 
+            if isolate_graph_tasks:
+                from vllm_bench.pangu_infer.model.acl_graph import DirectACLGraphWrapper
+                ACLGraphWrapper = DirectACLGraphWrapper
+
             self.wrapper = ACLGraphWrapper(
                 self.runnable, cfg, CUDAGraphMode.FULL,
                 cudagraph_options=CUDAGraphOptions(gc_disable=False, weak_ref_output=False),
@@ -76,9 +84,17 @@ class Execution:
         from vllm.forward_context import set_forward_context, get_forward_context, BatchDescriptor
 
         with torch.profiler.record_function("direct/prepare_buffers_metadata") if self.profile else nullcontext():
-            self.ids.copy_(ids)
+            if self.query_size < self.size:
+                self.ids[:self.query_size].copy_(ids)
+                self.ids[self.query_size:].zero_()
+            else:
+                self.ids.copy_(ids)
             if self.hidden is not None:
-                self.hidden.copy_(hidden)
+                if self.query_size < self.size:
+                    self.hidden[:self.query_size].copy_(hidden)
+                    self.hidden[self.query_size:].zero_()
+                else:
+                    self.hidden.copy_(hidden)
                 self.sample_index.copy_(sample_index)
             metadata, slots = self.lane.prepare(start, accepted, prompt, draft_index)
         mode = CUDAGraphMode.FULL if self.wrapper else CUDAGraphMode.NONE
@@ -112,4 +128,6 @@ class Execution:
                 torch.npu.synchronize()
                 self.capture_seconds += time.perf_counter() - started
         self.calls += 1
+        if self.query_size < self.size:
+            return result[0][:self.query_size], result[1]
         return result

@@ -58,18 +58,21 @@ class Caches:
         for group in self.groups:
             group.raw.zero_()
 
-    def lane(self, names, size):
-        return MetadataLane(self, names, size)
+    def lane(self, names, size, *, query_size=None):
+        return MetadataLane(self, names, size, query_size=query_size)
 
 
 class MetadataLane:
     """One persistent set of input tensors/builders per captured call shape."""
 
-    def __init__(self, caches, names, size):
+    def __init__(self, caches, names, size, *, query_size=None):
         import torch
         from vllm.v1.attention.backend import CommonAttentionMetadata
 
         self.cfg, self.size = caches.cfg, size
+        self.query_size = size if query_size is None else query_size
+        if not 1 <= self.query_size <= size:
+            raise ValueError("Query size must be positive and fit the input buffer")
         self.groups = [group for group in caches.groups if group.name in names]
         if not self.groups:
             raise ValueError("Execution lane has no caches")
@@ -77,7 +80,7 @@ class MetadataLane:
         self.offsets = torch.arange(size, dtype=torch.int64, device=caches.device)
         self.accepted = torch.empty(1, dtype=torch.int32, device=caches.device)
         self.prompt = torch.empty(1, dtype=torch.int32, device=caches.device)
-        self.q_cpu = torch.tensor([0, size], dtype=torch.int32)
+        self.q_cpu = torch.tensor([0, self.query_size], dtype=torch.int32)
         self.q = self.q_cpu.to(caches.device)
         self.seq_cpu = torch.empty(1, dtype=torch.int32)
         self.computed_cpu = torch.empty(1, dtype=torch.int32)
@@ -93,7 +96,7 @@ class MetadataLane:
                 seq_lens=self.seq, _seq_lens_cpu=self.seq_cpu,
                 _num_computed_tokens_cpu=self.computed_cpu,
                 seq_lens_cpu_upper_bound=self.seq_cpu,
-                num_reqs=1, num_actual_tokens=size, max_query_len=size,
+                num_reqs=1, num_actual_tokens=size, max_query_len=self.query_size,
                 max_seq_len=1, block_table_tensor=group.block_table,
                 slot_mapping=slots, causal=True)
             self.entries.append((bucket, builder, common))
@@ -102,22 +105,26 @@ class MetadataLane:
         import torch
 
         self.positions.copy_(self.offsets).add_(start)
-        self.seq_cpu.fill_(start + self.size)
+        if self.query_size < self.size:
+            self.positions[self.query_size:].zero_()
+        self.seq_cpu.fill_(start + self.query_size)
         self.computed_cpu.fill_(start)
-        self.seq.fill_(start + self.size)
+        self.seq.fill_(start + self.query_size)
         self.prompt.fill_(prompt)
         if accepted is not None:
             self.accepted.fill_(accepted)
         metadata, slots = {}, {}
         for bucket, builder, common in self.entries:
             group = bucket[0]
-            common.max_seq_len = start + self.size
+            common.max_seq_len = start + self.query_size
             common._num_computed_tokens_cache = None
             if group.mome:
                 common.slot_mapping.fill_(0)
             else:
                 # Blocks are contiguous, so no gather or temporary block IDs.
                 common.slot_mapping.copy_(self.positions).add_(group.spec.block_size)
+            if self.query_size < self.size:
+                common.slot_mapping[self.query_size:].fill_(-1)
             if draft_index is None:
                 if group.mome:
                     value = builder.build(0, common,

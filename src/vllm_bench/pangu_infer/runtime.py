@@ -32,6 +32,9 @@ def engine_options(plan, *, direct):
     a = plan["options"]
     compile_enabled = "compile" in a["mode"]
     graph_enabled = "acl" in a["mode"]
+    capture_sizes = {1, a["depth"] + 1}
+    if direct and a.get("mtp_pad_to_8", False):
+        capture_sizes.add(8)
     # Keep enforce_eager=False in every mode: it changes operator optimizations.
     # The direct model is compiled explicitly, outside the vLLM decorators.
     options = dict(
@@ -45,7 +48,7 @@ def engine_options(plan, *, direct):
         gpu_memory_utilization=a["gpu_memory_utilization"], seed=a["seed"],
         compilation_config={"mode": 0 if direct or not compile_enabled else 3,
                             "cudagraph_mode": "FULL" if graph_enabled else "NONE",
-                            "cudagraph_capture_sizes": sorted({1, a["depth"] + 1})},
+                            "cudagraph_capture_sizes": sorted(capture_sizes)},
         additional_config=plan["additional_config"])
     if a["depth"]:
         options["speculative_config"] = {
@@ -226,14 +229,20 @@ class DirectEngine:
                       "draft": [g.name for g in self.caches.groups if g.name.startswith("draft_model.")]}
         if "acl" in self.a["mode"]:
             from omni_npu.compilation.acl_graph import set_graph_params
-            set_graph_params({1, self.a["depth"] + 1})
+            set_graph_params(set(engine_options(plan, direct=True)["compilation_config"]["cudagraph_capture_sizes"]))
 
     def forward(self, kind, ids, start, accepted, *, hidden=None, index=None, head=0, draft_index=None):
         from vllm_bench.pangu_infer.execution import Execution
 
-        size = ids.shape[0]
-        prefill = size == self.a["context_length"] and start == 0
-        key = (kind, size, head if kind == "draft" else None, prefill)
+        query_size = ids.shape[0]
+        prefill = query_size == self.a["context_length"] and start == 0
+        size = query_size
+        if (self.a.get("mtp_pad_to_8", False) and kind == "draft" and query_size == 1
+                and draft_index is not None and draft_index > 0):
+            count = self.plan["config"]["num_nextn_predict_layers"]
+            if not (count > 1 and self.a["depth"] <= count):
+                size = 8
+        key = (kind, size, head if kind == "draft" else None, prefill, query_size)
         if key not in self.executions:
             names = self.names[kind]
             if kind == "draft":
@@ -242,7 +251,8 @@ class DirectEngine:
             self.executions[key] = Execution(
                 self.target if kind == "target" else self.draft, self.cfg, self.caches,
                 names, size, self.device, head=head if kind == "draft" else None,
-                mode="eager" if prefill else self.a["mode"], profile=self.a["profile"])
+                mode="eager" if prefill else self.a["mode"], profile=self.a["profile"],
+                query_size=query_size, isolate_graph_tasks=self.a.get("mtp_pad_to_8", False))
         return self.executions[key](ids, start, accepted, self.a["context_length"],
                                     hidden=hidden, sample_index=index, draft_index=draft_index,
                                     model_timing=self.model_timings)
@@ -466,7 +476,7 @@ def main(argv=None):
                     "setup_seconds": setup_seconds, "load_seconds": load_seconds,
                     "cache_init_seconds": cache_init_seconds,
                     "counters_before": before, "counters_after": after,
-                    "execution_lanes": [{"kind": key[0], "tokens": key[1], "head": key[2],
+                    "execution_lanes": [{"kind": key[0], "tokens": key[1], "query_tokens": e.query_size, "head": key[2],
                                          "prefill": key[3], "mode": e.mode, "compiles": e.compiles,
                                          "captures": e.captures, "replays": e.replays,
                                          "backend_compile_seconds": e.backend_compile_seconds,

@@ -64,6 +64,8 @@ def parser():
                      help="MTP proposal depth; 0 disables MTP for greedy or sampled generation")
     mtp.add_argument("--no-mtp", dest="depth", action="store_const", const=0,
                      help="Run only the target model; equivalent to --depth 0")
+    p.add_argument("--mtp-pad-to-8", action="store_true",
+                   help="Direct only: pad recurrent single-token MTP calls to 8 input rows")
     p.add_argument("--mode", choices=MODES, default="eager")
     p.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
     p.add_argument("--context-length", type=int, default=8192)
@@ -98,6 +100,8 @@ def make_plan(a):
                for key, value in vars(a).items()}
     if a.model_timing and a.engine != "direct":
         raise ValueError("--model-timing requires --engine direct; stock OmniInfer instrumentation is not supported")
+    if a.mtp_pad_to_8 and (a.engine != "direct" or a.depth == 0):
+        raise ValueError("--mtp-pad-to-8 requires --engine direct and positive depth")
     diagnostic_trace = a.trace_target or a.replay_target is not None
     if a.replay_with_mtp and (a.replay_target is None or a.depth == 0):
         raise ValueError("--replay-with-mtp requires --replay-target and positive depth")

@@ -79,6 +79,54 @@ LLMEngine, без HTTP; в его время входят engine scheduling и I
 детерминированный synthetic prompt, зависящий от seed и vocab_size. Для
 воспроизводимого анализа настоящих запросов используйте явный файл.
 
+## Padding рекуррентных MTP-вызовов
+
+`--mtp-pad-to-8` — отдельный контроль для `--engine direct` с включённым MTP.
+Флаг дополняет однопозиционные рекуррентные MTP-вызовы до 8 строк. Для обычного
+checkpoint с тремя predictor layers и depth 7 это шесть вызовов после первого
+packed-прохода. Первый проход, prefill, target verification и target-only decode
+не дополняются. В multi-head ветке depth 3 флаг не меняет packed-входы.
+
+```bash
+python -m vllm_bench.pangu_infer.run \
+  --engine direct --model /models/pangu-ultra-12-mtp \
+  --operator-config /configs/pangu-tp2.json \
+  --tp 2 --depth 7 --mode compile-acl --temperature 0 \
+  --mtp-pad-to-8 --output /results/direct-tp2-mtp7-pad8 --execute
+```
+
+IDs, positions и previous hidden states в хвосте заполнены нулями, KV slot mapping
+содержит `-1` для padding. Полезная query остаётся одна: `query_start_loc=[0,1]`,
+`max_query_len=1`, sequence length увеличивается на одну позицию. Physical
+`num_actual_tokens` CommonAttentionMetadata равен 8, как в FULL graph ветке
+Omni; MoME builder выводит полезное число позиций из query boundaries.
+Из результата MTP возвращается только первая строка hidden states.
+
+Флаг работает в eager, compile, acl и compile-acl; без флага поведение прежнее.
+Omni с FULL graph сохраняет размер первого окна для рекуррентных шагов; его
+eager ветка может использовать размер 1. Флаг принудительно задаёт 8 во всех
+direct modes и не является обещанием совпадения всех остальных metadata Omni.
+Параметры численной согласованности не переключаются.
+
+В ACL режимах packed и padded MTP-вызовы получают разные execution lanes и
+отдельные графы. Локальный подкласс Omni ACLGraphWrapper сохраняет собственные
+task handles/workspaces каждого графа, поскольку оба имеют physical size 8
+и одинаковые layer names. Без этого registry второго capture перезаписал бы
+handles первого. Capture/replay и update/event protocol остаются исходными;
+глобальных runtime-подмен нет. На NPU этот путь требует проверки.
+
+В `details.execution_lanes` поля `tokens` и `query_tokens` показывают physical
+размер и число полезных позиций. `--model-timing` печатает physical input count:
+при depth 7 вместо последовательности `8,1,1,1,1,1,1` получится семь `8`.
+Это контроль различий в вычислительной работе, а не отдельное доказательство
+Python overhead.
+
+Флаг можно добавить к существующему direct replay с `--replay-with-mtp`,
+оставив прежнюю трассу Omni и выбрав новый output. Summary показывает
+`mtp_pad_to_8`. Повторная запись Omni не нужна. Сам target replay без выполнения
+MTP флаг не затрагивает. Для matrix используйте `engines: ["direct"]`, если
+передаёте `--mtp-pad-to-8` в общем списке options.
+
 ## Диагностика расхождений target: запись Omni и replay в direct
 
 Этот режим сравнивает основную модель на одинаковых входных окнах. Он нужен,

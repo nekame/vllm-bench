@@ -8,6 +8,7 @@
 | `pangu_ultra_moe.py` | `omni/v1/models/pangu/pangu_ultra_moe.py` | Удалены `support_torch_compile` и post-forward plugin decorator; attention-классы импортируются из локального адаптера; post-load вызывается явно после packing |
 | `pangu_ultra_moe_mtp.py` | `omni/v1/models/pangu/pangu_ultra_moe_mtp.py` | Удалён compile decorator; embedding и head передаются из target при создании; отдельные checkpoint-копии shared weights пропускаются; post-load вызывается явно |
 | `attention.py` | `MomeAttentionMixin._build_mome_conv` из `npu_mla.py`; `NPUMoMEPatch.MomeAttention` из `patch_mome_hybrid.py` | Явный MoME-класс и обычные подклассы attention вместо зависимости от динамического `vllm.model_executor.layers.npumome`; arithmetic, convolution operators и state spec сохранены |
+| `acl_graph.py` | `omni/compilation/acl_graph.py`, `ACLGraphWrapper._update_graph_tasks` | Только при `--mtp-pad-to-8`: подкласс wrapper сохраняет task handles и workspace references каждой записи графа отдельно; протокол dynamic kwargs/update/events сохранён |
 
 Оригинальные license/copyright headers сохранены. MoME adapter содержит
 атрибуцию исходному коду; его patch-источник использует Apache-2.0.
@@ -32,7 +33,14 @@ static sinks и необходимые vLLM adaptations загружаются �
 `VllmConfig`, forward context, distributed groups, metadata builders и
 `ACLGraphWrapper` оставлены как интерфейсы, необходимые существующим операторам.
 ACL wrapper обслуживает обновление graph tasks с динамическими длинами attention.
-Перенос этой логики без аппаратной проверки создавал бы второй backend вместо PoC.
+Для необязательного padding-контроля используется локальный подкласс: в исходном
+Omni registry ключ состоит из physical input size и layer name, поэтому два
+отдельно захваченных direct MTP-графа 8/query=8 и 8/query=1 перезаписали бы
+handles друг друга. Подкласс после capture сохраняет ссылки на собственные
+GraphTaskEntry/workspaces и обновляет именно их. Сам capture, replay и graph pool
+остаются в исходном wrapper; глобальные функции и registry не подменяются.
+Без флага используется исходный wrapper. Изменение требует NPU проверки;
+CPU tests проверяют ownership handles/events/workspaces на stand-ins.
 
 При обновлении OmniInfer сначала сравните перечисленные исходники с локальными
 копиями. Протокол MoME acceptance, политика multi-MTP и graph-task API привязаны

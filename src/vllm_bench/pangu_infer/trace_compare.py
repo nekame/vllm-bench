@@ -179,6 +179,7 @@ def compare_traces(reference, candidate, *, rtol=1e-3, atol=1e-3):
                          "argmax_equal": first["argmax"] is None,
                          "captured_layers": cp["trace_layers"], "first_differences": first,
                          "replay_with_mtp": cp["options"].get("replay_with_mtp", False),
+                         "mtp_pad_to_8": cp["options"].get("mtp_pad_to_8", False),
                          "first_draft_proposal_difference": first_draft,
                          "interpretation": "Target inputs and target acceptance are forced from the source trace. "
                          "Exact differences alone do not establish a correctness bug. Inspect top-1 margins, "

@@ -93,6 +93,7 @@ class ModelCallBoundaryTests(unittest.TestCase):
                         execution = Execution.__new__(Execution)
                         execution.profile, execution.cfg = False, object()
                         execution.head, execution.size = head, 8
+                        execution.query_size = 8
                         execution.ids = SimpleNamespace(copy_=lambda value: events.append("copy_ids"))
                         execution.hidden = (SimpleNamespace(copy_=lambda value: events.append("copy_hidden"))
                                             if head is not None else None)
