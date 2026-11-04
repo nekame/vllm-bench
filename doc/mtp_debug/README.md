@@ -388,6 +388,15 @@ bash scripts/test_indexer_quant_cache.sh \
   --output /data/profile-results/real-ki-left --execute
 ```
 
+При `KI_INPUT_DIFFERS` сначала можно исследовать уже сохранённый capture без нового NPU-прогона:
+
+```bash
+bash scripts/inspect_ki.sh /data/profile-results/tp8-ki-repro/capture \
+  --right request-11 --output ki-ranks.json
+```
+
+По умолчанию left=`request-01`, layer=0, TP определяется по metadata. Три строки показывают изменившиеся rank и диапазоны строк Ki, численные метрики первой различающейся строки, группы побайтово одинаковых Ki **внутри каждого запроса**, покрытие и настроенный `ena_seq_parallel`, если рядом доступен server/operator_config.json. Последний флаг взят из сохранённого config, не подтверждает фактический runtime-режим. Ранки в разных группах — наблюдение, не указание на неисправную карту; при sequence parallel копия Ki перед записью получена после all-gather. Метрики относятся к первой строке, а не ко всем изменившимся строкам. Полные диапазоны сохраняются в `--output`, терминал показывает первые четыре. Отсутствующие/повреждённые данные остаются coverage issues. Инструмент читает JSONL поточно и сохраняет в памяти только выбранные prefill-запросы; файл output не перезаписывается.
+
 В standalone сохраняется точный Ki выбранного вызова; slots/layout варьируются по standalone-сценариям, это не полное воспроизведение allocator/streams модели. Отчёты и каталоги replay не перезаписываются. CPU-тесты проверяют независимый prefill sidecar, полный snapshot сверх 64 токенов, сопоставление чанков, различение трёх источников расхождения, scale reshape `[1,4] → [1,2,2]`, реальную сигнатуру и inplace-снимки через mocks, ошибки/лимиты и переносимость replay. На NPU новый hook ещё требует smoke test; синхронные снимки могут скрыть гонку.
 
 ## Standalone-тест indexer_quant_cache без модели
