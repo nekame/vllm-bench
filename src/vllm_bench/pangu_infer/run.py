@@ -82,7 +82,9 @@ def parser():
     trace.add_argument("--trace-target", action="store_true",
                        help="Record Omni target inputs, metadata and logits for one eager request")
     trace.add_argument("--replay-target", type=Path,
-                       help="Replay an Omni target-trace directory in direct, without generating draft tokens")
+                       help="Replay Omni target windows in direct; draft generation is disabled by default")
+    p.add_argument("--replay-with-mtp", action="store_true",
+                   help="Execute direct MTP between forced target windows; requires --replay-target and positive depth")
     p.add_argument("--trace-layers", default="",
                    help="Also record layer outputs and MoME states: all or comma-separated target layer indices")
     p.add_argument("--additional-config", type=Path)
@@ -97,6 +99,8 @@ def make_plan(a):
     if a.model_timing and a.engine != "direct":
         raise ValueError("--model-timing requires --engine direct; stock OmniInfer instrumentation is not supported")
     diagnostic_trace = a.trace_target or a.replay_target is not None
+    if a.replay_with_mtp and (a.replay_target is None or a.depth == 0):
+        raise ValueError("--replay-with-mtp requires --replay-target and positive depth")
     if diagnostic_trace:
         if a.mode != "eager" or a.temperature != 0 or a.repeats != 1:
             raise ValueError("Target trace/replay requires --mode eager --temperature 0 --repeats 1")

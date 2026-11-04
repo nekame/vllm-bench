@@ -119,6 +119,15 @@ class TraceProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "computed-token"):
             trace.replay_parameters(value)
 
+    def test_proposal_history_uses_source_cursor_including_partial_and_full_acceptance(self):
+        self.assertEqual(trace.proposal_parameters(1, 8192, 0, 8192, 7), (8191, 8))
+        self.assertEqual(trace.proposal_parameters(2, 8193, 8192, 8, 7), (0, 1))
+        self.assertEqual(trace.proposal_parameters(3, 8196, 8193, 8, 7), (2, 3))
+        self.assertEqual(trace.proposal_parameters(4, 8204, 8196, 8, 7), (7, 8))
+        for start in (8192, 8201):
+            with self.assertRaisesRegex(ValueError, "committed-token"):
+                trace.proposal_parameters(2, start, 8192, 8, 7)
+
     def test_metadata_reports_paths_and_missing_fields_with_a_bound(self):
         differences = metadata_differences({"layer": {"accepted": [1], "qsl": [0, 8]}},
                                            {"layer": {"accepted": [8]}})
@@ -144,7 +153,8 @@ class TraceProtocolTests(unittest.TestCase):
             self.assertEqual(source["trace_layers"], [0, 1])
             for flags, message in ((["--mode", "acl"], "requires"), (["--repeats", "2"], "requires"),
                                    (["--temperature", "1"], "requires"), (["--engine", "direct"], "Use"),
-                                   (["--model-timing"], "requires"), (["--profile"], "cannot")):
+                                   (["--model-timing"], "requires"), (["--profile"], "cannot"),
+                                   (["--replay-with-mtp"], "requires")):
                 with self.subTest(flags=flags), self.assertRaisesRegex(ValueError, message):
                     run.make_plan(run.parser().parse_args([*args, *flags]))
             directory = root / "reference" / "target-trace"
@@ -232,24 +242,36 @@ class TraceHookTests(unittest.TestCase):
 
 class TraceReplayTests(unittest.TestCase):
     def test_replay_resets_once_uses_reference_windows_and_never_proposes(self):
+        self.check_replay(False)
+
+    def test_optional_mtp_executes_between_forced_windows_and_preserves_target_acceptance(self):
+        self.check_replay(True)
+
+    def check_replay(self, with_mtp):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "output"
             output.mkdir()
-            plan = {"options": {"engine": "direct", "context_length": 4, "depth": 7},
+            (output / "target-trace" / "rank-0").mkdir(parents=True)
+            plan = {"options": {"engine": "direct", "context_length": 4, "depth": 7,
+                                "replay_with_mtp": with_mtp},
                     "trace_layers": [], "prompt_ids": [0, 1, 2, 3]}
             records = [record(0, 8), record(4, 8), record(5, 1)]
             records[0]["input_ids"] = Tensor([0, 1, 2, 3])
             records[0]["positions"] = Tensor([0, 1, 2, 3])
             records[0]["metadata"]["model.layers.0.attn.mome"]["common"]["query_start_loc"] = [0, 4]
             cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=100))
-            engine = SimpleNamespace(cfg=cfg, target=object(), device="npu:0",
-                                     caches=SimpleNamespace(reset=Mock()), forward=Mock(), propose=Mock())
+            hidden_outputs = [Tensor([[index]]) for index in range(3)]
+            engine = SimpleNamespace(cfg=cfg, target=object(), device="npu:0", caches=SimpleNamespace(reset=Mock()),
+                                     forward=Mock(side_effect=[(hidden, None) for hidden in hidden_outputs]),
+                                     propose=Mock(side_effect=[(Tensor([9, 8, 7, 6, 5, 4, 3]), None),
+                                                               (Tensor([4, 3, 2, 1, 0, 9, 8]), None)]))
             extra = SimpleNamespace(operator_opt_config={}, parall_config={})
             manifest = {"versions": {}, "hardware": "NPU", "effective": {
                 "operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 100}}
             recorder = Mock()
             torch = SimpleNamespace(
                 load=lambda path, **kwargs: records[int(path.stem.split("-")[-1])],
+                tensor=lambda values, **kwargs: Tensor(values), int64="int64",
                 distributed=SimpleNamespace(get_rank=lambda: 0, barrier=Mock()),
                 npu=SimpleNamespace(synchronize=Mock(), get_device_name=lambda device: "NPU"))
             modules = {"torch": torch,
@@ -263,7 +285,20 @@ class TraceReplayTests(unittest.TestCase):
                     patch("sys.stdout", new_callable=io.StringIO):
                 trace.replay_target(engine, plan, output)
             engine.caches.reset.assert_called_once()
-            engine.propose.assert_not_called()
+            if with_mtp:
+                self.assertEqual(engine.propose.call_count, 2)
+                proposal_calls = engine.propose.call_args_list
+                self.assertIs(proposal_calls[0].args[1], hidden_outputs[0])
+                self.assertIs(proposal_calls[1].args[1], hidden_outputs[1])
+                self.assertEqual([(call.args[2], call.args[4], call.args[6]) for call in proposal_calls],
+                                 [(0, 3, 8), (4, 0, 1)])
+                self.assertEqual([call.args[5].tolist() for call in proposal_calls], [[3], [3]])
+                proposals = json.loads((output / "target-trace" / "rank-0" / "draft-proposals.json").read_text())
+                self.assertEqual(proposals[0]["reference"], [4])
+                self.assertEqual(proposals[0]["first_difference"], 0)
+                self.assertIsNone(proposals[1]["first_difference"])
+            else:
+                engine.propose.assert_not_called()
             self.assertEqual([(call.args[0], call.args[2], call.args[3])
                               for call in engine.forward.call_args_list],
                              [("target", 0, 8), ("target", 4, 8), ("target", 5, 1)])
@@ -360,11 +395,15 @@ class TraceTensorTests(unittest.TestCase):
                     if engine == "direct" and call == 1:
                         output["logits"] = torch.tensor([[3., 2., 0.]])
                         output["layers"]["0"]["0"][0, 0] = 2
+                    if engine == "direct" and call == 0:
+                        output["metadata"]["layer"]["accepted"] = [1]
                     torch.save(output, rank / f"call-{call:05d}.pt")
             report = compare_traces(root / "omni", root / "direct")
             summary = report["summary"]
             self.assertTrue(summary["inputs_equal"])
-            self.assertTrue(summary["metadata_equal"])
+            self.assertFalse(summary["metadata_equal"])
+            self.assertEqual(summary["first_metadata_detail"][0], {
+                "path": "layer.accepted", "reference": [8], "candidate": [1]})
             self.assertFalse(summary["argmax_equal"])
             self.assertEqual(summary["first_differences"]["argmax"], {"target_call": 1, "rank": 0, "row": 0})
             self.assertEqual(summary["first_argmax_detail"]["reference_top1"], 1)

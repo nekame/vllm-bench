@@ -15,7 +15,7 @@ def plans(spec, root):
     if not isinstance(options, list) or not all(isinstance(x, str) for x in options):
         raise ValueError("Matrix options must be an array of CLI strings")
     blocked = ("--model", "--operator-config", "--tp", "--depth", "--no-mtp", "--mode", "--engine", "--output", "--execute",
-               "--trace-target", "--replay-target", "--trace-layers")
+               "--trace-target", "--replay-target", "--replay-with-mtp", "--trace-layers")
     if any(option.split("=")[0] in blocked for option in options):
         raise ValueError("Matrix options cannot override workload axes or execution")
     def resolve(value):

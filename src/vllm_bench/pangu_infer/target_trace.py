@@ -143,6 +143,16 @@ def replay_parameters(record):
     return start, accepted
 
 
+def proposal_parameters(call, start, previous_start, previous_size, depth):
+    """Committed positions come from the source cursor, independently of logits."""
+    if call == 1:
+        return previous_size - 1, depth + 1
+    committed = start - previous_start
+    if not 1 <= committed <= previous_size:
+        raise ValueError("Source target windows have an invalid committed-token advance")
+    return committed - 1, committed
+
+
 class TargetRecorder:
     def __init__(self, model, cfg, directory, rank, layers):
         self.directory = Path(directory) / f"rank-{rank}"
@@ -294,6 +304,8 @@ def replay_target(engine, plan, output):
     directory = Path(output) / "target-trace"
     recorder = TargetRecorder(engine.target, cfg, directory, rank, plan["trace_layers"])
     engine.caches.reset()
+    previous_ids, previous_hidden, previous_start = None, None, None
+    proposals = []
     try:
         for call in range(calls):
             record = torch.load(source / f"rank-{rank}" / f"call-{call:05d}.pt",
@@ -304,10 +316,30 @@ def replay_target(engine, plan, output):
             if call and (start < plan["options"]["context_length"]
                          or record["input_ids"].numel() > plan["options"]["depth"] + 1):
                 raise ValueError("Unsupported decode window in target trace")
-            engine.forward("target", record["input_ids"].to(engine.device), start, accepted)
+            ids = record["input_ids"].to(engine.device, dtype=torch.int64)
+            if call and plan["options"].get("replay_with_mtp", False):
+                index_value, committed = proposal_parameters(
+                    call, start, previous_start, previous_ids.numel(), plan["options"]["depth"])
+                index = torch.tensor([index_value], dtype=torch.int64, device=engine.device)
+                drafts, _ = engine.propose(
+                    previous_ids, previous_hidden, previous_start, index, index_value,
+                    ids[:1], committed)
+                reference = record["input_ids"][1:].tolist()
+                candidate = drafts.detach().cpu().tolist()
+                if len(candidate) != plan["options"]["depth"]:
+                    raise ValueError("MTP replay returned an unexpected proposal length")
+                difference = next((row for row, (a, b) in enumerate(zip(reference, candidate)) if a != b), None)
+                proposals.append({"target_call": call, "committed": committed,
+                                  "sample_index": index_value, "reference": reference, "candidate": candidate,
+                                  "compared_tokens": len(reference), "first_difference": difference})
+            result = engine.forward("target", ids, start, accepted)
+            if plan["options"].get("replay_with_mtp", False):
+                previous_ids, previous_hidden, previous_start = ids, result[0], start
     finally:
         recorder.close()
     torch.npu.synchronize()
+    if plan["options"].get("replay_with_mtp", False):
+        write_json(directory / f"rank-{rank}" / "draft-proposals.json", proposals)
     torch.distributed.barrier()
     if rank == 0:
         write_manifest(directory, plan, effective, details)

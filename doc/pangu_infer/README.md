@@ -126,6 +126,25 @@ Direct загружает те же модели с той же speculative-ко
 состояние из Omni в direct не копируется. Поэтому последующее расхождение
 состояния остаётся видимым. Warmup генерации direct в replay не выполняются.
 
+Если target replay совпал, следующий контроль — добавить к той же direct-команде
+`--replay-with-mtp` и выбрать новый output. Повторная запись Omni не нужна.
+В этом режиме перед каждым decode target-вызовом выполняется обычный
+`DirectEngine.propose()`, включая первый proposal после prefill. Он получает
+hidden states предыдущего target-вызова и anchor из следующего окна Omni.
+Число committed-позиций и индекс sampling определяются по продвижению курсора
+в записи; после prefill используется последняя позиция prompt. Собственные
+предложения сохраняются для сравнения, но target продолжает получать исходные
+окна и target acceptance из Omni. Это проверяет влияние исполнения MTP на
+target-состояние и общие буферы, сохраняя одинаковые target-входы.
+
+В `rank-N/draft-proposals.json` сохраняются предложения direct и соответствующая
+часть окна Omni. Summary содержит `replay_with_mtp` и
+`first_draft_proposal_difference` с номером target-вызова, rank, индексом draft
+и двумя token IDs. Если исходное окно укорочено, сравнивается только его draft
+префикс; `compared_tokens` показывает число сопоставленных предложений.
+Несовпадение draft-предложений само по себе не означает ошибку: их проверяет
+основная модель. `--replay-with-mtp` требует положительный depth.
+
 Артефакты:
 
 - `target-trace/manifest.json`: workload, effective config, версии и оборудование.
@@ -135,7 +154,9 @@ Direct загружает те же модели с той же speculative-ко
 - `trace_comparison.json` в output direct: автоматическое сравнение всех ranks
   и вызовов, первая разница входов, metadata, logits и argmax. В stdout/runtime.log
   выводится краткий summary с top-5, top-1 margin и logits конкурирующего токена
-  для первого расхождения argmax.
+  для первого расхождения argmax. `first_metadata_detail` показывает первые
+  четыре отличающихся поля metadata с путями и значениями reference/candidate;
+  полные ограниченные списки находятся в `calls[].metadata_differences`.
 
 `--trace-layers all` дополнительно сохраняет tensor-выходы всех decoder layers
 и активные состояния трёх MoME convolutions до/после target forward. Для prefill

@@ -121,6 +121,7 @@ def compare_traces(reference, candidate, *, rtol=1e-3, atol=1e-3):
     first = {"inputs": None, "metadata": None, "logits": None, "argmax": None,
              "layer_output": None, "state_before": None, "state_after": None}
     counts = []
+    first_draft = None
     for rank in range(rp["options"]["tp"]):
         rd, cd = reference / f"rank-{rank}", candidate / f"rank-{rank}"
         rc = json.loads((rd / "index.json").read_text())["calls"]
@@ -128,6 +129,17 @@ def compare_traces(reference, candidate, *, rtol=1e-3, atol=1e-3):
         if rc != cc:
             raise ValueError(f"Trace call counts differ on rank {rank}: {rc} != {cc}")
         counts.append(rc)
+        if cp["options"].get("replay_with_mtp", False):
+            proposals = json.loads((cd / "draft-proposals.json").read_text())
+            if len(proposals) != rc - 1:
+                raise ValueError(f"Incomplete draft replay diagnostics on rank {rank}")
+            for proposal in proposals:
+                row = proposal["first_difference"]
+                if row is not None:
+                    location = {"target_call": proposal["target_call"], "rank": rank, "row": row,
+                                "reference": proposal["reference"][row], "candidate": proposal["candidate"][row]}
+                    if first_draft is None or (location["target_call"], rank) < (first_draft["target_call"], first_draft["rank"]):
+                        first_draft = location
         for call in range(rc):
             a = torch.load(rd / f"call-{call:05d}.pt", map_location="cpu", weights_only=True)
             b = torch.load(cd / f"call-{call:05d}.pt", map_location="cpu", weights_only=True)
@@ -166,9 +178,16 @@ def compare_traces(reference, candidate, *, rtol=1e-3, atol=1e-3):
                          "metadata_equal": first["metadata"] is None,
                          "argmax_equal": first["argmax"] is None,
                          "captured_layers": cp["trace_layers"], "first_differences": first,
-                         "interpretation": "Forced target inputs and source acceptance; draft generation is excluded. "
+                         "replay_with_mtp": cp["options"].get("replay_with_mtp", False),
+                         "first_draft_proposal_difference": first_draft,
+                         "interpretation": "Target inputs and target acceptance are forced from the source trace. "
                          "Exact differences alone do not establish a correctness bug. Inspect top-1 margins, "
                          "logical metadata and selected layer/state metrics."}
+    if first["metadata"] is not None:
+        location = first["metadata"]
+        entry = next(item for item in report["calls"]
+                     if item["target_call"] == location["target_call"] and item["rank"] == location["rank"])
+        report["summary"]["first_metadata_detail"] = entry["metadata_differences"][:4]
     if first["argmax"] is not None:
         location = first["argmax"]
         entry = next(item for item in report["calls"]
