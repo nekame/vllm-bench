@@ -172,7 +172,14 @@ def run(a, server_args, launch_plan, env, prompt):
                 summary["right_label"] = row["label"]
                 summary["output_difference"] = output_difference(measured[0]["output_token_ids"], row["output_token_ids"])
                 comparisons.append(summary)
-            incomplete = any(c["result"] == "INCOMPLETE_CAPTURE" for c in comparisons)
+            prolog_pairs = [c for c in comparisons if c.get('prolog')]
+            prolog_issues = [dict(right_label=c['right_label'], layer=layer, **item['first_coverage_issue'])
+                             for c in prolog_pairs for layer, item in c['prolog'].items() if item['first_coverage_issue']]
+            incomplete = any(c["result"] == "INCOMPLETE_CAPTURE" for c in comparisons) or bool(prolog_issues)
+            if prolog_pairs:
+                chosen = next((c for c in prolog_pairs if any(s['status'] == 'differences_observed' for s in c['prolog'].values())),
+                              next((c for c in prolog_pairs if any(s['status'] == 'incomplete_capture' for s in c['prolog'].values())), prolog_pairs[0]))
+                report['prolog'] = {'right_label': chosen['right_label'], 'layers': chosen['prolog']}
             different = next((c for c in comparisons if c["first_difference"] is not None), None)
             output_changed = next((c for c in comparisons if c["output_difference"] is not None), None)
             report["result"] = ("INCOMPLETE_CAPTURE" if incomplete else different["result"] if different else
@@ -187,6 +194,10 @@ def run(a, server_args, launch_plan, env, prompt):
                                        True if all(c["raw_ki_exact_equal"] is True for c in comparisons) else None),
                 "outputs_equal": output_changed is None,
                 "first_coverage_issue": next((c["first_coverage_issue"] for c in comparisons if c["first_coverage_issue"]), None)}
+            if prolog_pairs:
+                report['evidence']['prolog_coverage_issue_count'] = sum(
+                    s['coverage_issue_count'] for c in prolog_pairs for s in c['prolog'].values())
+                report['evidence']['first_prolog_coverage_issue'] = next(iter(prolog_issues), None)
     except (Exception, KeyboardInterrupt, SystemExit) as error:
         report.update(result="ERROR", error=str(error), failed_phase=phase, traceback=traceback.format_exc())
     finally:
@@ -206,6 +217,8 @@ def run(a, server_args, launch_plan, env, prompt):
     (output / "result.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     lines = ["result=" + report["result"], "first_difference=" + json.dumps(report["first_difference"]),
              "evidence=" + json.dumps(report["evidence"])]
+    if report.get('prolog'):
+        lines.append('prolog=' + json.dumps(report['prolog']))
     (output / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     return 1 if report["result"] in ("ERROR", "INCOMPLETE_CAPTURE") else 0
@@ -253,6 +266,8 @@ def main(argv=None):
                 server_args += ["--" + name.replace("_", "-"), str(value)]
         if not a.chunked_prefill:
             server_args.append("--no-chunked-prefill")
+        if a.indexer_ki_prolog:
+            server_args += ["--indexer-ki-prolog", "--indexer-ki-prolog-positions", a.indexer_ki_prolog_positions]
         if a.enable_expert_parallel:
             server_args.append("--enable-expert-parallel")
         server_options = serve.parser().parse_args(server_args)

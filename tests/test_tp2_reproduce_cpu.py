@@ -172,6 +172,11 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[1])),Handler).serve_forever()
                        "raw_ki_exact_equal": None if fault == "incomplete" else True,
                        "first_difference": None, "coverage_issue_count": int(fault == "incomplete"),
                        "first_coverage_issue": {"reason": "missing_rank"} if fault == "incomplete" else None}
+            if fault in ('prolog_incomplete', 'prolog_difference'):
+                summary['prolog'] = {'0': {'status': 'incomplete_capture' if fault == 'prolog_incomplete' else 'differences_observed',
+                    'coverage_issue_count': int(fault == 'prolog_incomplete'),
+                    'first_coverage_issue': {'rank': 1, 'reason': 'Requested Ki prolog slice is not completely recorded'} if fault == 'prolog_incomplete' else None,
+                    'first_stage_difference': {'rank': 1, 'field': 'wk_output', 'position': 2} if fault == 'prolog_difference' else None}}
             path.with_suffix(".summary.json").write_text(json.dumps(summary))
         ready = RuntimeError("server exited") if fault == "startup" else {"data": [{"id": "pangu-ki"}]}
         with patch.object(reproduce, "ensure_port_free"), patch.object(reproduce.subprocess, "Popen", side_effect=spawn), \
@@ -181,7 +186,7 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[1])),Handler).serve_forever()
             code = reproduce.main([*args, "--input-tokens", "5", "--output-tokens", "3", "--requests", "3", "--execute"])
         stop.assert_called_once_with(process, 30)
         self.assertFalse((capture / "ARM").exists())
-        self.assertEqual(len(output.getvalue().splitlines()), 3)
+        self.assertEqual(len(output.getvalue().splitlines()), 4 if fault in ('prolog_incomplete', 'prolog_difference') else 3)
         return code, json.loads((root / "run" / "result.json").read_text()), seen
 
     def test_warmup_arm_labels_identical_payloads_and_automatic_comparison(self):
@@ -208,6 +213,18 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[1])),Handler).serve_forever()
         self.assertEqual(code, 0)
         self.assertEqual(report["result"], "OUTPUT_TOKENS_DIFFER")
         self.assertEqual(report["first_difference"]["output_index"], 2)
+
+    def test_prolog_slice_failure_and_stage_difference_reach_final_summary(self):
+        for fault in ('prolog_incomplete', 'prolog_difference'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                code, report, _ = self.exercise(Path(directory), fault)
+                self.assertEqual(code, int(fault == 'prolog_incomplete'))
+                self.assertEqual(report['prolog']['right_label'], 'request-02')
+                if fault == 'prolog_incomplete':
+                    self.assertEqual(report['result'], 'INCOMPLETE_CAPTURE')
+                    self.assertEqual(report['evidence']['prolog_coverage_issue_count'], 2)
+                else:
+                    self.assertEqual(report['prolog']['layers']['0']['first_stage_difference']['field'], 'wk_output')
 
     def test_readiness_exit_timeout_and_occupied_port(self):
         process = NS(poll=lambda: 1, returncode=1)

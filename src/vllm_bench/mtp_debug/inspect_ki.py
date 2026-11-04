@@ -143,6 +143,9 @@ def main(argv=None):
         root = args.path / "capture" if (args.path / "capture").is_dir() else args.path
         frames, topologies = load_selected(root, args.left, args.right, args.layer)
         report = inspect(root, frames, expected_rank_count(topologies, args.expected_ranks), args.left, args.right, args.layer)
+        from vllm_bench.mtp_debug.compare_indexer_prolog import compare as compare_prolog
+        prolog = compare_prolog(root, frames, args.left, args.right, report['coverage']['expected_ranks'], args.layer)
+        report['prolog'] = prolog
         operator = root.parent / "server" / "operator_config.json"
         if operator.is_file():
             config = json.loads(operator.read_text())
@@ -152,6 +155,8 @@ def main(argv=None):
                 stream.write(json.dumps(report, indent=2, allow_nan=False) + "\n")
         for key in ("ki", "within_request_groups", "coverage"):
             print(key + "=" + json.dumps(report[key], allow_nan=False))
+        if prolog['status'] != 'not_captured':
+            print('prolog=' + json.dumps(prolog['summary'], allow_nan=False))
     except (ValueError, OSError, KeyError, TypeError, IndexError) as error:
         parser.error(str(error))
 

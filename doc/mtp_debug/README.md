@@ -399,6 +399,35 @@ bash scripts/inspect_ki.sh /data/profile-results/tp8-ki-repro/capture \
 
 В standalone сохраняется точный Ki выбранного вызова; slots/layout варьируются по standalone-сценариям, это не полное воспроизведение allocator/streams модели. Отчёты и каталоги replay не перезаписываются. CPU-тесты проверяют независимый prefill sidecar, полный snapshot сверх 64 токенов, сопоставление чанков, различение трёх источников расхождения, scale reshape `[1,4] → [1,2,2]`, реальную сигнатуру и inplace-снимки через mocks, ошибки/лимиты и переносимость replay. На NPU новый hook ещё требует smoke test; синхронные снимки могут скрыть гонку.
 
+### Срез формирования Ki до записи кэша
+
+При `KI_INPUT_DIFFERS` добавьте к прежней команде запуска `--indexer-ki-prolog`. Флаг доступен в `debug_spec`, `mtp_debug.serve` и `reproduce_ki.sh`; в `debug_spec` он подразумевает `--indexer-ki`, но по-прежнему требует `--rejection-windows`. По умолчанию сохраняются абсолютные позиции **1920–2047** только в prefill, на выбранных `--mome-layers` и rank. Диапазон меняется через `--indexer-ki-prolog-positions START:STOP`, где STOP исключён. Поддерживается `all`; для полного `x[8192,8192]` BF16 понадобится увеличить `--tensor-max-mib` как минимум до 128, а также общий budget. Узкий срез помещается в стандартный лимит 16 MiB на tensor.
+
+Пример полного запуска на TP8:
+
+```bash
+bash scripts/reproduce_ki.sh \
+  --model /data/models/pangu505b-mxfp8-12layers-mtp \
+  --operator-config /data/profile-configs/pangu-target-operators-tp8.json \
+  --output /data/profile-results/tp8-ki-prolog-16 \
+  --tp 8 --requests 16 --num-speculative-tokens 1 \
+  --attention-steps-per-request 256 --indexer-ki-steps-per-request 256 \
+  --tensor-budget-mib 16384 \
+  --indexer-ki-prolog --indexer-ki-prolog-positions 1920:2048 \
+  --execute
+```
+
+Hook сохраняет `x_entry`, фактический вход/выход `wk`, вход/выход RMSNorm, вход/выход Ki RoPE и соответствующие `cos/sin`. Query RoPE не принимается за Ki RoPE. Параметры и buffers `wk`/RMSNorm (включая зарегистрированные quant scales) снимаются до и после prolog. Фактический `ena_sp`, наличие Ki/Wi streams, тип quant method, параметры norm и RoPE сохраняются в runtime. Неохваченные внутренние workspaces/незарегистрированные tensor-атрибуты операторов не считаются проверенными параметрами. Этот срез поддерживает **non-SP** путь: при фактически включённом SP запись явно `unsupported`, а сравнение неполное.
+
+Срез хранится в прежних `ki-rank-*.jsonl` и tensor payloads. Автоматическое сравнение добавляет `prolog` в отчёты каждой пары и четвёртую строку `prolog=` в итоговый `summary.txt`/терминал `reproduce_ki`. Для повторного анализа выбранной пары:
+
+```bash
+bash scripts/inspect_ki.sh /data/profile-results/tp8-ki-prolog-16/capture \
+  --right request-11 --output ki-prolog-ranks.json
+```
+
+Для разбора достаточно прислать строку `prolog=`. В ней есть `status`, `first_stage_difference` с численными метриками первой строки, `first_stage_groups`, краткий список различающихся стадий, изменения параметров/runtime, нарушение равенства на переходах и coverage. `first_stage_difference` упорядочивает снятые стадии и не доказывает ошибку конкретного оператора. Полный JSON содержит группы rank для каждой стадии/параметров/runtime, подробные различия и coverage issues. Анализ проверяет переходы `x_entry → wk_input`, `wk_output → norm_input`, `norm_output → rope_input`, `rope_output → cache_entry`, а также неизменность параметров внутри prolog. Совпадение распространяется только на запрошенный диапазон: пропущенные позиции, stages, ranks, повреждённые payloads, SP и лимиты дают `incomplete_capture`, старый capture без флага — `not_captured`. Копии на CPU синхронизируют streams и могут скрыть исходное расхождение; новый hook локально проверен CPU mocks, запуск на NPU требует проверки на сервере.
+
 ## Standalone-тест indexer_quant_cache без модели
 
 Для отдельной проверки записи MXFP8 K-кэша QLI v2 не нужны checkpoint, сервер vLLM или TP8. Нужен один A5 NPU и серверное Python-окружение с `torch`, `torch_npu`, CANN и установленным `cann_ops_transformer`, содержащим `indexer_quant_cache`.

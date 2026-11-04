@@ -33,6 +33,8 @@ def prepare_ki_frame(runner, frame, bound, metadata):
              "forward_index": frame["forward_index"], "phase": phase, "step": step,
              "status": "capturing", "calls": []}
     frame["_indexer_ki"] = trace
+    if os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI_PROLOG") == "1":
+        trace['prolog_capture'] = {'positions': os.environ.get('PANGU_SPEC_DEBUG_INDEXER_KI_PROLOG_POSITIONS', '1920:2048')}
     if step >= int(os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI_STEPS", "32")):
         trace.update(status="skipped", reason="per_request_step_quota")
         return
@@ -150,6 +152,10 @@ def install_ki(runner, allowed):
         if not getattr(indexer, "use_qli_v2", False):
             raise RuntimeError("--indexer-ki requires QLIv2 MXFP8 indexer")
         scope_update(indexer, prefix, int(match[1]))
+        if os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI_PROLOG") == "1":
+            from vllm_bench.mtp_debug.indexer_prolog_trace import scope_prolog, parse_positions
+            scope_prolog(indexer, module, prefix, int(match[1]),
+                         parse_positions(os.environ.get("PANGU_SPEC_DEBUG_INDEXER_KI_PROLOG_POSITIONS", "1920:2048")))
         modules.append({"prefix": prefix, "layer": int(match[1])})
     if not modules:
         raise RuntimeError("No selected QLIv2 indexer cache writers found")

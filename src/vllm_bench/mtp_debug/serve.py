@@ -22,6 +22,8 @@ def parser():
     p.add_argument("--mome-layers", default="0")
     p.add_argument("--attention-steps-per-request", type=int, default=32)
     p.add_argument("--indexer-ki-steps-per-request", type=int, default=32)
+    p.add_argument("--indexer-ki-prolog", action="store_true")
+    p.add_argument("--indexer-ki-prolog-positions", default="1920:2048")
     p.add_argument("--tensor-max-mib", type=int, default=16)
     p.add_argument("--tensor-budget-mib", type=int, default=512)
     p.add_argument("--limit", type=int, default=1000)
@@ -29,6 +31,8 @@ def parser():
 
 
 def build_debug_plan(a):
+    from vllm_bench.mtp_debug.indexer_prolog_trace import parse_positions
+    parse_positions(a.indexer_ki_prolog_positions)
     if a.tp not in (2, 8) or a.max_num_seqs != 1 or not a.enforce_eager:
         raise ValueError("Ki debugging requires TP2/TP8, DP1/PP1, eager and max-num-seqs=1")
     if not 1 <= a.port <= 65535 or a.block_size < 1:
@@ -59,6 +63,8 @@ def build_debug_plan(a):
                "--rejection-windows", "--indexer-ki", "--attention-ranks", "all", "--mome-layers", a.mome_layers]
     for option in ("attention_steps_per_request", "indexer_ki_steps_per_request", "tensor_max_mib", "tensor_budget_mib", "limit"):
         command += ["--" + option.replace("_", "-"), str(getattr(a, option))]
+    if a.indexer_ki_prolog:
+        command += ["--indexer-ki-prolog", "--indexer-ki-prolog-positions", a.indexer_ki_prolog_positions]
     command += ["--execute", "--", *engine]
     plan.update(command=command, engine_command=engine, profiler_enabled=False,
                 diagnostic_overhead=True, capture_output=str(capture))

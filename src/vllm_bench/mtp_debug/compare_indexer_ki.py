@@ -211,6 +211,12 @@ def compare(root, frames, left_name, right_name, expected_ranks=None):
                         "Cache retention compares recorded prefill writes with the first decode read, accounting for captured decode writes.",
                         "No root-cause claim or numerical quantization reference; physical slots/layouts may differ between requests.",
                         "Exact CPU copies synchronize streams and can change reproducibility."]}
+    from vllm_bench.mtp_debug.compare_indexer_prolog import compare as compare_prolog
+    layers = sorted({c['layer'] for f in frames for c in f.get('prolog_calls', [])})
+    if any(f.get('prolog_capture') for f in frames):
+        layers = sorted(set(layers) | {c['layer'] for f in frames for c in f.get('calls', [])})
+    report['prolog'] = {str(layer): compare_prolog(root, frames, left_name, right_name, expected_ranks, layer)
+                        for layer in layers}
     return report, replay
 
 
@@ -263,8 +269,12 @@ def main(argv=None):
         summary = {"result": report["result"], "raw_ki_exact_equal": report["raw_ki_exact_equal"],
                    "first_difference": brief, "coverage_issue_count": len(report["coverage_issues"]),
                    "first_coverage_issue": next(iter(report["coverage_issues"]), None), "replays": report.get("replays")}
+        if report['prolog']:
+            summary['prolog'] = {layer: item['summary'] for layer, item in report['prolog'].items()}
         lines = ["result=" + summary["result"], "first_difference=" + json.dumps(brief),
                  "evidence=" + json.dumps({k: summary[k] for k in ("raw_ki_exact_equal", "coverage_issue_count", "first_coverage_issue")})]
+        if 'prolog' in summary:
+            lines.append('prolog=' + json.dumps(summary['prolog']))
         for path, content in zip(outputs, (json.dumps(report, indent=2, allow_nan=False) + "\n",
                                           json.dumps(summary, indent=2, allow_nan=False) + "\n", "\n".join(lines) + "\n")):
             with path.open("x") as stream:

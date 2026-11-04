@@ -25,11 +25,20 @@ def main():
     parser.add_argument("--attention-steps-per-request", type=int, default=32)
     parser.add_argument("--indexer-ki", action="store_true", help="Capture raw QLIv2 ki and written cache in prefill/decode; implies attention tensors")
     parser.add_argument("--indexer-ki-steps-per-request", type=int, default=32)
+    parser.add_argument("--indexer-ki-prolog", action="store_true", help="Capture prefill Ki producer stages and parameters; implies --indexer-ki")
+    parser.add_argument("--indexer-ki-prolog-positions", default="1920:2048", help="Absolute prefill slice START:STOP, stop excluded, or all")
     parser.add_argument("--tensor-max-mib", type=int, default=16)
     parser.add_argument("--tensor-budget-mib", type=int, default=512)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.indexer_ki_prolog:
+        args.indexer_ki = True
+    from vllm_bench.mtp_debug.indexer_prolog_trace import parse_positions
+    try:
+        parse_positions(args.indexer_ki_prolog_positions)
+    except ValueError as error:
+        parser.error(str(error))
     if args.indexer_ki:
         args.attention_tensors = True
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -70,6 +79,8 @@ def main():
                 "PANGU_SPEC_DEBUG_ATTENTION_STEPS": str(args.attention_steps_per_request),
                 "PANGU_SPEC_DEBUG_INDEXER_KI": "1" if args.indexer_ki else "0",
                 "PANGU_SPEC_DEBUG_INDEXER_KI_STEPS": str(args.indexer_ki_steps_per_request),
+                "PANGU_SPEC_DEBUG_INDEXER_KI_PROLOG": "1" if args.indexer_ki_prolog else "0",
+                "PANGU_SPEC_DEBUG_INDEXER_KI_PROLOG_POSITIONS": args.indexer_ki_prolog_positions,
                 "PANGU_SPEC_DEBUG_TENSOR_MAX_MIB": str(args.tensor_max_mib),
                 "PANGU_SPEC_DEBUG_TENSOR_BUDGET_MIB": str(args.tensor_budget_mib),
                 "PYTHONPATH": child_pythonpath}
