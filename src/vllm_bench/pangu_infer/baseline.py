@@ -109,7 +109,17 @@ def main(argv=None):
         raise RuntimeError("Offline engine did not trace a compiled model")
     if a["profile"]:
         engine.start_profile()
-    records = [request(engine, plan, f"measure-{i}", a["max_new_tokens"]) for i in range(a["repeats"])]
+    trace_directory = output / "target-trace"
+    if a.get("trace_target", False):
+        from vllm_bench.pangu_infer.target_trace import install_target_trace, finish_target_trace
+        engine.collective_rpc(install_target_trace, args=(str(trace_directory), plan["trace_layers"]))
+    try:
+        records = [request(engine, plan, f"measure-{i}", a["max_new_tokens"]) for i in range(a["repeats"])]
+    finally:
+        if a.get("trace_target", False):
+            counts = engine.collective_rpc(finish_target_trace)
+            if len(set(counts)) != 1 or min(counts) < 2:
+                raise RuntimeError("Target trace requires matching TP call counts including decode")
     if a["profile"]:
         engine.stop_profile()
     states_after = engine.collective_rpc(worker_state)
@@ -122,10 +132,15 @@ def main(argv=None):
         raise ValueError("Offline ranks disagree on effective configuration")
     effective = {key: first[key] for key in ("operator", "parallel", "block_size", "mamba_block_size")}
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
-    save_result(output, plan, records, effective, {
+    details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,
         "workers_after": states_after, "versions": versions(), "hardware": first["hardware"],
-        "timing_boundary": "offline step outputs, including engine scheduling and IPC; no HTTP"})
+        "timing_boundary": "offline step outputs, including engine scheduling and IPC; no HTTP"}
+    save_result(output, plan, records, effective, details)
+    if a.get("trace_target", False):
+        from vllm_bench.pangu_infer.target_trace import write_manifest
+        write_manifest(trace_directory, plan, effective, details)
+        print(f"[target-trace] calls_per_rank={counts[0]} directory={trace_directory}", flush=True)
 
 
 if __name__ == "__main__":

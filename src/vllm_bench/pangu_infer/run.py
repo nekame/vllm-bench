@@ -78,6 +78,13 @@ def parser():
     p.add_argument("--profile", action="store_true", help="Diagnostic CPU/NPU traces; not benchmark timings")
     p.add_argument("--model-timing", action="store_true",
                    help="Direct-only diagnostic: synchronized decode forward + LM head times, logged after each request")
+    trace = p.add_mutually_exclusive_group()
+    trace.add_argument("--trace-target", action="store_true",
+                       help="Record Omni target inputs, metadata and logits for one eager request")
+    trace.add_argument("--replay-target", type=Path,
+                       help="Replay an Omni target-trace directory in direct, without generating draft tokens")
+    p.add_argument("--trace-layers", default="",
+                   help="Also record layer outputs and MoME states: all or comma-separated target layer indices")
     p.add_argument("--additional-config", type=Path)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Offline engine memory budget")
     p.add_argument("--execute", action="store_true")
@@ -89,6 +96,16 @@ def make_plan(a):
                for key, value in vars(a).items()}
     if a.model_timing and a.engine != "direct":
         raise ValueError("--model-timing requires --engine direct; stock OmniInfer instrumentation is not supported")
+    diagnostic_trace = a.trace_target or a.replay_target is not None
+    if diagnostic_trace:
+        if a.mode != "eager" or a.temperature != 0 or a.repeats != 1:
+            raise ValueError("Target trace/replay requires --mode eager --temperature 0 --repeats 1")
+        if a.profile or a.model_timing:
+            raise ValueError("Target trace/replay cannot be combined with profiling or model timing")
+        if (a.trace_target and a.engine != "omni") or (a.replay_target and a.engine != "direct"):
+            raise ValueError("Use --trace-target with omni and --replay-target with direct")
+    elif a.trace_layers:
+        raise ValueError("--trace-layers requires target trace or replay")
     if a.engine == "omni" and a.mode == "compile":
         raise ValueError("Stock OmniInfer bypasses compile-only without FULL graphs; use a direct run or another baseline mode")
     if min(a.context_length, a.repeats, a.warmup) < 1 or a.max_new_tokens < 2:
@@ -170,7 +187,7 @@ def make_plan(a):
              "tp": a.tp, "depth": a.depth, "mode": a.mode,
              "temperature": a.temperature, "top_k": a.top_k, "top_p": a.top_p,
              "seed": a.seed, "max_new_tokens": a.max_new_tokens, "respect_eos": a.respect_eos}
-    return {"format": "pangu-direct-plan-v1", "options": options, "config": config,
+    plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
             "operator_config": operator, "additional_config": additional,
             "prompt_ids": prompt, "prompt_sha256": fingerprint(prompt),
             "comparison_sha256": fingerprint(match), "max_model_len": max_len,
@@ -178,6 +195,12 @@ def make_plan(a):
             "quantization": quantization, "model_scope": scope,
             "predictor_layers": predictor_sequence(config, a.depth) if a.depth else [],
             "upstream_commit": UPSTREAM, "validation": "NPU execution not yet performed"}
+    if diagnostic_trace:
+        from vllm_bench.pangu_infer.target_trace import parse_layers, validate_replay
+        plan["trace_layers"] = parse_layers(a.trace_layers, config["num_hidden_layers"])
+        if a.replay_target:
+            validate_replay(plan)
+    return plan
 
 
 def child_environment(plan):

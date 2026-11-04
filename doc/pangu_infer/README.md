@@ -79,6 +79,106 @@ LLMEngine, без HTTP; в его время входят engine scheduling и I
 детерминированный synthetic prompt, зависящий от seed и vocab_size. Для
 воспроизводимого анализа настоящих запросов используйте явный файл.
 
+## Диагностика расхождений target: запись Omni и replay в direct
+
+Этот режим сравнивает основную модель на одинаковых входных окнах. Он нужен,
+когда самостоятельные генерации расходятся: после первого отличающегося токена
+обычное сравнение logits уже смешивает разные входы и состояния.
+
+Используйте `eager`, `temperature=0` и `repeats=1`. Начните с 32 выходных токенов.
+Checkpoint, operator/additional config, prompt, seed, TP, depth, max-new-tokens
+и остальные параметры workload должны совпадать в обеих командах. В частности,
+при replay остаётся depth 7: замена на `--no-mtp` изменила бы target state spec.
+
+Пример из корня checkout, с настроенным абсолютным `PYTHONPATH`:
+
+```bash
+python -m vllm_bench.pangu_infer.run \
+  --engine omni --model /models/pangu-ultra-12-mtp \
+  --operator-config /configs/pangu-tp2.json \
+  --tp 2 --depth 7 --mode eager --temperature 0 \
+  --context-length 8192 --max-new-tokens 32 --repeats 1 \
+  --trace-target --trace-layers all \
+  --output /results/omni-target-trace --execute
+
+python -m vllm_bench.pangu_infer.run \
+  --engine direct --model /models/pangu-ultra-12-mtp \
+  --operator-config /configs/pangu-tp2.json \
+  --tp 2 --depth 7 --mode eager --temperature 0 \
+  --context-length 8192 --max-new-tokens 32 --repeats 1 \
+  --replay-target /results/omni-target-trace --trace-layers all \
+  --output /results/direct-target-replay --execute
+```
+
+Если исходная команда использует `--prompt-ids`, `--additional-config` или другой
+seed, передайте их в обе команды. Без `--execute` работает проверка плана.
+Режимы trace/replay запускаются отдельно, через `run`, а не через `matrix`.
+
+Omni прогревается обычным способом. Затем worker RPC устанавливает обычные
+PyTorch forward hooks на target, его logits processor и выбранные decoder layers
+на всех TP ranks. Записывается один измеряемый запрос, включая его prefill;
+после него hooks удаляются. Файлы OmniInfer и методы модели не изменяются.
+
+Direct загружает те же модели с той же speculative-конфигурацией, обнуляет
+собственные кеши один раз и воспроизводит только target-вызовы. Входные окна,
+позиции и значения MoME acceptance берутся из записи Omni. Собственные draft
+предложения и sampling не выполняются. Кеши между target-вызовами сохраняются;
+состояние из Omni в direct не копируется. Поэтому последующее расхождение
+состояния остаётся видимым. Warmup генерации direct в replay не выполняются.
+
+Артефакты:
+
+- `target-trace/manifest.json`: workload, effective config, версии и оборудование.
+- `target-trace/rank-N/index.json`: число target-вызовов.
+- `target-trace/rank-N/call-XXXXX.pt`: CPU tensors — входы, позиции, полные logits
+  и выбранные логические поля attention metadata, отдельно для prefill/decode.
+- `trace_comparison.json` в output direct: автоматическое сравнение всех ranks
+  и вызовов, первая разница входов, metadata, logits и argmax. В stdout/runtime.log
+  выводится краткий summary с top-5, top-1 margin и logits конкурирующего токена
+  для первого расхождения argmax.
+
+`--trace-layers all` дополнительно сохраняет tensor-выходы всех decoder layers
+и активные состояния трёх MoME convolutions до/после target forward. Для prefill
+выходы слоёв ограничены последней локальной строкой, для decode сохраняются
+все строки. В полном prompt KV cache не копируется. Можно выбрать, например,
+`--trace-layers 0,5,11`; без опции записываются только входы, metadata и logits.
+Replay может сравнивать подмножество уже записанных слоёв. Для расширения набора
+нужна новая запись Omni.
+
+Сравнение metadata исключает физические номера блоков и адреса: аллокаторы
+движков различаются. В отчёт входят только поля, явно перечисленные в
+`target_trace.METADATA_FIELDS`; равенство этого набора не означает равенство всех
+внутренних полей backend. MoME states сравниваются по активному блоку каждого
+слоя независимо от его физического номера. Содержимое состояния перед prefill
+может различаться после прогрева; при `num_computed_tokens=0` оно не обязательно
+участвует в вычислении. Его отличие само по себе не доказывает ошибку.
+
+Отчёт содержит exact equality, max absolute error, RMSE и `allclose` с явно
+указанными `rtol=1e-3`, `atol=1e-3`. Эти пороги диагностические и не устанавливают
+допустимую погрешность модели. Малое отличие logits само по себе не доказывает
+ошибку. При смене argmax сначала смотрите top-1 margin, metadata и состояние
+первого расходящегося слоя. Replay изолирует target-путь; он не проверяет
+правильность самостоятельной генерации MTP-предложений.
+
+Файлы `.pt` загружаются с `weights_only=True`. Их можно сравнить повторно на
+машине с CPU PyTorch, без NPU и OmniInfer:
+
+```bash
+python -m vllm_bench.pangu_infer.trace_compare \
+  --reference /results/omni-target-trace \
+  --candidate /results/direct-target-replay \
+  --output /results/target-comparison.json
+```
+
+CLI возвращает 1 при отличии входов, логических metadata или argmax. При
+отличии только численных значений с одинаковым argmax — 0; точные метрики
+сохраняются в отчёте. Source-запуск помечается `diagnostic`; replay создаёт
+`trace_comparison.json`, а не benchmark `result.json`. Копирование тензоров на
+CPU и запись файлов синхронизируют вычисления, поэтому время этих запусков
+не используется для сравнения производительности. Полные logits и состояния
+выбранных слоёв могут занимать значительное место — размер растёт с числом
+target-вызовов, TP ranks и выбранных слоёв.
+
 ## Режимы исполнения
 
 | `--mode` | Прямой runtime | Offline baseline |

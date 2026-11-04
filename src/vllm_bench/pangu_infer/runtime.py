@@ -400,6 +400,10 @@ def main(argv=None):
             engine = DirectEngine(plan, cfg, device, rank, target, draft)
             torch.npu.synchronize()
             cache_init_seconds = time.perf_counter() - started
+            if a.get("replay_target"):
+                from vllm_bench.pangu_infer.target_trace import replay_target
+                replay_target(engine, plan, output)
+                return
             warmup_start = time.perf_counter()
             for _ in range(a["warmup"]):
                 engine.generate(max(2 * (a["depth"] + 1) + 1, 17))
