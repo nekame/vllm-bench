@@ -8,7 +8,7 @@
     "conf/layer_profile/suite.json": "7b9ae896ac1996dac40604ebbbb69a077a9f2a5620fe4dff577566240f40f161",
     "doc/CONTRIBUTING.md": "31a88302e4827022ebcc10082d32f94fa66042102711b532f5c21639a6595afd",
     "doc/layer_profile/README.md": "96d10e25dded6055f2d8e60355f2f86ffa1b49683612c771b1400adefad77980",
-    "doc/mtp_debug/README.md": "380e318978fd582deae3573e60a7eff9ea5e9eb19ea663678f89536e7306c6bc",
+    "doc/mtp_debug/README.md": "edbf8458f01a0447972e0198f53856dec6f6ae011dffafd5f516a970c6c2dd3e",
     "doc/mtp_profile/README.md": "7e8f28879945d10204269ec9254c4acd17bc42e9d51a16be290dd9af7905fda6",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
@@ -20,6 +20,7 @@
     "scripts/find_first_difference.sh": "6e3b2c0611ec1f634ce596fbf1f8d7f8a3adfe450ca09970d1255b4c103bd7eb",
     "scripts/inspect_indexer.sh": "fdd24db1f96b90e77fc91f948693206a7663e7f28c50b398e1c53f8e38ff0736",
     "scripts/inspect_ki.sh": "0b973f1fa40bc08bedb3186bc5887143b1c6230fc65b8c16282698b51c96e02c",
+    "scripts/inspect_ki_runtime.sh": "54651f1c9890b6f60aa5edb2c2185d102d2d88a9217a76c9410709fe6dd41b92",
     "scripts/reproduce_ki.sh": "b9ffe79880f0268e99e7cba4788307c6c7d4e1da4439232b9575b59772bf15b9",
     "scripts/test_indexer_quant_cache.sh": "2e0027e2906d1d2391ff135132d5898383955d8a9194eea60be872ae94f584d6",
     "src/vllm_bench/__init__.py": "4d92c99389ad87fcd0b559f1e3010b8f998e442bdde4d04bce4cb204ebd29039",
@@ -50,6 +51,7 @@
     "src/vllm_bench/mtp_debug/indexer_prolog_trace.py": "42d85df71734a2972eb8874d61b372c89e96acb26ab235027fed57d197e40563",
     "src/vllm_bench/mtp_debug/inspect_indexer.py": "8dfa921da007393f6144dfbee48df04476f1dcadd528d14f9a1a4e0a6cf36c14",
     "src/vllm_bench/mtp_debug/inspect_ki.py": "92e4bb77533cc51555924ba8db5fe76cf46285d12ed6ed2cb60580a07b566704",
+    "src/vllm_bench/mtp_debug/inspect_ki_runtime.py": "056bd24fc5ba6b7db6da30a17d686054f3e462798266c6a549f2ec03297edac0",
     "src/vllm_bench/mtp_debug/instrumentation/sitecustomize.py": "6e33c2b351a48660d77715aff1d102dac5cf6ae37b0950dbe9886d127370957b",
     "src/vllm_bench/mtp_debug/locate_output.py": "6def3068c8ae8bf1ff252ca6b9fbf0dcd1769f95ef58cd57380c3455e75b361b",
     "src/vllm_bench/mtp_debug/mome_tensors.py": "ef40943040e52cc3cc08b860abb428e74c4e7fdf26a2ef70004204398a638f57",
@@ -87,6 +89,7 @@
     "tests/test_indexer_quant_cache_cpu.py": "600dd2361865abf750eea57a5194bc8ff42105da998325e2bced1435279ddafa",
     "tests/test_inspect_indexer_cpu.py": "aa7b60e5b77bcb4cb8e2d525d7147c4cf3da41be4fb79aab8a85b373501af6ec",
     "tests/test_inspect_ki_cpu.py": "65841116c6e68c31e5fa4d73374ef5962fbb683bd1350cd6366a2af94ae060c2",
+    "tests/test_inspect_ki_runtime_cpu.py": "f53cf70b701e56048d852ff7352077427ff4fbb127c8e4344dc4c459902ab09f",
     "tests/test_layout_cpu.py": "e9dedc355ce1a5e122e62a96e71b6f4d11a53a8d91ab99fc26f0c47cd9af5a8c",
     "tests/test_locate_output_cpu.py": "56e9fd6e7054d98d5f91a5626715d3f30b301e73e5e456a91db22597ad215593",
     "tests/test_mome_tensors_cpu.py": "9b709049104beabe5e73308ab47b8ddb900f44b36ac6c276731ce8247da673d2",
@@ -97,7 +100,7 @@
     "tests/test_tp2_reproduce_cpu.py": "ee15ef9f99d198face782e822ea95358341c81504079ffcbfaebcfafa3d22e88"
   },
   "validation": {
-    "cpu_tests": 200,
+    "cpu_tests": 203,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python3 -m unittest discover -s tests",
     "npu_execution_performed": false,
@@ -128,6 +131,7 @@
     "mtp_indexer_metadata_inspection_validation": "CPU: preserve raw QLI metadata differences as unverified operands; bounded element sample; same-context operand/output equality; missing/partial fields remain unknown; first captured non-metadata difference extracted without rerunning model",
     "mtp_ki_rank_inspection_validation": "CPU: exact raw prefill Ki grouping within each request across ranks, complete-position/input/layout checks, all changed row ranges, first-row numerical metrics, missing payload coverage, reordered JSON and bounded CLI output; existing captures only, no model execution",
     "mtp_ki_prolog_validation": "CPU: prefill-only non-SP producer slice, actual wk/norm/Ki-RoPE boundaries with query-RoPE exclusion, exact pre-inplace snapshots and unchanged model returns, registered parameters/buffers before/after, quotas/budget and exception context reset; cross-request/chunk/rank comparison, stage groups and transition consistency, missing/corrupt/rank/slice/stage coverage, legacy captures, launch forwarding and final automatic summary including incomplete prolog",
-    "mtp_ki_prolog_npu_validation": "not performed locally; needs A5 server smoke test; synchronous capture can hide races; captures registered parameters/buffers, not unregistered workspaces"
+    "mtp_ki_prolog_npu_validation": "not performed locally; needs A5 server smoke test; synchronous capture can hide races; captures registered parameters/buffers, not unregistered workspaces",
+    "mtp_ki_runtime_inspection_validation": "CPU: streaming scalar-header decode skipping, reordered JSON fallback, automatic request from result.json, three-line output, optional source evidence, missing/ambiguous/conflicting runtime flags and overwrite rejection; no model/tensor execution required"
   }
 }

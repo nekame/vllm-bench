@@ -428,6 +428,21 @@ bash scripts/inspect_ki.sh /data/profile-results/tp8-ki-prolog-16/capture \
 
 Для разбора достаточно прислать строку `prolog=`. В ней есть `status`, `first_stage_difference` с численными метриками первой строки, `first_stage_groups`, краткий список различающихся стадий, изменения параметров/runtime, нарушение равенства на переходах и coverage. `first_stage_difference` упорядочивает снятые стадии и не доказывает ошибку конкретного оператора. Полный JSON содержит группы rank для каждой стадии/параметров/runtime, подробные различия и coverage issues. Анализ проверяет переходы `x_entry → wk_input`, `wk_output → norm_input`, `norm_output → rope_input`, `rope_output → cache_entry`, а также неизменность параметров внутри prolog. Совпадение распространяется только на запрошенный диапазон: пропущенные позиции, stages, ranks, повреждённые payloads, SP и лимиты дают `incomplete_capture`, старый capture без флага — `not_captured`. Копии на CPU синхронизируют streams и могут скрыть исходное расхождение; новый hook локально проверен CPU mocks, запуск на NPU требует проверки на сервере.
 
+Чтобы достать только три runtime-флага RoPE из большого JSONL, не открывая файл вручную:
+
+```bash
+bash scripts/inspect_ki_runtime.sh /data/profile-results/tp8-ki-prolog-16
+```
+
+Запрос определяется по `result.json → prolog.right_label`, rank и layer по умолчанию 0. Явный выбор, в том числе при передаче одного файла:
+
+```bash
+bash scripts/inspect_ki_runtime.sh /data/profile-results/tp8-ki-prolog-16/capture \
+  --request request-11 --rank 0 --layer 0
+```
+
+Вывод — ровно `use_rope_fusion_op=…`, `rope_interleave=…`, `ki_stream_enabled=…`. JSONL читается построчно; в штатном формате decode bodies не разбираются. Tensor payloads не читаются. Все выбранные prefill-вызовы проверяются на согласованность флагов. Отсутствующие флаги, неоднозначный request и различающиеся значения дают ошибку. Необязательный `--output runtime.json` сохраняет также source file/line и статус вызова, не перезаписывая существующий файл; это извлечение runtime, а не подтверждение полноты tensor capture.
+
 ## Standalone-тест indexer_quant_cache без модели
 
 Для отдельной проверки записи MXFP8 K-кэша QLI v2 не нужны checkpoint, сервер vLLM или TP8. Нужен один A5 NPU и серверное Python-окружение с `torch`, `torch_npu`, CANN и установленным `cann_ops_transformer`, содержащим `indexer_quant_cache`.
