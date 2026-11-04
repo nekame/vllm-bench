@@ -313,6 +313,8 @@ bash scripts/inspect_indexer.sh attention-comparison.json
 
 Если key/scales сравниваются по байтам, скрипт сам переводит `first_different_offsets` в логические позиции по длине строки и `compared_positions`. Для короткого вывода только истории используйте `bash scripts/inspect_indexer.sh attention-comparison.json --history-summary`: три строки содержат context с вариантом оператора, `key_rows` и `key_scales`. `sampled_different_positions` относится к сохранённым первым смещениям; полный список позиций известен только при `all_different_positions_known=true`. Число отличающихся байтов не является численной величиной ошибки scales. Режим indexer нужно определять по оператору и его параметрам: `hif8_ds_mla` описывает attention KV и сам по себе не доказывает dtype scales indexer.
 
+Если `first_boundary` указывает на `indexer_kernel_input.metadata`, выполните `bash scripts/inspect_indexer.sh attention-comparison.json --difference-summary`. По умолчанию берётся контекст first_boundary; явные `--rank/--position/--layer` также поддерживаются. Три строки показывают первые три отличающихся элемента metadata, равенство операндов/выходов выбранного контекста и первое найденное отличие вне этого поля во всём записанном сравнении. `null` или `unavailable` не означают равенство. Отсутствие другого отличия относится только к сравнимому capture, особенно при квоте. Metadata сохраняется в исходном отчёте как реальный аргумент оператора с непроверенной семантикой; этот дополнительный вывод не доказывает, что metadata не влияет на результат или что все аргументы kernel равны.
+
 Основные значения `result`:
 
 | Значение | Что найдено |

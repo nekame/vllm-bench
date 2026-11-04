@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from vllm_bench.mtp_debug.inspect_indexer import extract, history_locations, main
+from vllm_bench.mtp_debug.inspect_indexer import extract, history_locations, difference_summary, main
 
 
 def fixture():
@@ -17,6 +17,43 @@ def fixture():
 
 
 class IndexerReportTests(unittest.TestCase):
+    def test_metadata_kept_as_unknown_operand_and_later_difference_is_reported(self):
+        report = fixture()
+        records = report["comparisons"][0]["records"]
+        metadata = {"rank": 0, "position": 8193, "layer": 0, "boundary": "indexer_kernel_input", "field": "metadata",
+                    "status": "compared", "exact_equal": False, "different_elements": 9,
+                    "first_differences": [{"index": [i], "left": 0, "right": 1} for i in range(9)]}
+        later = {"rank": 1, "position": 8195, "layer": 0, "boundary": "indexer_kernel_output", "field": "indices",
+                 "status": "compared", "exact_equal": False}
+        records.append(metadata)
+        records.append({**later, "position": 8193, "rank": 0, "exact_equal": True})
+        report["findings"] = [metadata, later]
+        summary = difference_summary(report)
+        self.assertFalse(summary["metadata"]["exact_equal"])
+        self.assertEqual(len(summary["metadata"]["first_differences"]), 3)
+        self.assertTrue(summary["operands_equal"]["indexer_indices"])
+        self.assertIsNone(summary["operands_equal"]["attention_output"])
+        self.assertIn("attention_output", summary["operands_equal"]["unavailable"])
+        self.assertEqual(summary["first_non_metadata_difference"]["position"], 8195)
+        self.assertEqual(report["findings"][0], metadata)
+
+    def test_difference_summary_cli_is_three_lines_and_retains_incomplete_coverage(self):
+        report = fixture()
+        report["findings"] = []
+        report["coverage_issues"] = [{"reason": "attention_trace_absent_or_skipped"}]
+        records = report["comparisons"][0]["records"]
+        records[0].update(coverage_complete=False)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "comparison.json"
+            path.write_text(json.dumps(report))
+            with contextlib.redirect_stdout(io.StringIO()) as stream:
+                main([str(path), "--difference-summary"])
+        lines = dict(line.split("=", 1) for line in stream.getvalue().splitlines())
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(json.loads(lines["metadata"])["coverage_issue_count"], 1)
+        self.assertIsNone(json.loads(lines["operands_equal"])["query"])
+        self.assertIsNone(json.loads(lines["first_non_metadata_difference"]))
+
     def test_byte_history_maps_actual_positions_and_respects_offset_sample_limit(self):
         scales = {"compared_positions": list(range(8194)), "left_nbytes": 8194 * 4, "right_nbytes": 8194 * 4,
                   "different_bytes": 16, "first_different_offsets": [17167, 17176, 21653, 22752]}

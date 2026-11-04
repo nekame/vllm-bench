@@ -64,16 +64,77 @@ def extract(report, rank=None, position=None, layer=None, history_summary=False)
     return result
 
 
+def difference_summary(report, rank=None, position=None, layer=None):
+    selected = extract(report, rank, position, layer)
+    if not isinstance(report.get("findings"), list):
+        raise ValueError("Use the full attention-comparison JSON with findings")
+    comparison = next(item for item in report["comparisons"] if all(
+        item.get(key) == selected[key] for key in ("rank", "position", "layer")))
+    records = comparison.get("records", [])
+
+    def find(boundary, aliases):
+        matches = [r for r in records if r.get("boundary") == boundary and r.get("field") in aliases]
+        return matches[0] if len(matches) == 1 else {"status": "missing" if not matches else "ambiguous"}
+
+    metadata = find("indexer_kernel_input", ("metadata",))
+    header = {key: selected[key] for key in ("rank", "position", "layer")}
+    header.update({key: metadata[key] for key in ("status", "exact_equal", "different_elements", "different_bytes") if key in metadata})
+    header["first_differences"] = metadata.get("first_differences", [])[:3]
+    header["coverage_issue_count"] = len(report.get("coverage_issues", []))
+    header["role"] = "raw_operator_metadata_semantics_unverified"
+    fields = {
+        "parameters": ("indexer_kernel_parameters", ("parameters",)),
+        "query": ("indexer_kernel_input", ("query",)),
+        "query_scale": ("indexer_kernel_input", ("query_dequant_scale", "query_scale")),
+        "weights": ("indexer_kernel_input", ("weights",)),
+        "key_rows": ("indexer_kernel_input", ("key_rows",)),
+        "key_scales": ("indexer_kernel_input", ("key_scales",)),
+        "query_lengths": ("indexer_kernel_input", ("actual_seq_lengths_query", "cu_seqlens_q")),
+        "kv_lengths": ("indexer_kernel_input", ("actual_seq_lengths_key", "seqused_k")),
+        "indexer_indices": ("indexer_kernel_output", ("indices",)),
+        "attention_indices": ("attention_indices", ("sparse_indices",)),
+        "attention_output": ("attention_kernel_output", ("output",)),
+        "projection_output": ("projection_output", ("output",)),
+        "o_input": ("o_input_after_tp", ("x_before",)),
+    }
+    operands, unavailable = {}, {}
+    for name, (boundary, aliases) in fields.items():
+        record = find(boundary, aliases)
+        complete = record.get("status") == "compared" and record.get("coverage_complete", True)
+        operands[name] = record.get("exact_equal") if complete else None
+        if operands[name] is None:
+            unavailable[name] = record.get("reason", record.get("status"))
+        if name in ("indexer_indices", "attention_indices") and operands[name] is not None:
+            operands[name + "_same_valid_set"] = True if operands[name] else record.get("same_valid_set")
+    if unavailable:
+        operands["unavailable"] = unavailable
+    # This is an additional view: keep metadata in the original report and
+    # never claim equal kernel arguments merely by excluding this operand.
+    other = next((r for r in report["findings"] if r.get("exact_equal") is False and not (
+        r.get("boundary") == "indexer_kernel_input" and r.get("field") == "metadata")), None)
+    brief = {key: other[key] for key in ("rank", "position", "layer", "boundary", "field", "different_elements",
+                                       "different_bytes", "max_abs_finite", "max_ulp_finite") if key in other} if other else None
+    return {"metadata": header, "operands_equal": operands, "first_non_metadata_difference": brief}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Full attention-comparison.json")
     parser.add_argument("--rank", type=int)
     parser.add_argument("--position", type=int)
     parser.add_argument("--layer", type=int)
-    parser.add_argument("--history-summary", action="store_true", help="Three short lines: operator context and key/scales logical positions")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--history-summary", action="store_true", help="Three short lines: operator context and key/scales logical positions")
+    modes.add_argument("--difference-summary", action="store_true", help="Metadata sample, operand equality and first difference outside QLI metadata")
     args = parser.parse_args(argv)
     try:
-        report = extract(json.loads(args.path.read_text()), args.rank, args.position, args.layer, args.history_summary)
+        document = json.loads(args.path.read_text())
+        if args.difference_summary:
+            report = difference_summary(document, args.rank, args.position, args.layer)
+            for name, value in report.items():
+                print(name + "=" + json.dumps(value, ensure_ascii=False))
+            return
+        report = extract(document, args.rank, args.position, args.layer, args.history_summary)
     except (OSError, ValueError, TypeError, KeyError) as error:
         parser.error(str(error))
     print("context=" + json.dumps({k: v for k, v in report.items() if k != "fields"}, ensure_ascii=False))
