@@ -120,13 +120,13 @@ class TraceProtocolTests(unittest.TestCase):
             trace.replay_parameters(value)
 
     def test_proposal_history_uses_source_cursor_including_partial_and_full_acceptance(self):
-        self.assertEqual(trace.proposal_parameters(1, 8192, 0, 8192, 7), (8191, 8))
-        self.assertEqual(trace.proposal_parameters(2, 8193, 8192, 8, 7), (0, 1))
-        self.assertEqual(trace.proposal_parameters(3, 8196, 8193, 8, 7), (2, 3))
-        self.assertEqual(trace.proposal_parameters(4, 8204, 8196, 8, 7), (7, 8))
+        self.assertEqual(trace.proposal_parameters(1, 8192, 0, 8192), (8191, 1))
+        self.assertEqual(trace.proposal_parameters(2, 8193, 8192, 8), (0, 1))
+        self.assertEqual(trace.proposal_parameters(3, 8196, 8193, 8), (2, 3))
+        self.assertEqual(trace.proposal_parameters(4, 8204, 8196, 8), (7, 8))
         for start in (8192, 8201):
             with self.assertRaisesRegex(ValueError, "committed-token"):
-                trace.proposal_parameters(2, start, 8192, 8, 7)
+                trace.proposal_parameters(2, start, 8192, 8)
 
     def test_metadata_reports_paths_and_missing_fields_with_a_bound(self):
         differences = metadata_differences({"layer": {"accepted": [1], "qsl": [0, 8]}},
@@ -255,7 +255,7 @@ class TraceReplayTests(unittest.TestCase):
             plan = {"options": {"engine": "direct", "context_length": 4, "depth": 7,
                                 "replay_with_mtp": with_mtp},
                     "trace_layers": [], "prompt_ids": [0, 1, 2, 3]}
-            records = [record(0, 8), record(4, 8), record(5, 1)]
+            records = [record(0, 8), record(4, 1), record(5, 1)]
             records[0]["input_ids"] = Tensor([0, 1, 2, 3])
             records[0]["positions"] = Tensor([0, 1, 2, 3])
             records[0]["metadata"]["model.layers.0.attn.mome"]["common"]["query_start_loc"] = [0, 4]
@@ -291,7 +291,7 @@ class TraceReplayTests(unittest.TestCase):
                 self.assertIs(proposal_calls[0].args[1], hidden_outputs[0])
                 self.assertIs(proposal_calls[1].args[1], hidden_outputs[1])
                 self.assertEqual([(call.args[2], call.args[4], call.args[6]) for call in proposal_calls],
-                                 [(0, 3, 8), (4, 0, 1)])
+                                 [(0, 3, 1), (4, 0, 1)])
                 self.assertEqual([call.args[5].tolist() for call in proposal_calls], [[3], [3]])
                 proposals = json.loads((output / "target-trace" / "rank-0" / "draft-proposals.json").read_text())
                 self.assertEqual(proposals[0]["reference"], [4])
@@ -301,7 +301,7 @@ class TraceReplayTests(unittest.TestCase):
                 engine.propose.assert_not_called()
             self.assertEqual([(call.args[0], call.args[2], call.args[3])
                               for call in engine.forward.call_args_list],
-                             [("target", 0, 8), ("target", 4, 8), ("target", 5, 1)])
+                             [("target", 0, 8), ("target", 4, 1), ("target", 5, 1)])
             self.assertEqual([call.args[1].tolist() for call in engine.forward.call_args_list],
                              [[0, 1, 2, 3], [3, 4], [3, 4]])
             recorder.close.assert_called_once()

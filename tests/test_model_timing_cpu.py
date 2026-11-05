@@ -171,6 +171,27 @@ class DecodeTimingPhaseTests(unittest.TestCase):
         engine.forward = MethodType(forward, engine)
         return engine, calls
 
+    def test_prefill_sampler_count_drives_initial_mtp_and_first_target_verify(self):
+        for depth in (0, 3, 7):
+            with self.subTest(depth=depth):
+                engine, _ = self.engine(depth)
+                calls = []
+                forward = engine.forward
+                def checked_forward(self, kind, ids, start, accepted, **kwargs):
+                    calls.append((kind, start, accepted, kwargs.get("draft_index")))
+                    return forward(kind, ids, start, accepted, **kwargs)
+                engine.forward = MethodType(checked_forward, engine)
+                with patch.dict(sys.modules, {"torch": fake_torch()}):
+                    engine.generate(2 * (depth + 1) + 1)
+                target = [entry for entry in calls if entry[0] == "target"]
+                self.assertIsNone(target[0][2])  # No previous sampler before prefill.
+                self.assertEqual(target[1][2], 1)  # One output token from prefill.
+                self.assertTrue(all(entry[2] == depth + 1 for entry in target[2:]))
+                first_verify = calls.index(target[1])
+                initial_draft = calls[1:first_verify]
+                expected = [] if depth == 0 else [1] * 3 if depth == 3 else [1, 1, None, None, None, None, None]
+                self.assertEqual([entry[2] for entry in initial_draft], expected)
+
     def test_warmup_prefill_and_initial_mtp_are_excluded(self):
         for depth in (0, 3, 7):
             with self.subTest(depth=depth):

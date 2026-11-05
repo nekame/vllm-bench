@@ -79,6 +79,22 @@ LLMEngine, без HTTP; в его время входят engine scheduling и I
 детерминированный synthetic prompt, зависящий от seed и vocab_size. Для
 воспроизводимого анализа настоящих запросов используйте явный файл.
 
+## Acceptance после prefill
+
+После prefill число `num_accepted_tokens` соответствует одному выданному
+sampler-токену, а не размеру speculative-окна. Direct передаёт **1** начальному
+MTP proposal и первому target verification; replay-with-MTP также начинает с 1.
+После обычного verification используется `accepted_drafts + 1`. Это повторяет
+порядок stock runner: sampling → обновление hybrid state counts → drafter.
+MoME builder отдельно обрабатывает prefill; подмена этого счётчика на `depth+1`
+меняет выбор истории в первом рекуррентном MTP-шаге, где computed tokens уже
+равны длине prompt и prefill-маскирование не применяется. Соответствующий
+[код vLLM 0.25.1](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/worker/gpu_model_runner.py#L4131).
+
+Target replay с фиксированным acceptance из Omni не проверяет инициализацию
+этого счётчика в самостоятельной генерации direct. Для неё есть отдельная
+CPU-регрессия по depth 0/3/7; совпадение реальных NPU-выходов проверяется отдельно.
+
 ## Padding рекуррентных MTP-вызовов
 
 `--mtp-pad-to-8` — отдельный контроль для `--engine direct` с включённым MTP.

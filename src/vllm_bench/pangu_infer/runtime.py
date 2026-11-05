@@ -314,15 +314,18 @@ class DirectEngine:
         with torch.profiler.record_function("direct/prefill") if profile else nullcontext():
             hidden, logits = self.forward("target", self.prompt, 0, None)
             anchor = self.sampler.sample(self.sampler.distribution(logits[-1:])).reshape(1)
+            # The stock hybrid runner counts valid sampler outputs before
+            # calling the drafter. Prefill emits one token, not depth + 1.
+            accepted = 1
             index = torch.tensor([len(self.plan["prompt_ids"]) - 1], dtype=torch.int64, device=self.device)
             initial_proposal = (self.propose(self.prompt, hidden, 0, index,
-                                           len(self.plan["prompt_ids"]) - 1, anchor, self.a["depth"] + 1)
+                                           len(self.plan["prompt_ids"]) - 1, anchor, accepted)
                                 if self.a["depth"] else None)
         torch.npu.synchronize()
         prefill_seconds = time.perf_counter() - prefill_start
         # The first sampled token belongs to prefill, just as in offline baseline.
         output = [anchor]
-        produced, cursor, accepted = 1, self.a["context_length"], self.a["depth"] + 1
+        produced, cursor = 1, self.a["context_length"]
         ids, previous_start = self.prompt, 0
         index_value = len(self.plan["prompt_ids"]) - 1
         cycle_counts, cycles = [], 0

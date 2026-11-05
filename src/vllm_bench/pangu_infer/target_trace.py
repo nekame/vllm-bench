@@ -143,10 +143,11 @@ def replay_parameters(record):
     return start, accepted
 
 
-def proposal_parameters(call, start, previous_start, previous_size, depth):
+def proposal_parameters(call, start, previous_start, previous_size):
     """Committed positions come from the source cursor, independently of logits."""
     if call == 1:
-        return previous_size - 1, depth + 1
+        # Prefill's sampler produced one valid output before the first proposal.
+        return previous_size - 1, 1
     committed = start - previous_start
     if not 1 <= committed <= previous_size:
         raise ValueError("Source target windows have an invalid committed-token advance")
@@ -319,7 +320,7 @@ def replay_target(engine, plan, output):
             ids = record["input_ids"].to(engine.device, dtype=torch.int64)
             if call and plan["options"].get("replay_with_mtp", False):
                 index_value, committed = proposal_parameters(
-                    call, start, previous_start, previous_ids.numel(), plan["options"]["depth"])
+                    call, start, previous_start, previous_ids.numel())
                 index = torch.tensor([index_value], dtype=torch.int64, device=engine.device)
                 drafts, _ = engine.propose(
                     previous_ids, previous_hidden, previous_start, index, index_value,
