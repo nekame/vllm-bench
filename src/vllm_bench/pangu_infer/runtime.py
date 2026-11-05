@@ -165,7 +165,7 @@ def weight_iterator(model_dir, *, draft, start, include_shared=False):
 
 def load_models(plan, cfg, device, *, mtp=None):
     import torch
-    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm_bench.pangu_infer.weights import pack_weights
     from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
     from omni_npu.v1.layers.attention.weight_utils import refresh_mla_wrappers
     from vllm_bench.pangu_infer.model.pangu_ultra_moe import PanguUltraMoEForCausalLM
@@ -197,10 +197,10 @@ def load_models(plan, cfg, device, *, mtp=None):
         require_loaded_parameters(draft, loaded_draft, shared={id(p) for p in target.parameters()} if mtp is None else ())
     # One root ensures the shared embedding and LM head are packed only once.
     root = torch.nn.ModuleDict({"target": target, **({"draft": draft} if draft and mtp is None else {})})
-    process_weights_after_loading(root, cfg.model_config, device)
+    pack_weights(root, cfg.model_config, device, scope="target+mtp" if draft and mtp is None else "target")
     if draft is not None and mtp is not None:
         with mtp.context():
-            process_weights_after_loading(draft, mtp.cfg.model_config, device)
+            pack_weights(draft, mtp.cfg.model_config, device, scope="mtp")
     for model in (target, draft):
         if model is not None:
             with mtp.context() if mtp is not None and model is draft else nullcontext():

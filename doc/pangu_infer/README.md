@@ -542,6 +542,12 @@ baseline включает штатный worker profiler. Такие резул�
 `gpu_memory_utilization` в direct передаётся в конфигурацию Omni, но не
 ограничивает его собственное выделение кеша под `max_model_len`.
 
+При ошибке packing direct выводит `[weight-pack]`: target/MTP scope и первые
+четыре MXFP8 linear с нечётным количеством 32-элементных scale-блоков.
+Сохраняются prefix, ключ layer config, фактический TP и формы weight/scales;
+исходное исключение не заменяется. Эта диагностика не меняет упаковку весов
+и не добавляет padding.
+
 ### Время вызовов target и MTP
 
 Для direct добавьте `--model-timing` и новый `--output`. Флаг по умолчанию
