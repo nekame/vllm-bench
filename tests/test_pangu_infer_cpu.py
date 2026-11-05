@@ -429,7 +429,8 @@ class LoadingAndBaselineTests(unittest.TestCase):
         fake_torch = SimpleNamespace(
             no_grad=no_grad, inference_mode=Mock(side_effect=AssertionError("Inference tensors lose version counters")),
             tensor=lambda values, **kwargs: SimpleNamespace(tolist=lambda: values), float64="float64",
-            npu=SimpleNamespace(synchronize=lambda: check("synchronize")),
+            npu=SimpleNamespace(synchronize=lambda: check("synchronize"),
+                                empty_cache=lambda: check("release unused packing buffers")),
             distributed=SimpleNamespace(all_reduce=lambda *args, **kwargs: None,
                                         ReduceOp=SimpleNamespace(MAX="max"), is_initialized=lambda: False))
         cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=128),
@@ -450,6 +451,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
         self.assertTrue(state["grad_enabled"])
         self.assertIn("weight construction/loading/post-processing", checked)
         self.assertIn("cache/buffer construction", checked)
+        self.assertLess(checked.index("release unused packing buffers"), checked.index("warmup/decode"))
         self.assertEqual(engine.generate.call_count, 2)
         context.__exit__.assert_called_once_with(None, None, None)
 

@@ -79,6 +79,8 @@ def parser():
     prompt.add_argument("--prompts", type=Path, help="JSON array of {id, input} text prompts")
     p.add_argument("--tokenizer", type=Path, help="Tokenizer directory for --prompts; default: model directory")
     p.add_argument("--context-length", type=int, default=8192)
+    p.add_argument("--prefill-chunk-size", type=int, default=0,
+                   help="Prefill token budget for both engines; 0 disables chunking, e.g. 2048 for context 8192")
     p.add_argument("--max-new-tokens", type=int, default=256)
     p.add_argument("--temperature", type=float, default=1)
     p.add_argument("--top-k", type=int, default=0)
@@ -144,6 +146,13 @@ def make_plan(a):
         raise ValueError("Stock OmniInfer bypasses compile-only without FULL graphs; use a direct run or another baseline mode")
     if min(a.context_length, a.repeats, a.warmup) < 1 or a.max_new_tokens < 2:
         raise ValueError("Context, warmup and repeats must be positive; max-new-tokens must be >= 2")
+    if a.prefill_chunk_size:
+        if a.prefill_chunk_size <= a.depth + 1:
+            raise ValueError("prefill-chunk-size must exceed the decode verification window (depth + 1)")
+        if a.prefill_chunk_size < a.context_length and a.context_length % a.prefill_chunk_size:
+            raise ValueError("For chunked prefill, context-length must be a multiple of prefill-chunk-size")
+        if diagnostic_trace:
+            raise ValueError("Target trace/replay currently requires unchunked prefill")
     if (not math.isfinite(a.temperature) or a.temperature < 0 or
             not math.isfinite(a.top_p) or not 0 < a.top_p <= 1 or a.top_k < 0):
         raise ValueError("Require finite temperature >= 0, 0 < top-p <= 1 and top-k >= 0")
@@ -235,6 +244,8 @@ def make_plan(a):
         match["hf_overrides"] = hf_overrides
     if split_mtp:
         match["mtp_tp"] = a.mtp_tp
+    if a.prefill_chunk_size:
+        match["prefill_chunk_size"] = a.prefill_chunk_size
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
             "hf_overrides": hf_overrides,
             "operator_config": operator, "additional_config": additional,

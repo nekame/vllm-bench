@@ -42,8 +42,8 @@ def engine_options(plan, *, direct):
         dtype="bfloat16", tensor_parallel_size=a["tp"], data_parallel_size=1,
         enable_expert_parallel=False, enforce_eager=False,
         max_model_len=plan["max_model_len"], max_num_seqs=1,
-        max_num_batched_tokens=plan["max_model_len"],
-        enable_chunked_prefill=False, enable_prefix_caching=False,
+        max_num_batched_tokens=a.get("prefill_chunk_size", 0) or plan["max_model_len"],
+        enable_chunked_prefill=bool(a.get("prefill_chunk_size", 0)), enable_prefix_caching=False,
         async_scheduling=False,
         gpu_memory_utilization=a["gpu_memory_utilization"], seed=a["seed"],
         compilation_config={"mode": 0 if direct or not compile_enabled else 3,
@@ -253,11 +253,16 @@ class DirectEngine:
             from omni_npu.compilation.acl_graph import set_graph_params
             set_graph_params(set(engine_options(plan, direct=True)["compilation_config"]["cudagraph_capture_sizes"]))
 
-    def forward(self, kind, ids, start, accepted, *, hidden=None, index=None, head=0, draft_index=None):
+    def forward(self, kind, ids, start, accepted, *, hidden=None, index=None, head=0, draft_index=None,
+                prefill=None):
         from vllm_bench.pangu_infer.execution import Execution
 
         query_size = ids.shape[0]
-        prefill = query_size == self.a["context_length"] and start == 0
+        if prefill is None:
+            prefill = query_size == self.a["context_length"] and start == 0
+            chunk = self.a.get("prefill_chunk_size", 0)
+            if prefill and chunk and query_size > chunk:
+                return self.prefill_chunks(kind, ids, accepted, hidden=hidden, head=head, draft_index=draft_index)
         size = query_size
         if (self.a.get("mtp_pad_to_8", False) and kind == "draft" and query_size == 1
                 and draft_index is not None and draft_index > 0):
@@ -281,6 +286,26 @@ class DirectEngine:
         call = execution.diagnostic_call if self.a.get("memory_diagnostics", False) else execution
         return call(ids, start, accepted, self.a["context_length"], hidden=hidden,
                     sample_index=index, draft_index=draft_index, model_timing=self.model_timings)
+
+    def prefill_chunks(self, kind, ids, accepted, *, hidden=None, head=0, draft_index=None):
+        """Bootstrap each model's cache in order, retaining all rows for MTP."""
+        import torch
+
+        outputs = []
+        size = self.a["prefill_chunk_size"]
+        for start in range(0, ids.shape[0], size):
+            end = min(start + size, ids.shape[0])
+            # Bootstrap MTP samples the final prompt row. Intermediate logits
+            # are discarded; using the last local row keeps this eager lane
+            # identical in every chunk without another model-call variant.
+            index = (torch.tensor([end - start - 1], dtype=torch.int64, device=self.device)
+                     if kind == "draft" else None)
+            result, logits = self.forward(
+                kind, ids[start:end], start, accepted, hidden=hidden[start:end] if hidden is not None else None,
+                index=index, head=head, draft_index=draft_index, prefill=True)
+            # Preserve rows even if an operator returns a reusable output buffer.
+            outputs.append(result.clone())
+        return torch.cat(outputs, dim=0), logits[-1:]
 
     def propose(self, ids, hidden, start, index, index_value, anchor, accepted):
         mtp = getattr(self, "mtp", None)
@@ -469,6 +494,9 @@ def main(argv=None):
             started = time.perf_counter()
             engine = DirectEngine(plan, cfg, device, rank, target, draft, mtp=mtp)
             torch.npu.synchronize()
+            # HCCL initializes lazily and allocates outside the torch caching
+            # allocator. Release unused packing buffers before the first forward.
+            torch.npu.empty_cache()
             cache_init_seconds = time.perf_counter() - started
             if a.get("memory_diagnostics", False):
                 log_memory("caches_allocated", device, cache_mib=round(engine.caches.bytes / (1 << 20), 2))

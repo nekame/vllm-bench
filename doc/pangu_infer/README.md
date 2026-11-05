@@ -224,6 +224,49 @@ NPU-корректность нового layout необходимо прове
 Если OOM возникает до `weights_loaded`, compact cache ещё не может помочь;
 загрузка только используемых MTP heads уменьшает уже память весов.
 
+После загрузки/packing и выделения кеша direct один раз синхронизирует NPU
+и освобождает неиспользуемый резерв torch allocator через `empty_cache()`.
+Это происходит до прогрева и замеров, чтобы ленивой инициализации HCCL
+была доступна память, оставшаяся от временных packing-буферов.
+
+### Prefill частями
+
+Для контекста 8192 добавьте в direct или Omni:
+
+```bash
+--prefill-chunk-size 2048
+```
+
+По умолчанию флаг равен 0: prefill остаётся одним вызовом. При включении
+`max_num_batched_tokens` равен указанному бюджету, `enable_chunked_prefill=true`.
+В direct каждый начальный target/MTP проход выполняется последовательными
+частями с сохранением KV/MoME-состояния и абсолютных позиций. Hidden states
+соединяются для следующего MTP head; исходные shifted IDs режутся в том же
+порядке. Для каждого eager chunk вычисляется последняя строка logits,
+используется только результат последнего chunk. Sampling между частями нет.
+Весь bootstrap остаётся внутри prefill timing; decode продолжает использовать
+выбранный eager/compile/ACL режим и прежнее verification window.
+
+Для PoC размер части должен превышать `depth+1`; если он меньше контекста,
+`context-length` должен делиться на него без остатка. Это исключает короткий
+хвост, который metadata builders могли бы классифицировать как decode.
+Trace/replay с chunked prefill пока отклоняется. При сравнении движков
+передавайте одинаковый флаг обоим: он входит в workload fingerprint.
+В Omni число decode cycles отсчитывается от первого выданного токена,
+исключая все prefill steps. Новый путь требует NPU проверки.
+
+### Память HCCL
+
+HCCL выделяет коммуникационную память отдельно от torch allocator.
+Она составляет удвоенный размер `HCCL_BUFFSIZE` или настройки communicator:
+см. [HcclGetHcclBuffer](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/commlib/commopdev/docs/en/api_ref/comm_opdev/control_plane_api/comms_domain_resource_mgmt/HcclGetHcclBuffer.md).
+Например, запрос 2517630976 bytes равен 2401 MiB и соответствует двум
+буферам по 1200 MiB с дополнительным 1 MiB. Для такого отказа можно проверить
+`HCCL_BUFFSIZE=200`; `HCCL_MOE_DISPATCH_EP_BUFFSIZE` управляет только отдельной
+MoE dispatch-группой. Chunking уменьшает активации, а размер HCCL-буфера
+определяется настройкой HCCL. Для сравнения TPOT значения env должны совпадать
+у сравниваемых запусков.
+
 ## Acceptance после prefill
 
 После prefill число `num_accepted_tokens` соответствует одному выданному

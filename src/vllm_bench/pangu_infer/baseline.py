@@ -43,7 +43,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
     engine.collective_rpc(synchronize_worker)
     start = time.perf_counter()
     engine.add_request(request_id, {"prompt_token_ids": plan["prompt_ids"] if prompt_ids is None else prompt_ids}, params)
-    first_time, first_count, tokens, cycles = None, 0, [], 0
+    first_time, first_count, first_cycle, tokens, cycles = None, 0, 0, [], 0
     accepted_drafts = []
     while engine.has_unfinished_requests():
         outputs = engine.step()
@@ -60,6 +60,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
                 # the next step while we establish this device-complete bound.
                 engine.collective_rpc(synchronize_worker)
                 first_time, first_count = time.perf_counter(), len(tokens)
+                first_cycle = cycles
     engine.collective_rpc(synchronize_worker)
     end = time.perf_counter()
     if first_time is None:
@@ -68,7 +69,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
         raise RuntimeError("Expected one prefill output token; decode timing boundaries are not comparable")
     return {"token_ids": tokens, "prefill_seconds": first_time - start,
             "decode_seconds": end - first_time, "decode_tokens": len(tokens) - first_count,
-            "cycles": cycles - 1, "accepted_drafts": accepted_drafts,
+            "cycles": cycles - first_cycle, "accepted_drafts": accepted_drafts,
             "acceptance_measurement": "from output increments; final truncated cycle is a lower bound",
             "initial_context": a["context_length"]}
 

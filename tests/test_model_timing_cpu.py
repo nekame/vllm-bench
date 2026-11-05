@@ -64,7 +64,7 @@ def fake_torch():
         roll=lambda tensor, shift: Tensor(tensor.values[-shift:] + tensor.values[:-shift]),
         zeros_like=lambda tensor: Tensor([0] * len(tensor)),
         int32="int32", int64="int64", float64="float64",
-        npu=SimpleNamespace(synchronize=Mock()),
+        npu=SimpleNamespace(synchronize=Mock(), empty_cache=Mock()),
         distributed=SimpleNamespace(all_reduce=Mock(), ReduceOp=SimpleNamespace(MAX="MAX")))
 
 
@@ -358,6 +358,7 @@ class TimingResultTests(unittest.TestCase):
                 self.assertEqual(log.call_count, 4 if rank == 0 else 0)
                 self.assertEqual(summary_log.call_count, 1 if rank == 0 else 0)
                 self.assertEqual(save.call_count, 1 if rank == 0 else 0)
+                torch.npu.empty_cache.assert_called_once_with()
                 self.assertEqual([call.args[0] for call in engine.set_prompt.call_args_list], [[1, 2], [3, 4]])
                 if rank == 0:
                     self.assertEqual(summary_log.call_args.args[0][0]["count"], 4)
