@@ -62,6 +62,8 @@ def parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--engine", choices=("direct", "omni"), default="direct")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
+    p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
+                   help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
     mtp = p.add_mutually_exclusive_group()
     mtp.add_argument("--depth", type=int, choices=(0, 3, 7), default=3,
                      help="MTP proposal depth; 0 disables MTP for greedy or sampled generation")
@@ -106,6 +108,12 @@ def parser():
 def make_plan(a):
     options = {key: str(value.resolve()) if isinstance(value, Path) else value
                for key, value in vars(a).items()}
+    if a.mtp_tp is not None:
+        if a.depth == 0 or a.mtp_tp > a.tp or a.tp % a.mtp_tp:
+            raise ValueError("--mtp-tp requires positive MTP depth and must divide target TP")
+        if a.engine != "direct" and a.mtp_tp != a.tp:
+            raise ValueError("Different --mtp-tp is supported only by --engine direct")
+    split_mtp = a.mtp_tp is not None and a.mtp_tp != a.tp
     if a.memory_diagnostics and a.engine != "direct":
         raise ValueError("--memory-diagnostics requires --engine direct")
     if a.model_timing and a.engine != "direct":
@@ -178,6 +186,8 @@ def make_plan(a):
     opt = operator["operator_optimization_config"]
     if not isinstance(parallel, dict) or not isinstance(opt, dict):
         raise ValueError("Operator config sections must be objects")
+    if split_mtp and parallel.get("layer_parallel_config"):
+        raise ValueError("Different --mtp-tp requires an empty layer_parallel_config; per-layer groups are shared by Omni")
     # These paths require additional batch/state protocols and are deliberately
     # rejected rather than silently changing the user's operator configuration.
     forbidden = ("ena_seq_parallel", "ena_context_parallel", "ena_swa_attn_seq_parallel",
@@ -218,6 +228,8 @@ def make_plan(a):
              "seed": a.seed, "max_new_tokens": a.max_new_tokens, "respect_eos": a.respect_eos}
     if hf_overrides:
         match["hf_overrides"] = hf_overrides
+    if split_mtp:
+        match["mtp_tp"] = a.mtp_tp
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
             "hf_overrides": hf_overrides,
             "operator_config": operator, "additional_config": additional,

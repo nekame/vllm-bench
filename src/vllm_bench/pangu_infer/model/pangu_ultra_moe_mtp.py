@@ -40,6 +40,7 @@ from omni_npu.v1.layers.attention.weight_utils import (
     mark_split_q_up_params_loaded,
     run_post_weight_load,
 )
+from omni_npu.v1.layers.vocab_parallel_embedding import NPUParallelLMHead, NPUVocabParallelEmbedding
 
 
 class SharedHead(nn.Module):
@@ -122,7 +123,7 @@ class OpenPanguMultiTokenPredictorLayer(nn.Module):
 
 
 class OpenPanguMultiTokenPredictor(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module | None):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -132,18 +133,31 @@ class OpenPanguMultiTokenPredictor(nn.Module):
             self.mtp_start_layer_idx,
             self.mtp_start_layer_idx + self.num_mtp_layers,
         )
+        if shared_target is None:
+            self.embed_tokens = NPUVocabParallelEmbedding(
+                config.vocab_size, config.hidden_size, quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.embed_tokens")
+            self.lm_head = NPUParallelLMHead(
+                config.vocab_size, config.hidden_size, quant_config=vllm_config.quant_config,
+                prefix="draft_model.lm_head")
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.embed_tokens.weight
+            head = self.lm_head
+        else:
+            head = shared_target.lm_head
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): OpenPanguMultiTokenPredictorLayer(
                     vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{idx}",
-                    head=shared_target.lm_head,
+                    head=head,
                 )
                 for idx in mtp_layer_indices
             }
         )
         self.wrapped_layers = None
-        self.embed_tokens = shared_target.model.embed_tokens
+        if shared_target is not None:
+            self.embed_tokens = shared_target.model.embed_tokens
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -198,9 +212,10 @@ class OpenPanguMultiTokenPredictor(nn.Module):
 
 
 class OpenPanguMTP(nn.Module, SupportsPP):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module | None):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.owns_shared_weights = shared_target is None
         self.model = OpenPanguMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"),
             shared_target=shared_target
@@ -272,6 +287,14 @@ class OpenPanguMTP(nn.Module, SupportsPP):
         record_conv_name = []
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            if self.owns_shared_weights and (name.startswith("model.embed_tokens.") or name.startswith("lm_head.")):
+                mapped = "model." + name if name.startswith("lm_head.") else name
+                if mapped in params_dict:
+                    param = params_dict[mapped]
+                    loader = getattr(param, "weight_loader", default_weight_loader)
+                    loader(param, loaded_weight)
+                    loaded_params.add(mapped)
                 continue
             if ".embed_tokens." in name or ".shared_head.head." in name:
                 continue

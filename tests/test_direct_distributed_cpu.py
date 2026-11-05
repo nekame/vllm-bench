@@ -34,13 +34,24 @@ class DirectDistributedTests(unittest.TestCase):
         device_group = object()
         torch = SimpleNamespace(distributed=SimpleNamespace(broadcast=Mock()))
         modules = {"torch": torch, "vllm.distributed": SimpleNamespace(
-            get_tp_group=lambda: SimpleNamespace(device_group=device_group))}
+            get_tp_group=lambda: SimpleNamespace(device_group=device_group, world_size=8))}
         sampler = Sampler.__new__(Sampler)
         sampler.options = {"tp": 8}
         token = object()
         with patch.dict("sys.modules", modules):
             self.assertIs(sampler.broadcast(token), token)
         torch.distributed.broadcast.assert_called_once_with(token, src=0, group=device_group)
+
+    def test_mtp_tp_one_skips_broadcast_even_when_target_tp_is_eight(self):
+        torch = SimpleNamespace(distributed=SimpleNamespace(broadcast=Mock()))
+        modules = {"torch": torch, "vllm.distributed": SimpleNamespace(
+            get_tp_group=lambda: SimpleNamespace(world_size=1))}
+        sampler = Sampler.__new__(Sampler)
+        sampler.options = {"tp": 8}
+        token = object()
+        with patch.dict("sys.modules", modules):
+            self.assertIs(sampler.broadcast(token), token)
+        torch.distributed.broadcast.assert_not_called()
 
 
 if __name__ == "__main__":

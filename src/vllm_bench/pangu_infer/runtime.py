@@ -133,7 +133,7 @@ def setup(plan):
     return cfg, device, rank, context, model_extra_config
 
 
-def weight_iterator(model_dir, *, draft, start):
+def weight_iterator(model_dir, *, draft, start, include_shared=False):
     """Stream each selected safetensors tensor once; never dequantize weights."""
     from safetensors import safe_open
     import re
@@ -158,11 +158,12 @@ def weight_iterator(model_dir, *, draft, start):
                     continue
                 match = layer_pattern.match(name)
                 is_draft = match is not None and int(match[1]) >= start
-                if is_draft == draft:
+                shared = name.startswith("model.embed_tokens.") or name.startswith("lm_head.")
+                if is_draft == draft or draft and include_shared and shared:
                     yield name, shard.get_tensor(name)
 
 
-def load_models(plan, cfg, device):
+def load_models(plan, cfg, device, *, mtp=None):
     import torch
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.distributed.parallel_state import prepare_communication_buffer_for_model
@@ -176,28 +177,37 @@ def load_models(plan, cfg, device):
         with torch.device(device):
             target = PanguUltraMoEForCausalLM(vllm_config=cfg)
             draft = None
-            if a["depth"]:
+            if a["depth"] and (mtp is None or mtp.active):
                 from vllm_bench.pangu_infer.model.pangu_ultra_moe_mtp import OpenPanguMTP
-                draft = OpenPanguMTP(vllm_config=cfg, prefix="draft_model", shared_target=target)
+                with mtp.context() if mtp is not None else nullcontext():
+                    draft = OpenPanguMTP(vllm_config=mtp.cfg if mtp is not None else cfg,
+                                         prefix="draft_model", shared_target=None if mtp is not None else target)
     finally:
         torch.set_default_dtype(original_dtype)
     start = plan["config"]["num_hidden_layers"]
     loaded_target = target.load_weights(weight_iterator(a["model"], draft=False, start=start))
-    loaded_draft = draft.load_weights(weight_iterator(a["model"], draft=True, start=start)) if draft else set()
+    loaded_draft = set()
+    if draft is not None:
+        with mtp.context() if mtp is not None else nullcontext():
+            loaded_draft = draft.load_weights(weight_iterator(a["model"], draft=True, start=start, include_shared=mtp is not None))
     if not loaded_target or draft is not None and not loaded_draft:
         raise ValueError("Checkpoint did not load target/MTP parameters")
     require_loaded_parameters(target, loaded_target)
     if draft is not None:
-        require_loaded_parameters(draft, loaded_draft, shared={id(p) for p in target.parameters()})
+        require_loaded_parameters(draft, loaded_draft, shared={id(p) for p in target.parameters()} if mtp is None else ())
     # One root ensures the shared embedding and LM head are packed only once.
-    root = torch.nn.ModuleDict({"target": target, **({"draft": draft} if draft else {})})
+    root = torch.nn.ModuleDict({"target": target, **({"draft": draft} if draft and mtp is None else {})})
     process_weights_after_loading(root, cfg.model_config, device)
+    if draft is not None and mtp is not None:
+        with mtp.context():
+            process_weights_after_loading(draft, mtp.cfg.model_config, device)
     for model in (target, draft):
         if model is not None:
-            refresh_mla_wrappers(model, cfg.model_config.dtype)
-            model.post_weight_load()
-            prepare_communication_buffer_for_model(model)
-            model.eval()
+            with mtp.context() if mtp is not None and model is draft else nullcontext():
+                refresh_mla_wrappers(model, cfg.model_config.dtype)
+                model.post_weight_load()
+                prepare_communication_buffer_for_model(model)
+                model.eval()
     torch.npu.synchronize()
     return target, draft, {"target_loaded_parameters": len(loaded_target),
                            "draft_loaded_parameters": len(loaded_draft)}
@@ -211,7 +221,7 @@ def require_loaded_parameters(model, loaded, shared=()):
 
 
 class DirectEngine:
-    def __init__(self, plan, cfg, device, rank, target, draft):
+    def __init__(self, plan, cfg, device, rank, target, draft, *, mtp=None):
         import torch
         from vllm.platforms import current_platform
         from vllm_bench.pangu_infer.cache import Caches
@@ -220,6 +230,7 @@ class DirectEngine:
         self.plan, self.cfg, self.device = plan, cfg, device
         self.a = plan["options"]
         self.target, self.draft = target, draft
+        self.mtp = mtp
         self.model_timings = None
         if plan["config"].get("use_mome"):
             current_platform._align_hybrid_block_size(cfg, None)
@@ -251,7 +262,8 @@ class DirectEngine:
                 prefix = f"draft_model.model.layers.{self.plan['config']['num_hidden_layers'] + head}."
                 names = [name for name in names if name.startswith(prefix)]
             self.executions[key] = Execution(
-                self.target if kind == "target" else self.draft, self.cfg, self.caches,
+                self.target if kind == "target" else self.draft,
+                self.mtp.cfg if kind == "draft" and getattr(self, "mtp", None) is not None else self.cfg, self.caches,
                 names, size, self.device, head=head if kind == "draft" else None,
                 mode="eager" if prefill else self.a["mode"], profile=self.a["profile"],
                 memory_diagnostics=self.a.get("memory_diagnostics", False),
@@ -262,6 +274,19 @@ class DirectEngine:
                     sample_index=index, draft_index=draft_index, model_timing=self.model_timings)
 
     def propose(self, ids, hidden, start, index, index_value, anchor, accepted):
+        mtp = getattr(self, "mtp", None)
+        if mtp is None:
+            return self._propose(ids, hidden, start, index, index_value, anchor, accepted)
+        proposal = None
+        if mtp.active:
+            with mtp.context():
+                proposal = self._propose(ids, hidden, start, index, index_value, anchor, accepted)
+        else:
+            from vllm_bench.pangu_infer.mtp_parallel import record_idle_mtp
+            record_idle_mtp(self.model_timings, self.a, self.plan["config"]["num_nextn_predict_layers"], ids.shape[0])
+        return mtp.broadcast(proposal)
+
+    def _propose(self, ids, hidden, start, index, index_value, anchor, accepted):
         import torch
 
         depth = self.a["depth"]
@@ -413,7 +438,15 @@ def main(argv=None):
     started = time.perf_counter()
     cfg, device, rank, context, extra = setup(plan)
     setup_seconds = time.perf_counter() - started
+    mtp = None
     try:
+        if a.get("mtp_tp") is not None and a["mtp_tp"] != a["tp"]:
+            if extra.parall_config.layer_parallel_config:
+                raise ValueError("Effective layer_parallel_config must be empty with different MTP TP")
+            from vllm_bench.pangu_infer.mtp_parallel import MtpParallel
+            mtp = MtpParallel(plan, cfg, device, rank)
+            if rank == 0:
+                print(f"[execution] target_tp={a['tp']} mtp_tp={mtp.tp} mtp_ranks={list(range(mtp.tp))}", flush=True)
         from vllm_bench.pangu_infer.memory import log_memory
         if a.get("memory_diagnostics", False):
             log_memory("setup_done", device)
@@ -421,12 +454,12 @@ def main(argv=None):
         # counters. Disable autograd without creating inference tensors.
         with torch.no_grad():
             started = time.perf_counter()
-            target, draft, loading = load_models(plan, cfg, device)
+            target, draft, loading = load_models(plan, cfg, device, mtp=mtp)
             load_seconds = time.perf_counter() - started
             if a.get("memory_diagnostics", False):
                 log_memory("weights_loaded", device)
             started = time.perf_counter()
-            engine = DirectEngine(plan, cfg, device, rank, target, draft)
+            engine = DirectEngine(plan, cfg, device, rank, target, draft, mtp=mtp)
             torch.npu.synchronize()
             cache_init_seconds = time.perf_counter() - started
             if a.get("memory_diagnostics", False):
@@ -492,6 +525,9 @@ def main(argv=None):
                                          "cudagraph": config_json(cfg.compilation_config.cudagraph_mode)},
                          "block_size": cfg.cache_config.block_size,
                          "mamba_block_size": cfg.cache_config.mamba_block_size}
+            if mtp is not None:
+                effective["mtp_tp"] = mtp.tp
+                effective["mtp_ranks"] = list(range(mtp.tp))
             from vllm_bench.pangu_infer.results import save_result, versions
             if rank == 0:
                 if a.get("model_timing", False):
@@ -503,6 +539,7 @@ def main(argv=None):
                     "cache_init_seconds": cache_init_seconds,
                     "counters_before": before, "counters_after": after,
                     "execution_lanes": [{"kind": key[0], "tokens": key[1], "query_tokens": e.query_size, "head": key[2],
+                                         "tp": e.cfg.parallel_config.tensor_parallel_size,
                                          "prefill": key[3], "mode": e.mode, "compiles": e.compiles,
                                          "captures": e.captures, "replays": e.replays,
                                          "backend_compile_seconds": e.backend_compile_seconds,
@@ -512,6 +549,8 @@ def main(argv=None):
                     "peak_allocated_bytes_rank0": torch.npu.max_memory_allocated(device),
                     "versions": versions(), "hardware": torch.npu.get_device_name(device)})
     finally:
+        if mtp is not None:
+            mtp.close()
         context.__exit__(None, None, None)
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()

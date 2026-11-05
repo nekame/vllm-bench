@@ -96,6 +96,14 @@ def fixture():
 
 
 class PaddingMetadataTests(unittest.TestCase):
+    def test_mtp_lane_uses_its_own_parallel_config(self):
+        cache, modules = fixture()
+        draft_cfg = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))
+        with patch.dict(sys.modules, modules):
+            lane = MetadataLane(cache, ["draft.attn"], 8, cfg=draft_cfg)
+        self.assertIs(lane.cfg, draft_cfg)
+        self.assertIsNot(lane.cfg, cache.cfg)
+
     def test_single_query_uses_one_position_and_masks_all_tail_slots(self):
         cache, modules = fixture()
         with patch.dict(sys.modules, modules):

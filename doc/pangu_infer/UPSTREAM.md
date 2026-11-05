@@ -6,7 +6,7 @@
 | Локальный код в `src/vllm_bench/pangu_infer/model/` | Источник | Изменения |
 | --- | --- | --- |
 | `pangu_ultra_moe.py` | `omni/v1/models/pangu/pangu_ultra_moe.py` | Удалены `support_torch_compile` и post-forward plugin decorator; attention-классы импортируются из локального адаптера; post-load вызывается явно после packing |
-| `pangu_ultra_moe_mtp.py` | `omni/v1/models/pangu/pangu_ultra_moe_mtp.py` | Удалён compile decorator; embedding и head передаются из target при создании; отдельные checkpoint-копии shared weights пропускаются; post-load вызывается явно |
+| `pangu_ultra_moe_mtp.py` | `omni/v1/models/pangu/pangu_ultra_moe_mtp.py` | Удалён compile decorator; при одинаковом TP embedding/head общие с target; при отдельном MTP TP создаются собственные embedding/head и загружаются из глобальных checkpoint-весов; post-load вызывается явно |
 | `attention.py` | `MomeAttentionMixin._build_mome_conv` из `npu_mla.py`; `NPUMoMEPatch.MomeAttention` из `patch_mome_hybrid.py` | Явный MoME-класс и обычные подклассы attention вместо зависимости от динамического `vllm.model_executor.layers.npumome`; arithmetic, convolution operators и state spec сохранены |
 | `acl_graph.py` | `omni/compilation/acl_graph.py`, `ACLGraphWrapper._update_graph_tasks` | Только при `--mtp-pad-to-8`: подкласс wrapper сохраняет task handles и workspace references каждой записи графа отдельно; протокол dynamic kwargs/update/events сохранён |
 
@@ -16,6 +16,16 @@
 Остальные файлы нового пакета реализуют launcher, управление буферами и
 последовательный цикл batch 1. Новых monkey patches, import hooks,
 `sitecustomize` и динамической генерации исходников в runtime нет.
+
+`mtp_parallel.py` использует штатный `patch_tensor_parallel_group` из
+`omni/vllm_patches/patches/common/patch_parallel_state.py`. Его протокол
+scoped state заимствован для явного переключения `_EP` и `_MOE_DISPATCH_EP`:
+операторы Omni обращаются к этим process-global группам и не принимают их
+аргументами. Контекст охватывает создание, загрузку, packing, компиляцию,
+capture/replay и исполнение MTP; target-группы восстанавливаются в `finally`.
+Функции, классы и import bindings не заменяются. Этот путь рассчитан на
+последовательный single-thread runtime PoC, без конкурентных model forwards;
+зависимость от внутренних имён групп привязана к указанной версии Omni/vLLM.
 
 Изменения в OmniInfer не требуются. Зависимости на его startup-регистрации
 остаются: NPU platform, linear/quantization/custom operators, cache specs,

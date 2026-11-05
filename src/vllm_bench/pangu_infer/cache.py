@@ -58,18 +58,18 @@ class Caches:
         for group in self.groups:
             group.raw.zero_()
 
-    def lane(self, names, size, *, query_size=None):
-        return MetadataLane(self, names, size, query_size=query_size)
+    def lane(self, names, size, *, query_size=None, cfg=None):
+        return MetadataLane(self, names, size, query_size=query_size, cfg=cfg)
 
 
 class MetadataLane:
     """One persistent set of input tensors/builders per captured call shape."""
 
-    def __init__(self, caches, names, size, *, query_size=None):
+    def __init__(self, caches, names, size, *, query_size=None, cfg=None):
         import torch
         from vllm.v1.attention.backend import CommonAttentionMetadata
 
-        self.cfg, self.size = caches.cfg, size
+        self.cfg, self.size = caches.cfg if cfg is None else cfg, size
         self.query_size = size if query_size is None else query_size
         if not 1 <= self.query_size <= size:
             raise ValueError("Query size must be positive and fit the input buffer")

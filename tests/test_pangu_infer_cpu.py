@@ -410,7 +410,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
             self.assertFalse(state["grad_enabled"], label)
             checked.append(label)
 
-        def load(*args):
+        def load(*args, **kwargs):
             check("weight construction/loading/post-processing")
             return object(), None, {}
 
@@ -422,7 +422,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
             generate=Mock(side_effect=generate), executions={},
             counters=lambda: {"compiles": 0, "captures": 0, "replays": 0, "calls": 1})
 
-        def create_engine(*args):
+        def create_engine(*args, **kwargs):
             check("cache/buffer construction")
             return engine
 
@@ -496,8 +496,10 @@ class LoadingAndBaselineTests(unittest.TestCase):
             with patch.dict(sys.modules, {"safetensors": SimpleNamespace(safe_open=lambda *args, **kwargs: Shard())}):
                 target = dict(weight_iterator(root, draft=False, start=12))
                 draft = dict(weight_iterator(root, draft=True, start=12))
+                standalone = dict(weight_iterator(root, draft=True, start=12, include_shared=True))
             self.assertEqual(set(target), set(names[:3]))
             self.assertEqual(set(draft), set(names[3:]))
+            self.assertEqual(set(standalone), set(names[:2] + names[3:]))
             for name, value in {**target, **draft}.items():
                 self.assertIs(value, payload[name])
             self.assertEqual((root / "shards/weights.safetensors").read_bytes(), b"unchanged")

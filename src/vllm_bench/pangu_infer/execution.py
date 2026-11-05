@@ -18,7 +18,7 @@ class Execution:
         self.device = device
         self.memory_diagnostics = memory_diagnostics
         self.memory_phase = "model"
-        self.lane = caches.lane(names, size, query_size=self.query_size)
+        self.lane = caches.lane(names, size, query_size=self.query_size, cfg=cfg)
         self.ids = torch.empty(size, dtype=torch.int64, device=device)
         self.hidden = (torch.empty(size, cfg.model_config.hf_config.hidden_size,
                                    dtype=cfg.model_config.dtype, device=device)

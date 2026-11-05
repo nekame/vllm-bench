@@ -140,6 +140,53 @@ trace/replay передавайте флаг в обе команды; для ma
 и их порядок. Текстовые batches поддерживаются в matrix через `options`;
 trace/replay остаётся режимом одного запроса через `--prompt-ids`.
 
+## Отдельный TP для MTP
+
+Для direct задайте target TP и размер одной MTP-копии независимо:
+
+```bash
+--engine direct --tp 8 --mtp-tp 2 --depth 7
+```
+
+`--mtp-tp` принимает 1/2/4/8, должен делить target TP и не превышать его.
+Без флага MTP использует target TP и общие с target embedding/LM head,
+как прежде. При отличающемся TP MTP исполняется на первых `mtp-tp` rank
+на **prefill и decode**. Например, при TP8/MTP2 веса MTP находятся только
+на rank 0–1; rank 2–7 ждут результат proposal, затем участвуют в target
+verification. Дополнительных MTP-копий на остальных rank нет.
+
+С меньшим TP MTP получает собственные шардированные embedding и LM head,
+загруженные из глобальных `model.embed_tokens.*` и `lm_head.*` checkpoint.
+Его TP/EP/dispatch-группы и parallel config отделены от target. Target hidden
+states уже доступны на участвующих rank; отдельного копирования через CPU нет.
+После proposal rank 0 передаёт IDs всем target-rank через существующую target
+TP device group. При sampling также передаются draft-распределения,
+необходимые для verification. Эти передачи входят в end-to-end decode.
+
+Работают depth 3/7, eager/compile/acl/compile-acl, текстовые запросы,
+`--mtp-pad-to-8`, memory diagnostics и model timing. На неучаствующих rank
+MTP timing rows содержат нули до TP MAX reduction: итоговое время берётся
+с исполняющих rank, количество вызовов в сводке не умножается на число NPU.
+В `result.json` сохраняются `effective.mtp_tp`, `effective.mtp_ranks` и TP
+каждой execution lane на rank 0.
+
+Отличающийся MTP TP поддерживается только direct и требует пустого
+`model_parallel_config.layer_parallel_config`: Omni выбирает эти группы по
+коротким именам слоя, одинаковым для target и MTP. Изменения файлов Omni
+не требуются; scoped переключение групп описано в `UPSTREAM.md`.
+Для matrix используйте `"engines": ["direct"]`, `"tp": [8]` и
+`"options": ["--mtp-tp", "2"]`.
+
+Сначала проверьте урезанный checkpoint с `--temperature 0`: eager и
+compile-acl отдельно для MTP1/2/4. Затем запускайте полную модель.
+Шард весов MTP на каждой участвующей NPU увеличивается при уменьшении TP;
+собственные embedding/head тоже требуют памяти. Наличие TP8 у target
+не гарантирует, что MTP1/2 поместится рядом с ним. CPU tests проверяют
+протокол, но NPU loading, численная корректность и графы этого пути требуют
+проверки на сервере. Разный MTP TP меняет workload fingerprint; стандартный
+benchmark compare его отклоняет. `compare --correctness` допускает такую
+проверку greedy token IDs без вывода о speedup/Python overhead.
+
 ## Acceptance после prefill
 
 После prefill число `num_accepted_tokens` соответствует одному выданному

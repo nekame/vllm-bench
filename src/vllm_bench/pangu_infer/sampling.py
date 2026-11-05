@@ -69,7 +69,9 @@ class Sampler:
 
         if self.options["tp"] > 1:
             from vllm.distributed import get_tp_group
-            torch.distributed.broadcast(value, src=0, group=get_tp_group().device_group)
+            group = get_tp_group()
+            if group.world_size > 1:
+                torch.distributed.broadcast(value, src=0, group=group.device_group)
         return value
 
     def sample(self, probs):
