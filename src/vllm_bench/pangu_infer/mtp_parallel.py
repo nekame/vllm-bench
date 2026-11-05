@@ -13,6 +13,17 @@ import copy
 import dataclasses
 
 
+def validate_layer_parallel_config(config):
+    """Singleton layer groups remain local under either model's TP scope."""
+    if not isinstance(config, dict):
+        raise ValueError("layer_parallel_config must be an object")
+    for name, layer in config.items():
+        if (not isinstance(layer, dict) or set(layer) != {"tp_size_or_ranks"}
+                or type(layer["tp_size_or_ranks"]) is not int or layer["tp_size_or_ranks"] != 1):
+            raise ValueError("Different --mtp-tp supports only layer_parallel_config overrides "
+                             f"with tp_size_or_ranks=1 and no transforms; unsupported layer: {name}")
+
+
 class MtpParallel:
     def __init__(self, plan, cfg, device, rank):
         import torch

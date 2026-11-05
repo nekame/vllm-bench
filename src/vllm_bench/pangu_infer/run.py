@@ -186,8 +186,9 @@ def make_plan(a):
     opt = operator["operator_optimization_config"]
     if not isinstance(parallel, dict) or not isinstance(opt, dict):
         raise ValueError("Operator config sections must be objects")
-    if split_mtp and parallel.get("layer_parallel_config"):
-        raise ValueError("Different --mtp-tp requires an empty layer_parallel_config; per-layer groups are shared by Omni")
+    if split_mtp:
+        from vllm_bench.pangu_infer.mtp_parallel import validate_layer_parallel_config
+        validate_layer_parallel_config(parallel.get("layer_parallel_config", {}))
     # These paths require additional batch/state protocols and are deliberately
     # rejected rather than silently changing the user's operator configuration.
     forbidden = ("ena_seq_parallel", "ena_context_parallel", "ena_swa_attn_seq_parallel",

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from vllm_bench.pangu_infer import run, runtime
-from vllm_bench.pangu_infer.mtp_parallel import MtpParallel, record_idle_mtp
+from vllm_bench.pangu_infer.mtp_parallel import MtpParallel, record_idle_mtp, validate_layer_parallel_config
 from vllm_bench.pangu_infer.runtime import DirectEngine
 
 
@@ -179,6 +179,17 @@ class MtpGroupTests(unittest.TestCase):
 
 
 class MtpPlanningTests(unittest.TestCase):
+    def test_singleton_overrides_are_preserved_and_cross_rank_groups_rejected(self):
+        config = {"self_attn.o_proj": {"tp_size_or_ranks": 1}}
+        original = deepcopy(config)
+        validate_layer_parallel_config(config)
+        self.assertEqual(config, original)
+        for layer in ({"tp_size_or_ranks": 2}, {"tp_size_or_ranks": 8}, {"tp_size_or_ranks": True},
+                      {"tp_size_or_ranks": [[0], [1]]},
+                      {"tp_size_or_ranks": 1, "x_transform": {"type": "AllGather", "tp_size_or_ranks": 8}}):
+            with self.subTest(layer=layer), self.assertRaisesRegex(ValueError, "layer_parallel_config"):
+                validate_layer_parallel_config({"self_attn.o_proj": layer})
+
     def test_modes_depths_and_tp_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -203,6 +214,11 @@ class MtpPlanningTests(unittest.TestCase):
             operator.write_text('{"model_parallel_config": {"layer_parallel_config": {"q_proj": {}}}, "operator_optimization_config": {}}')
             with self.assertRaisesRegex(ValueError, "layer_parallel_config"):
                 plan("--mtp-tp", "2")
+            operator.write_text('{"model_parallel_config": {"layer_parallel_config": {"self_attn.o_proj": {"tp_size_or_ranks": 1}}}, "operator_optimization_config": {}}')
+            for tp in (1, 2, 4):
+                planned = plan("--mtp-tp", str(tp))
+                self.assertEqual(planned["operator_config"]["model_parallel_config"]["layer_parallel_config"],
+                                 {"self_attn.o_proj": {"tp_size_or_ranks": 1}})
 
 
 class MtpLoadingTests(unittest.TestCase):

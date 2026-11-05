@@ -441,9 +441,8 @@ def main(argv=None):
     mtp = None
     try:
         if a.get("mtp_tp") is not None and a["mtp_tp"] != a["tp"]:
-            if extra.parall_config.layer_parallel_config:
-                raise ValueError("Effective layer_parallel_config must be empty with different MTP TP")
-            from vllm_bench.pangu_infer.mtp_parallel import MtpParallel
+            from vllm_bench.pangu_infer.mtp_parallel import MtpParallel, validate_layer_parallel_config
+            validate_layer_parallel_config(extra.parall_config.layer_parallel_config)
             mtp = MtpParallel(plan, cfg, device, rank)
             if rank == 0:
                 print(f"[execution] target_tp={a['tp']} mtp_tp={mtp.tp} mtp_ranks={list(range(mtp.tp))}", flush=True)

@@ -170,9 +170,13 @@ MTP timing rows содержат нули до TP MAX reduction: итогово�
 В `result.json` сохраняются `effective.mtp_tp`, `effective.mtp_ranks` и TP
 каждой execution lane на rank 0.
 
-Отличающийся MTP TP поддерживается только direct и требует пустого
-`model_parallel_config.layer_parallel_config`: Omni выбирает эти группы по
-коротким именам слоя, одинаковым для target и MTP. Изменения файлов Omni
+Отличающийся MTP TP поддерживается только direct. В
+`model_parallel_config.layer_parallel_config` разрешены переопределения вида
+`"self_attn.o_proj": {"tp_size_or_ranks": 1}`: одноранговые группы сохраняют
+реплицированный слой у обеих моделей. Пустой конфиг также разрешён.
+Группы большего размера и x/y transforms пока отклоняются: Omni выбирает
+эти общие группы по коротким именам слоя, одинаковым для target и MTP.
+Изменения файлов Omni
 не требуются; scoped переключение групп описано в `UPSTREAM.md`.
 Для matrix используйте `"engines": ["direct"]`, `"tp": [8]` и
 `"options": ["--mtp-tp", "2"]`.
