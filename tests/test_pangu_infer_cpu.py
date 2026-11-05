@@ -480,10 +480,12 @@ class LoadingAndBaselineTests(unittest.TestCase):
             (root / "shards").mkdir()
             (root / "shards/weights.safetensors").write_bytes(b"unchanged")
             names = ("model.embed_tokens.weight", "lm_head.weight", "model.layers.0.weight",
-                     "model.layers.12.eh_proj.weight", "model.layers.12.eh_proj.weight_scale")
+                     "model.layers.12.eh_proj.weight", "model.layers.12.eh_proj.weight_scale",
+                     "model.layers.13.eh_proj.weight")
             (root / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
                 name: "shards/weights.safetensors" for name in names}}))
             payload = {name: object() for name in names}
+            read = []
             class Shard:
                 def __enter__(self):
                     return self
@@ -492,14 +494,19 @@ class LoadingAndBaselineTests(unittest.TestCase):
                 def keys(self):
                     return names
                 def get_tensor(self, name):
+                    read.append(name)
                     return payload[name]
             with patch.dict(sys.modules, {"safetensors": SimpleNamespace(safe_open=lambda *args, **kwargs: Shard())}):
                 target = dict(weight_iterator(root, draft=False, start=12))
                 draft = dict(weight_iterator(root, draft=True, start=12))
                 standalone = dict(weight_iterator(root, draft=True, start=12, include_shared=True))
+                read.clear()
+                selected = dict(weight_iterator(root, draft=True, start=12, include_shared=True, draft_layers=[12]))
             self.assertEqual(set(target), set(names[:3]))
             self.assertEqual(set(draft), set(names[3:]))
             self.assertEqual(set(standalone), set(names[:2] + names[3:]))
+            self.assertEqual(set(selected), set(names[:2] + names[3:5]))
+            self.assertNotIn(names[5], read)
             for name, value in {**target, **draft}.items():
                 self.assertIs(value, payload[name])
             self.assertEqual((root / "shards/weights.safetensors").read_bytes(), b"unchanged")

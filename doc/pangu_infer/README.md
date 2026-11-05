@@ -38,6 +38,10 @@ compile и ACL replay требуют проверки на сервере Ascend
   `depth <= num_nextn_predict_layers` используются successive predictor heads;
   при большей глубине все шаги используют первый predictor. Это не циклический
   обход физических слоёв. Политика совпадает с default `fix_multi_mtp_kvcache=false`.
+  Direct создаёт и загружает только реально используемые predictor-слои:
+  при трёх checkpoint heads и depth 7 — первый, при depth 3 — все три.
+  Неиспользуемые слои не занимают NPU-память и не читаются из safetensors.
+  Выбранные физические индексы сохраняются в `details.draft_loaded_layers`.
 
 Полная модель при TP1 может не поместиться в память. Такой запуск завершается
 ошибкой и сохраняет log, без offload, случайных весов или смены checkpoint.
@@ -190,6 +194,35 @@ compile-acl отдельно для MTP1/2/4. Затем запускайте п
 проверки на сервере. Разный MTP TP меняет workload fingerprint; стандартный
 benchmark compare его отклоняет. `compare --correctness` допускает такую
 проверку greedy token IDs без вывода о speedup/Python overhead.
+
+## Уменьшение памяти direct
+
+Для удаления общего padding между страницами разных типов кеша добавьте:
+
+```bash
+--compact-kv-cache
+```
+
+У direct каждый слой владеет отдельным raw-буфером. По умолчанию размеры
+страниц сохраняют общее hybrid-выравнивание Omni; с этим флагом cache spec
+каждого слоя получает собственный размер страницы. Исходный spec не изменяется.
+MLA/DSA/MoME backends получают фактические strides через свои штатные reshape
+и metadata builders. Backend должен объявлять поддержку block-stride indexing.
+Количество блоков, токенов, dtype, MoME history и резервный block 0 сохраняются.
+Квантование кеша и ограничение истории не применяются.
+
+Флаг действует для target и MTP, с одинаковым или разным TP; поддерживается
+только direct. Строка `[cache] rank=... allocated_mib=... padding_saved_mib=...`
+показывает размер кеша и фактическую экономию на каждом rank. Выигрыш зависит
+от исходных cache specs; если padding отсутствовал, экономия равна нулю.
+NPU-корректность нового layout необходимо проверить на сервере.
+
+Другие способы уменьшения памяти: сократить `--context-length` (меняет
+нагрузку) или `--max-new-tokens` (уменьшает резерв продолжения). При контексте
+8192 сокращение генерации с 256 до 64 даёт небольшой эффект на KV-память.
+`gpu_memory_utilization` в direct не ограничивает собственные cache allocations.
+Если OOM возникает до `weights_loaded`, compact cache ещё не может помочь;
+загрузка только используемых MTP heads уменьшает уже память весов.
 
 ## Acceptance после prefill
 

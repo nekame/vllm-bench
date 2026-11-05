@@ -64,6 +64,8 @@ def parser():
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
                    help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
+    p.add_argument("--compact-kv-cache", action="store_true",
+                   help="Direct only: allocate each layer's cache with its own page size, without hybrid page padding")
     mtp = p.add_mutually_exclusive_group()
     mtp.add_argument("--depth", type=int, choices=(0, 3, 7), default=3,
                      help="MTP proposal depth; 0 disables MTP for greedy or sampled generation")
@@ -108,6 +110,8 @@ def parser():
 def make_plan(a):
     options = {key: str(value.resolve()) if isinstance(value, Path) else value
                for key, value in vars(a).items()}
+    if a.compact_kv_cache and a.engine != "direct":
+        raise ValueError("--compact-kv-cache requires --engine direct")
     if a.mtp_tp is not None:
         if a.depth == 0 or a.mtp_tp > a.tp or a.tp % a.mtp_tp:
             raise ValueError("--mtp-tp requires positive MTP depth and must divide target TP")

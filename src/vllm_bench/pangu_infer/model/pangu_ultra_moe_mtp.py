@@ -123,13 +123,14 @@ class OpenPanguMultiTokenPredictorLayer(nn.Module):
 
 
 class OpenPanguMultiTokenPredictor(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module | None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module | None,
+                 active_layers: list[int] | None = None):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         # to map the exact layer index from weights
-        mtp_layer_indices = range(
+        mtp_layer_indices = active_layers if active_layers is not None else range(
             self.mtp_start_layer_idx,
             self.mtp_start_layer_idx + self.num_mtp_layers,
         )
@@ -212,13 +213,14 @@ class OpenPanguMultiTokenPredictor(nn.Module):
 
 
 class OpenPanguMTP(nn.Module, SupportsPP):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module | None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", shared_target: nn.Module | None,
+                 active_layers: list[int] | None = None):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.owns_shared_weights = shared_target is None
         self.model = OpenPanguMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"),
-            shared_target=shared_target
+            shared_target=shared_target, active_layers=active_layers
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -256,8 +258,7 @@ class OpenPanguMTP(nn.Module, SupportsPP):
             and self.config.num_nextn_predict_layers > 0
         ):
             layer_idx = int(name.split("layers.")[-1].split(".")[0])
-            mtp_idx = layer_idx - self.config.num_hidden_layers
-            if mtp_idx >= 0 and mtp_idx < self.config.num_nextn_predict_layers:
+            if str(layer_idx) in self.model.layers:
                 return layer_idx
         return None
 

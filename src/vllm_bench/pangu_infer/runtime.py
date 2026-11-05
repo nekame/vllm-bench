@@ -133,7 +133,7 @@ def setup(plan):
     return cfg, device, rank, context, model_extra_config
 
 
-def weight_iterator(model_dir, *, draft, start, include_shared=False):
+def weight_iterator(model_dir, *, draft, start, include_shared=False, draft_layers=None):
     """Stream each selected safetensors tensor once; never dequantize weights."""
     from safetensors import safe_open
     import re
@@ -158,6 +158,8 @@ def weight_iterator(model_dir, *, draft, start, include_shared=False):
                     continue
                 match = layer_pattern.match(name)
                 is_draft = match is not None and int(match[1]) >= start
+                if draft and is_draft and draft_layers is not None and int(match[1]) not in draft_layers:
+                    continue
                 shared = name.startswith("model.embed_tokens.") or name.startswith("lm_head.")
                 if is_draft == draft or draft and include_shared and shared:
                     yield name, shard.get_tensor(name)
@@ -171,6 +173,7 @@ def load_models(plan, cfg, device, *, mtp=None):
     from vllm_bench.pangu_infer.model.pangu_ultra_moe import PanguUltraMoEForCausalLM
 
     a = plan["options"]
+    active_layers = sorted(set(plan["predictor_layers"])) if a["depth"] else []
     original_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(cfg.model_config.dtype)
@@ -181,7 +184,8 @@ def load_models(plan, cfg, device, *, mtp=None):
                 from vllm_bench.pangu_infer.model.pangu_ultra_moe_mtp import OpenPanguMTP
                 with mtp.context() if mtp is not None else nullcontext():
                     draft = OpenPanguMTP(vllm_config=mtp.cfg if mtp is not None else cfg,
-                                         prefix="draft_model", shared_target=None if mtp is not None else target)
+                                         prefix="draft_model", shared_target=None if mtp is not None else target,
+                                         active_layers=active_layers)
     finally:
         torch.set_default_dtype(original_dtype)
     start = plan["config"]["num_hidden_layers"]
@@ -189,7 +193,8 @@ def load_models(plan, cfg, device, *, mtp=None):
     loaded_draft = set()
     if draft is not None:
         with mtp.context() if mtp is not None else nullcontext():
-            loaded_draft = draft.load_weights(weight_iterator(a["model"], draft=True, start=start, include_shared=mtp is not None))
+            loaded_draft = draft.load_weights(weight_iterator(a["model"], draft=True, start=start,
+                                                              include_shared=mtp is not None, draft_layers=active_layers))
     if not loaded_target or draft is not None and not loaded_draft:
         raise ValueError("Checkpoint did not load target/MTP parameters")
     require_loaded_parameters(target, loaded_target)
@@ -210,7 +215,8 @@ def load_models(plan, cfg, device, *, mtp=None):
                 model.eval()
     torch.npu.synchronize()
     return target, draft, {"target_loaded_parameters": len(loaded_target),
-                           "draft_loaded_parameters": len(loaded_draft)}
+                           "draft_loaded_parameters": len(loaded_draft),
+                           "draft_loaded_layers": active_layers if draft is not None else []}
 
 
 def require_loaded_parameters(model, loaded, shared=()):
@@ -234,7 +240,10 @@ class DirectEngine:
         self.model_timings = None
         if plan["config"].get("use_mome"):
             current_platform._align_hybrid_block_size(cfg, None)
-        self.caches = Caches(cfg, device)
+        self.caches = Caches(cfg, device, compact=self.a.get("compact_kv_cache", False))
+        if self.a.get("compact_kv_cache", False):
+            print(f"[cache] rank={rank} compact=true allocated_mib={self.caches.bytes / (1 << 20):.2f}"
+                  f" padding_saved_mib={self.caches.padding_saved_bytes / (1 << 20):.2f}", flush=True)
         self.executions = {}
         self.sampler = Sampler(self.a, device, rank)
         self.prompt = torch.tensor(plan["prompt_ids"], dtype=torch.int64, device=device)
@@ -527,6 +536,8 @@ def main(argv=None):
             if mtp is not None:
                 effective["mtp_tp"] = mtp.tp
                 effective["mtp_ranks"] = list(range(mtp.tp))
+            if a.get("compact_kv_cache", False):
+                effective["cache_layout"] = "per_layer_pages"
             from vllm_bench.pangu_infer.results import save_result, versions
             if rank == 0:
                 if a.get("model_timing", False):

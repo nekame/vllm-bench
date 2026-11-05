@@ -1,6 +1,7 @@
 """Allocate and bind caches without constructing a model runner."""
 
 import math
+from dataclasses import replace
 
 
 def compatible_groups(groups):
@@ -17,14 +18,22 @@ def compatible_groups(groups):
 
 
 class CacheGroup:
-    def __init__(self, name, layer, spec, cfg, device):
+    def __init__(self, name, layer, spec, cfg, device, *, compact=False):
         import torch
         from omni_npu.attention.backends.mome import NPUPanguMomeBackend
 
-        self.name, self.layer, self.spec = name, layer, spec
         self.backend = layer.get_attn_backend()
+        padded_page_bytes = spec.page_size_bytes
+        if compact:
+            if not self.backend.indexes_kv_by_block_stride():
+                raise ValueError(f"Compact cache requires block-stride indexing: {name}")
+            # Each layer owns a separate allocation. Uniform hybrid pages are
+            # needed by the stock allocator, not by these independent tensors.
+            spec = replace(spec, page_size_padded=None)
+        self.name, self.layer, self.spec = name, layer, spec
         self.mome = self.backend is NPUPanguMomeBackend
         self.blocks = 2 if self.mome else 1 + math.ceil(cfg.model_config.max_model_len / spec.block_size)
+        self.padding_saved_bytes = self.blocks * (padded_page_bytes - spec.page_size_bytes)
         # Block zero is reserved; all real requests use block one onwards.
         self.raw = torch.zeros(self.blocks * spec.page_size_bytes, dtype=torch.int8, device=device)
         self.cache = self.backend.reshape_kv_cache(self.raw, self.blocks, spec)
@@ -33,7 +42,7 @@ class CacheGroup:
 
 
 class Caches:
-    def __init__(self, cfg, device):
+    def __init__(self, cfg, device, *, compact=False):
         self.cfg, self.device = cfg, device
         self.groups = []
         for name, layer in cfg.compilation_config.static_forward_context.items():
@@ -44,7 +53,7 @@ class Caches:
                 raise ValueError("CLA cache sharing needs a separate adapter")
             spec = getter(cfg)
             if spec is not None:
-                self.groups.append(CacheGroup(name, layer, spec, cfg, device))
+                self.groups.append(CacheGroup(name, layer, spec, cfg, device, compact=compact))
         if not self.groups:
             raise ValueError("Model did not register any attention/state caches")
         # Every layer has its own raw allocation, but one batch-one request
@@ -53,6 +62,7 @@ class Caches:
             for group in bucket[1:]:
                 group.block_table = bucket[0].block_table
         self.bytes = sum(group.raw.numel() for group in self.groups)
+        self.padding_saved_bytes = sum(group.padding_saved_bytes for group in self.groups)
 
     def reset(self):
         for group in self.groups:

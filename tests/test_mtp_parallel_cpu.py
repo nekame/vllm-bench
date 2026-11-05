@@ -229,6 +229,7 @@ class MtpLoadingTests(unittest.TestCase):
                 cfg.model_config = SimpleNamespace(dtype="bf16")
                 plan["options"]["model"] = "/tmp/model"
                 plan["config"]["num_hidden_layers"] = 12
+                plan["predictor_layers"] = [12] * 7
                 events = []
                 class Model:
                     def __init__(self, label):
@@ -249,6 +250,7 @@ class MtpLoadingTests(unittest.TestCase):
                 target_factory = Mock(side_effect=lambda **kwargs: Model("target"))
                 def draft_factory(**kwargs):
                     self.assertIsNone(kwargs["shared_target"])
+                    self.assertEqual(kwargs["active_layers"], [12])
                     self.assertEqual(kwargs["vllm_config"].parallel_config.tensor_parallel_size, 2)
                     return Model("draft")
                 draft_factory_mock = Mock(side_effect=draft_factory)
@@ -274,6 +276,7 @@ class MtpLoadingTests(unittest.TestCase):
                     draft_factory_mock.assert_called_once()
                     self.assertIsNotNone(draft)
                     self.assertTrue(weights.call_args.kwargs["include_shared"])
+                    self.assertEqual(weights.call_args.kwargs["draft_layers"], [12])
                     self.assertEqual(details["draft_loaded_parameters"], 1)
                 else:
                     draft_factory_mock.assert_not_called()
