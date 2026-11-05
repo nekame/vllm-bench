@@ -281,7 +281,8 @@ class DirectEngine:
                 names, size, self.device, head=head if kind == "draft" else None,
                 mode="eager" if prefill else self.a["mode"], profile=self.a["profile"],
                 memory_diagnostics=self.a.get("memory_diagnostics", False),
-                query_size=query_size, isolate_graph_tasks=self.a.get("mtp_pad_to_8", False))
+                query_size=query_size,
+                isolate_graph_tasks=self.a.get("mtp_pad_to_8", False) or getattr(self, "mtp", None) is not None)
         execution = self.executions[key]
         call = execution.diagnostic_call if self.a.get("memory_diagnostics", False) else execution
         return call(ids, start, accepted, self.a["context_length"], hidden=hidden,

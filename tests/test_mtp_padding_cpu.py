@@ -208,6 +208,23 @@ class PaddingExecutionTests(unittest.TestCase):
             engine.forward("draft", Buffer([71]), 8193, 1, head=1, draft_index=1)
             self.assertEqual(execution.call_args.args[4], 1)
 
+    def test_mixed_tp_isolates_both_models_graphs_without_padding(self):
+        engine = DirectEngine.__new__(DirectEngine)
+        engine.a = {"depth": 7, "context_length": 8192, "profile": False, "mode": "compile-acl"}
+        engine.plan = {"config": {"num_hidden_layers": 12, "num_nextn_predict_layers": 3}}
+        engine.names = {"target": ["model.layers.0.attn"], "draft": ["draft_model.model.layers.12.attn"]}
+        engine.executions, engine.model_timings = {}, None
+        engine.cfg, engine.caches, engine.device = object(), object(), "npu:0"
+        engine.target, engine.draft = object(), object()
+        engine.mtp = SimpleNamespace(cfg=object())
+        with patch("vllm_bench.pangu_infer.execution.Execution") as execution:
+            engine.forward("target", Buffer(list(range(8))), 8192, 1)
+            engine.forward("draft", Buffer(list(range(8))), 8192, 1, draft_index=0)
+            self.assertEqual(execution.call_count, 2)
+            self.assertTrue(all(call.kwargs["isolate_graph_tasks"] for call in execution.call_args_list))
+            self.assertIs(execution.call_args_list[0].args[1], engine.cfg)
+            self.assertIs(execution.call_args_list[1].args[1], engine.mtp.cfg)
+
     def test_cli_only_allows_direct_mtp_and_registers_size_eight(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -230,7 +247,9 @@ class GraphTaskOwnershipTests(unittest.TestCase):
     def test_equal_size_graphs_keep_their_own_handles_workspaces_and_events(self):
         descriptor = namedtuple("Descriptor", "num_tokens")(8)
         context = SimpleNamespace(batch_descriptor=descriptor, cudagraph_runtime_mode="FULL", attn_metadata={}, value=1)
-        params = SimpleNamespace(task_entries={8: {}}, workspaces={8: {}})
+        original_tasks = {"other_model": object()}
+        original_workspaces = {"workspace": "other-model-workspace"}
+        params = SimpleNamespace(task_entries={8: original_tasks}, workspaces={8: original_workspaces})
         operations = []
         def capture(label):
             op = SimpleNamespace(compute_dynamic_kwargs=lambda context, name, cfg: {"value": context.value},
@@ -246,7 +265,11 @@ class GraphTaskOwnershipTests(unittest.TestCase):
                     return self.label
                 if descriptor not in self.concrete_aclgraph_entries:
                     params.task_entries[8]["draft.attn"] = capture(self.label)
-                    params.workspaces[8]["workspace"] = self.label + "-workspace"
+                    # Match Omni: reuse the first workspace for this op and
+                    # token count even if a later graph needs a different size.
+                    params.workspaces[8].setdefault("workspace", self.label + "-workspace")
+                    if self.label == "fail":
+                        raise RuntimeError("capture failed")
                     self.concrete_aclgraph_entries[descriptor] = SimpleNamespace(aclgraph=object())
                 else:
                     self._update_graph_tasks("stream", context)
@@ -268,7 +291,8 @@ class GraphTaskOwnershipTests(unittest.TestCase):
                 first_task = packed.owned_tasks[descriptor]["draft.attn"]
                 padded()
                 second_task = padded.owned_tasks[descriptor]["draft.attn"]
-                self.assertIs(params.task_entries[8]["draft.attn"], second_task)
+                self.assertIs(params.task_entries[8], original_tasks)
+                self.assertIs(params.workspaces[8], original_workspaces)
                 self.assertIsNot(first_task, second_task)
                 context.value = 2
                 packed()
@@ -276,6 +300,13 @@ class GraphTaskOwnershipTests(unittest.TestCase):
                 self.assertEqual(operations, ["packed", "padded"])
                 self.assertEqual(first_task.op_desc.op_out_fn.call_args.kwargs["workspace"], "packed-workspace")
                 self.assertEqual(second_task.op_desc.op_out_fn.call_args.kwargs["workspace"], "padded-workspace")
+                failed = module.DirectACLGraphWrapper("fail")
+                with self.assertRaisesRegex(RuntimeError, "capture failed"):
+                    failed()
+                self.assertEqual(failed.owned_tasks, {})
+                self.assertEqual(failed.owned_workspaces, {})
+                self.assertIs(params.task_entries[8], original_tasks)
+                self.assertIs(params.workspaces[8], original_workspaces)
                 self.assertIsNone(first_task.op_desc.op_out_fn.call_args.kwargs["actual_seq_lengths"])
                 self.assertEqual(first_task.op_desc.op_out_fn.call_args.kwargs["value"], 2)
                 first_task.event.record.assert_called_once_with("stream")

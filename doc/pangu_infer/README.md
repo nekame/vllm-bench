@@ -174,6 +174,14 @@ MTP timing rows содержат нули до TP MAX reduction: итогово�
 В `result.json` сохраняются `effective.mtp_tp`, `effective.mtp_ranks` и TP
 каждой execution lane на rank 0.
 
+При разных TP каждый direct ACL-граф захватывает собственные attention
+workspaces и task handles. Общий cache Omni по числу токенов и типу операции
+не учитывает разное число локальных heads у target и MTP; переиспользовать его
+workspace между этими графами небезопасно. Изоляция действует для `acl` и
+`compile-acl`, не меняет graph pool и может увеличить расход памяти workspace.
+Проверки CPU покрывают владение ресурсами; mixed-TP capture/replay требует
+проверки на NPU.
+
 Отличающийся MTP TP поддерживается только direct. В
 `model_parallel_config.layer_parallel_config` разрешены переопределения вида
 `"self_attn.o_proj": {"tp_size_or_ranks": 1}`: одноранговые группы сохраняют

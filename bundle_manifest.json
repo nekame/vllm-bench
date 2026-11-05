@@ -10,8 +10,8 @@
     "doc/layer_profile/README.md": "55d1abf26e703d853bbe3a3b074959dbb717efff92fb83ac8b968f284624222e",
     "doc/mtp_debug/README.md": "5b0b5f24acfaf8c6688fac3b0678d02a49b67dc4c4537813a4f975ed4f056bc0",
     "doc/mtp_profile/README.md": "7e8f28879945d10204269ec9254c4acd17bc42e9d51a16be290dd9af7905fda6",
-    "doc/pangu_infer/README.md": "3baf71d79fc292ca6696e4eb642e75671fee0beec0992e6610a3f4906cabd0d8",
-    "doc/pangu_infer/UPSTREAM.md": "162e25fea5044af591427a4d7c199b93a782339b0404b4f1979679ab21cc678f",
+    "doc/pangu_infer/README.md": "499780fab7b24d18844ba566b539d1444423266d590fe009ebbbd88fe8ee73b5",
+    "doc/pangu_infer/UPSTREAM.md": "3704dab4d57e86f10fbcfdb36a479c0c6ad11140cdb1843ea449faea7a2e4a62",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
     "doc/reference/PANGU_505B_RU.md": "3105fd8bf9ae2510d3a3931b04aa29905dad2b7cde2a34ea7a4e3dfbbcc0ec1e",
@@ -57,7 +57,7 @@
     "src/vllm_bench/pangu_infer/matrix.py": "955c3dcaffcb88b608ba1e567b73246a5321c59d4298d238d960cd93b8fe57a0",
     "src/vllm_bench/pangu_infer/memory.py": "bbffc3d001c0db7883fd28ca53909e22b785d6c536f364a43a31204ae6336b87",
     "src/vllm_bench/pangu_infer/model/__init__.py": "f12b16e6972f50bc4d3a7cd7f83835c2e64230440a8dfa9d4bc53c00c69f560b",
-    "src/vllm_bench/pangu_infer/model/acl_graph.py": "1266153ef5327082c7e5e259be8d347b32ce1859b6fb8dcdf16511728c4722d5",
+    "src/vllm_bench/pangu_infer/model/acl_graph.py": "ffb2e30905fe9aba5df28c1c4d1ec5b720b27083747a7a0e6b978168a2cbd451",
     "src/vllm_bench/pangu_infer/model/attention.py": "a90b2560ef913b12191535d3901312c071958aa2d33dd69b753853015829d39d",
     "src/vllm_bench/pangu_infer/model/pangu_ultra_moe.py": "c67ecc1fe42a9952182e3ac9875b07c2464842c3ef970c70ee4fbc8db68c241e",
     "src/vllm_bench/pangu_infer/model/pangu_ultra_moe_mtp.py": "9418c20457a908ff5c0f0a10326e2ca1b033a10d1c2f4bb5610473e03f7a5c0a",
@@ -66,7 +66,7 @@
     "src/vllm_bench/pangu_infer/prompts.py": "ea3214cc4344b241eb3f4a0568e73e36d18de58b1668e772f29269a2f243ca4a",
     "src/vllm_bench/pangu_infer/results.py": "1cb0a5ef0e6bbbb9ae49310e00a3c822826fbf8bec19e59a9d14daed1bcce065",
     "src/vllm_bench/pangu_infer/run.py": "9e580ae186c1fece85ef78a3de4d072cdcd64d9c73e4a6ac565009c2b47eb37c",
-    "src/vllm_bench/pangu_infer/runtime.py": "cc549711f28f2169a6c00ae237739f2c286a80141b02e560e89bca84c296d2a7",
+    "src/vllm_bench/pangu_infer/runtime.py": "44f99b52384deecf63c139598aa488c0d3e8dfb211c92d285fe011f6aad3705a",
     "src/vllm_bench/pangu_infer/sampling.py": "626b5bade706e21a996a0a607212dc4ef2141977cc0d3ce984fdaf7227d88d99",
     "src/vllm_bench/pangu_infer/target_trace.py": "05e5959598b30cba0ee7e6fcc17a1ed55ac4398bc8c3259746438b31484f7d90",
     "src/vllm_bench/pangu_infer/trace_compare.py": "4d04974a9e8ef4c896eca15961c860008f6756ea9aaffd38df51b361333f5506",
@@ -86,7 +86,7 @@
     "tests/test_memory_diagnostics_cpu.py": "98983931f5395c6fc102fca81f57d6b96d2dcd213a7fe568c4c0af9ad51909fa",
     "tests/test_model_timing_cpu.py": "8ea1c9a6b4ea3f3d33b50c84151ec343a81b94fa714efefeb1f0d88f254a5cbf",
     "tests/test_mtp_cpu.py": "480ca08c786f33da52f1596d79b7210ded1a12bcce84ed040b7eb5521d7c4d52",
-    "tests/test_mtp_padding_cpu.py": "63e7ddff56ad6d1c818aa0b6d6a043ba7aab96cba16d6313569d4d3f293aedf9",
+    "tests/test_mtp_padding_cpu.py": "cd9564c25b4231951dfda49de86358a46a4146e8068f1dc00436b39085659977",
     "tests/test_mtp_parallel_cpu.py": "70724133363f2fcff43805bd375387b06ce4242b61395049c646958ef59347cf",
     "tests/test_pangu_infer_cpu.py": "0079da726dc394d934e5ea3ed7c499d0144eac370fad686aa8b33d406ccf612b",
     "tests/test_reduced_mtp_cpu.py": "abaa6d78909bd9f10d267cd7c86bdc2042c835e6cec5c8f246f95e5de95246a2",
@@ -97,7 +97,7 @@
     "tests/test_weight_packing_cpu.py": "9b6eb3b62434c5b92036bc80501ad2f1630376ce5f4946fb776d1899674add2e"
   },
   "validation": {
-    "cpu_tests": 214,
+    "cpu_tests": 215,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python -m unittest discover -s tests",
     "npu_execution_performed": false,
@@ -112,7 +112,7 @@
     "full_model_profile_validation": "CPU checks: V2/Ultra BF16/MXFP8 full-model dry-run without ML imports or checkpoint changes; MTP disabled or depths 3/7; manifest and benchmark/profile client dry-run; argument/checkpoint validation; target/MTP decoder annotations in mock workers; NPU smoke tests pending",
     "reduced_mtp_profile_validation": "CPU checks: V2/Ultra BF16/MXFP8 prefix target plus MTP extraction, payload/scales byte preservation, 50-52 to 12-14 remapping, SWA windows and quantization references, missing-weight/config rejection, verification and hashes, TP2 MTP launch/manifest/client, remapped decoder annotations; NPU smoke tests pending",
     "cpu_tests_skipped": 6,
-    "pangu_infer_validation": "208 tests passed, 6 optional CPU torch tests skipped (torch unavailable). New CPU coverage: stdlib CLI/matrix planning, workload matching, no silent compile bypass, streamed weight selection, missing-parameter rejection, metadata grouping, offline timing boundaries, exact rejection math, comparison guards and initial EOS results. NPU model loading, MXFP8 packing, MoME state correctness, TP collectives, torch.compile and ACL replay remain unverified; server smoke tests required.",
+    "pangu_infer_validation": "209 tests passed, 6 optional CPU torch tests skipped (torch unavailable). New CPU coverage: stdlib CLI/matrix planning, workload matching, no silent compile bypass, streamed weight selection, missing-parameter rejection, metadata grouping, offline timing boundaries, exact rejection math, comparison guards and initial EOS results. NPU model loading, MXFP8 packing, MoME state correctness, TP collectives, torch.compile and ACL replay remain unverified; server smoke tests required.",
     "pangu_infer_npu_execution_performed": false,
     "pangu_infer_platform_validation": "CPU regression checks: platform plugin omni-npu survives VLLM_PLUGINS filtering for direct/offline launches, user plugins preserved and deduplicated, empty/non-NPU platforms rejected before EngineArgs configuration. NPU execution remains pending.",
     "pangu_infer_tensor_context_validation": "CPU mock runtime regression: model loading/post-processing, cache/buffer initialization, warmup and decode run under no_grad; inference_mode is never entered. Actual tensor version counters and NPU weight post-processing require server validation.",
@@ -131,6 +131,7 @@
     "pangu_infer_weight_packing_validation": "CPU tests: packing failure preserves exception identity and reports target/MTP scope, actual layer TP, prefix/config key and weight/scales shapes for unaligned MXFP8 linears. Packed/aligned layers are excluded; output is bounded to four offenders. No weight padding or operator changes. Actual server packing failure requires the reported layer context to diagnose.",
     "pangu_infer_compact_cache_validation": "CPU tests: optional direct-only --compact-kv-cache, per-layer spec copy with page_size_padded=None; block-stride backend capability required; block counts/tables, block size and source spec remain unchanged; target/MTP/MoME allocations and padding savings accounted separately. Only planned predictor layers are constructed and streamed; unused MTP payloads are not read; mixed-TP loading stand-in verifies selected layer list. Python compile checks pass. Actual NPU compact-cache stride handling, numerical equality and memory savings require server validation.",
     "pangu_infer_chunked_prefill_validation": "CPU tests with causal-state and reusable-output stand-ins: sequential target/MTP chunks preserve absolute positions, shifted IDs, hidden rows, acceptance/head/draft metadata; output rows copied before lane reuse; final prompt logits selected, decode remains in requested compile/ACL mode. CLI guards chunk size/divisibility and trace incompatibility; direct/Omni engine token budgets and workload identity match. Omni cycle count excludes all prefill steps. Startup releases unused torch allocator cache once after packing/cache setup and before warmup. Python compilation passes. Actual NPU chunked MoME/MLA/DSA behavior, numerical equality, HCCL allocation and memory peak require server verification.",
-    "pangu_infer_gloo_check_validation": "Standalone diagnostic: CPU Gloo groups for target, replicated layer overrides and one MTP subgroup; all-reduce checks, per-operation timeout, rank/PID/host/interface/stage logs. --help and Python compilation checked locally. Real Gloo collectives not run because local torch is unavailable; server execution required. No inference runtime, interface settings or HCCL configuration changed."
+    "pangu_infer_gloo_check_validation": "Standalone diagnostic: CPU Gloo groups for target, replicated layer overrides and one MTP subgroup; all-reduce checks, per-operation timeout, rank/PID/host/interface/stage logs. --help and Python compilation checked locally. Real Gloo collectives not run because local torch is unavailable; server execution required. No inference runtime, interface settings or HCCL configuration changed.",
+    "pangu_infer_mtp_graph_workspace_validation": "CPU stand-ins verify separate workspaces and graph task handles for equal-size captures despite an existing operation cache, per-graph replay updates, registry restoration after success and failure, and wrapper selection for both mixed-TP models without padding. 215 tests ran: 209 passed, 6 skipped. Mixed-TP NPU capture/replay and HCCL timeout resolution remain unverified."
   }
 }

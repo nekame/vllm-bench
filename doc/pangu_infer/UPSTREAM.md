@@ -8,7 +8,7 @@
 | `pangu_ultra_moe.py` | `omni/v1/models/pangu/pangu_ultra_moe.py` | Удалены `support_torch_compile` и post-forward plugin decorator; attention-классы импортируются из локального адаптера; post-load вызывается явно после packing |
 | `pangu_ultra_moe_mtp.py` | `omni/v1/models/pangu/pangu_ultra_moe_mtp.py` | Удалён compile decorator; при одинаковом TP embedding/head общие с target; при отдельном MTP TP создаются собственные embedding/head и загружаются из глобальных checkpoint-весов; post-load вызывается явно |
 | `attention.py` | `MomeAttentionMixin._build_mome_conv` из `npu_mla.py`; `NPUMoMEPatch.MomeAttention` из `patch_mome_hybrid.py` | Явный MoME-класс и обычные подклассы attention вместо зависимости от динамического `vllm.model_executor.layers.npumome`; arithmetic, convolution operators и state spec сохранены |
-| `acl_graph.py` | `omni/compilation/acl_graph.py`, `ACLGraphWrapper._update_graph_tasks` | Только при `--mtp-pad-to-8`: подкласс wrapper сохраняет task handles и workspace references каждой записи графа отдельно; протокол dynamic kwargs/update/events сохранён |
+| `acl_graph.py` | `omni/compilation/acl_graph.py`, `ACLGraphWrapper._update_graph_tasks` | При разных TP или `--mtp-pad-to-8`: отдельные task handles и workspaces каждого графа, изоляция registry при capture; протокол dynamic kwargs/update/events сохранён |
 
 Оригинальные license/copyright headers сохранены. MoME adapter содержит
 атрибуцию исходному коду; его patch-источник использует Apache-2.0.
@@ -47,14 +47,19 @@ static sinks и необходимые vLLM adaptations загружаются �
 `VllmConfig`, forward context, distributed groups, metadata builders и
 `ACLGraphWrapper` оставлены как интерфейсы, необходимые существующим операторам.
 ACL wrapper обслуживает обновление graph tasks с динамическими длинами attention.
-Для необязательного padding-контроля используется локальный подкласс: в исходном
-Omni registry ключ состоит из physical input size и layer name, поэтому два
-отдельно захваченных direct MTP-графа 8/query=8 и 8/query=1 перезаписали бы
-handles друг друга. Подкласс после capture сохраняет ссылки на собственные
-GraphTaskEntry/workspaces и обновляет именно их. Сам capture, replay и graph pool
-остаются в исходном wrapper; глобальные функции и registry не подменяются.
-Без флага используется исходный wrapper. Изменение требует NPU проверки;
-CPU tests проверяют ownership handles/events/workspaces на stand-ins.
+При разных TP или padding-контроле используется локальный подкласс. В исходном
+Omni task registry ключ состоит из physical input size и layer name, поэтому
+отдельные direct MTP-графы 8/query=8 и 8/query=1 перезаписали бы handles друг друга.
+Workspace cache имеет ключ physical input size и workspace function, без TP и
+форм входов. Target TP8 и MTP TP2 с одинаковым числом токенов могут ошибочно
+использовать один workspace при разном числе локальных attention heads.
+Подкласс на время capture предоставляет пустые словари tasks/workspaces данного
+размера, сохраняет собственные GraphTaskEntry/workspaces и обновляет именно их.
+Предыдущие словари восстанавливаются в finally, включая ошибку capture.
+Сам capture, replay и graph pool остаются в исходном wrapper; глобальные функции
+не подменяются. При одинаковых TP без padding используется исходный wrapper.
+Изменение требует NPU проверки; CPU tests проверяют ownership handles/events/
+workspaces и восстановление registry на stand-ins.
 
 При обновлении OmniInfer сначала сравните перечисленные исходники с локальными
 копиями. Протокол MoME acceptance, политика multi-MTP и graph-task API привязаны

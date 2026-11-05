@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Own graph-task handles for direct executions with equal padded sizes.
+"""Own graph-task handles and workspaces for distinct direct executions.
 
 Adapted from omni/compilation/acl_graph.py; see doc/pangu_infer/UPSTREAM.md.
-Omni's registry is keyed by physical size and layer name. Separate packed
-and padded MTP graphs must retain the tasks captured into their own graph.
+Omni caches workspaces by physical size and operation. Separate TP layouts
+and packed/padded graphs must capture and retain their own workspace sizes.
 """
 
 import torch
@@ -25,14 +25,27 @@ class DirectACLGraphWrapper(ACLGraphWrapper):
         entry = self.concrete_aclgraph_entries.get(descriptor)
         capturing = (context.cudagraph_runtime_mode == self.runtime_mode
                      and (entry is None or entry.aclgraph is None))
-        result = super().__call__(*args, **kwargs)
-        if capturing:
-            params = get_graph_params()
+        if not capturing:
+            return super().__call__(*args, **kwargs)
+
+        params = get_graph_params()
+        size = descriptor.num_tokens
+        previous_tasks = params.task_entries[size]
+        previous_workspaces = params.workspaces[size]
+        # A workspace selected for target TP8 is not necessarily large enough
+        # for MTP TP2 at the same token count. Recompute it within this graph.
+        params.task_entries[size] = {}
+        params.workspaces[size] = {}
+        try:
+            result = super().__call__(*args, **kwargs)
             self.owned_tasks[descriptor] = {
                 name: task for name, task in params.task_entries[descriptor.num_tokens].items()
                 if name in self.attn_layer_names}
             self.owned_workspaces[descriptor] = params.workspaces[descriptor.num_tokens].copy()
-        return result
+            return result
+        finally:
+            params.task_entries[size] = previous_tasks
+            params.workspaces[size] = previous_workspaces
 
     def reset_captured_graphs(self):
         super().reset_captured_graphs()
