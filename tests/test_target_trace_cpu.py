@@ -343,7 +343,7 @@ class TraceBaselineTests(unittest.TestCase):
                         return [2]
                     raise AssertionError(function.__name__)
                 engine = SimpleNamespace(collective_rpc=rpc)
-                def request(engine, plan, request_id, limit):
+                def request(engine, plan, request_id, limit, *, prompt_ids=None):
                     events.append("warmup" if request_id.startswith("warmup") else "measure")
                     if fail and request_id.startswith("measure"):
                         raise RuntimeError("request failed")

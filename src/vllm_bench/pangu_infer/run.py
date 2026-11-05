@@ -70,7 +70,10 @@ def parser():
     p.add_argument("--mtp-pad-to-8", action="store_true",
                    help="Direct only: pad recurrent single-token MTP calls to 8 input rows")
     p.add_argument("--mode", choices=MODES, default="eager")
-    p.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
+    prompt = p.add_mutually_exclusive_group()
+    prompt.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
+    prompt.add_argument("--prompts", type=Path, help="JSON array of {id, input} text prompts")
+    p.add_argument("--tokenizer", type=Path, help="Tokenizer directory for --prompts; default: model directory")
     p.add_argument("--context-length", type=int, default=8192)
     p.add_argument("--max-new-tokens", type=int, default=256)
     p.add_argument("--temperature", type=float, default=1)
@@ -110,6 +113,10 @@ def make_plan(a):
     if a.mtp_pad_to_8 and (a.engine != "direct" or a.depth == 0):
         raise ValueError("--mtp-pad-to-8 requires --engine direct and positive depth")
     diagnostic_trace = a.trace_target or a.replay_target is not None
+    if a.tokenizer and not a.prompts:
+        raise ValueError("--tokenizer requires --prompts")
+    if a.prompts and diagnostic_trace:
+        raise ValueError("Text prompt batches cannot be combined with target trace/replay; use --prompt-ids")
     if a.replay_with_mtp and (a.replay_target is None or a.depth == 0):
         raise ValueError("--replay-with-mtp requires --replay-target and positive depth")
     if diagnostic_trace:
@@ -142,7 +149,12 @@ def make_plan(a):
     vocab = config["vocab_size"]
     if type(vocab) is not int or vocab <= 1 or a.top_k > vocab:
         raise ValueError("Invalid vocabulary or top-k exceeds vocabulary")
-    if a.prompt_ids:
+    prompts = None
+    if a.prompts:
+        from vllm_bench.pangu_infer.prompts import load_prompts
+        prompts = load_prompts(a.prompts, a.tokenizer or a.model, a.context_length, vocab)
+        prompt = prompts[0]["prompt_ids"]
+    elif a.prompt_ids:
         prompt = json.loads(a.prompt_ids.read_text())
     else:
         # Deterministic synthetic prompt, shared byte-for-byte by both engines.
@@ -197,9 +209,10 @@ def make_plan(a):
         raise ValueError("Prompt + generation + speculative window exceeds model position limit")
     scope = "reduced" if (a.model / "extraction_manifest.json").is_file() else "full"
     identity = checkpoint_identity(a.model)
+    prompt_hash = fingerprint(prompts if prompts is not None else prompt)
     match = {"model": options["model"], "config": config, "operator": operator,
              "checkpoint_identity": identity,
-             "additional": additional, "prompt_sha256": fingerprint(prompt),
+             "additional": additional, "prompt_sha256": prompt_hash,
              "tp": a.tp, "depth": a.depth, "mode": a.mode,
              "temperature": a.temperature, "top_k": a.top_k, "top_p": a.top_p,
              "seed": a.seed, "max_new_tokens": a.max_new_tokens, "respect_eos": a.respect_eos}
@@ -208,12 +221,14 @@ def make_plan(a):
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
             "hf_overrides": hf_overrides,
             "operator_config": operator, "additional_config": additional,
-            "prompt_ids": prompt, "prompt_sha256": fingerprint(prompt),
+            "prompt_ids": prompt, "prompt_sha256": prompt_hash,
             "comparison_sha256": fingerprint(match), "max_model_len": max_len,
             "checkpoint_identity": identity,
             "quantization": quantization, "model_scope": scope,
             "predictor_layers": predictor_sequence(config, a.depth) if a.depth else [],
             "upstream_commit": UPSTREAM, "validation": "NPU execution not yet performed"}
+    if prompts is not None:
+        plan["prompts"] = prompts
     if diagnostic_trace:
         from vllm_bench.pangu_infer.target_trace import parse_layers, validate_replay
         plan["trace_layers"] = parse_layers(a.trace_layers, config["num_hidden_layers"])
@@ -282,7 +297,7 @@ def main(argv=None):
         plan = make_plan(a)
         # Validate inherited hooks even in dry-run, without importing torch.
         child_environment(plan)
-        print(json.dumps({k: v for k, v in plan.items() if k != "prompt_ids"}, indent=2, ensure_ascii=False))
+        print(json.dumps({k: v for k, v in plan.items() if k not in ("prompt_ids", "prompts")}, indent=2, ensure_ascii=False))
         return launch(plan) if a.execute else 0
     except (ValueError, OSError, KeyError, TypeError) as error:
         p.error(str(error))

@@ -303,6 +303,13 @@ class DirectEngine:
                 "replays": sum(e.replays for e in self.executions.values()),
                 "calls": sum(e.calls for e in self.executions.values())}
 
+    def set_prompt(self, prompt_ids):
+        import torch
+
+        if len(prompt_ids) != self.a["context_length"]:
+            raise ValueError("Prompt must have exactly context-length tokens")
+        self.prompt.copy_(torch.tensor(prompt_ids, dtype=torch.int64, device=self.device))
+
     def generate(self, limit, *, profile=False, model_timing=False):
         import torch
 
@@ -456,15 +463,20 @@ def main(argv=None):
                 profiler = nullcontext()
             with profiler:
                 records = []
-                for repeat in range(1, a["repeats"] + 1):
-                    record = engine.generate(a["max_new_tokens"], profile=a["profile"],
-                                             model_timing=a.get("model_timing", False))
-                    if a.get("model_timing", False):
-                        from vllm_bench.pangu_infer.model_timing import reduce_model_timings, log_model_timings
-                        reduce_model_timings(record["model_timings"], a["tp"])
-                        if rank == 0:
-                            log_model_timings(record["model_timings"], repeat)
-                    records.append(record)
+                for prompt in plan.get("prompts", [None]):
+                    if prompt is not None:
+                        engine.set_prompt(prompt["prompt_ids"])
+                    for repeat in range(1, a["repeats"] + 1):
+                        record = engine.generate(a["max_new_tokens"], profile=a["profile"],
+                                                 model_timing=a.get("model_timing", False))
+                        if prompt is not None:
+                            record.update(id=prompt["id"], repeat=repeat)
+                        if a.get("model_timing", False):
+                            from vllm_bench.pangu_infer.model_timing import reduce_model_timings, log_model_timings
+                            reduce_model_timings(record["model_timings"], a["tp"])
+                            if rank == 0:
+                                log_model_timings(record["model_timings"], len(records) + 1)
+                        records.append(record)
             after = engine.counters()
             if any(after[k] != before[k] for k in ("compiles", "captures")):
                 raise RuntimeError("Compilation/capture occurred during measured requests; increase warmup or fix specialization")

@@ -33,7 +33,7 @@ def worker_state(worker):
             "hardware": torch.npu.get_device_name()}
 
 
-def request(engine, plan, request_id, limit):
+def request(engine, plan, request_id, limit, *, prompt_ids=None):
     from vllm import SamplingParams
 
     a = plan["options"]
@@ -42,7 +42,7 @@ def request(engine, plan, request_id, limit):
         seed=a["seed"], max_tokens=limit, ignore_eos=not a["respect_eos"], detokenize=False)
     engine.collective_rpc(synchronize_worker)
     start = time.perf_counter()
-    engine.add_request(request_id, {"prompt_token_ids": plan["prompt_ids"]}, params)
+    engine.add_request(request_id, {"prompt_token_ids": plan["prompt_ids"] if prompt_ids is None else prompt_ids}, params)
     first_time, first_count, tokens, cycles = None, 0, [], 0
     accepted_drafts = []
     while engine.has_unfinished_requests():
@@ -114,7 +114,14 @@ def main(argv=None):
         from vllm_bench.pangu_infer.target_trace import install_target_trace, finish_target_trace
         engine.collective_rpc(install_target_trace, args=(str(trace_directory), plan["trace_layers"]))
     try:
-        records = [request(engine, plan, f"measure-{i}", a["max_new_tokens"]) for i in range(a["repeats"])]
+        records = []
+        for prompt in plan.get("prompts", [None]):
+            prompt_ids = None if prompt is None else prompt["prompt_ids"]
+            for repeat in range(1, a["repeats"] + 1):
+                record = request(engine, plan, f"measure-{len(records)}", a["max_new_tokens"], prompt_ids=prompt_ids)
+                if prompt is not None:
+                    record.update(id=prompt["id"], repeat=repeat)
+                records.append(record)
     finally:
         if a.get("trace_target", False):
             counts = engine.collective_rpc(finish_target_trace)

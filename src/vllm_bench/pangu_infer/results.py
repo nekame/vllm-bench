@@ -48,4 +48,15 @@ def save_result(output, plan, records, effective, details):
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerow({key: summary[key] for key in fields})
+    if plan.get("prompts"):
+        from vllm_bench.pangu_infer.prompts import load_tokenizer
+        tokenizer = load_tokenizer(a.get("tokenizer") or a["model"])
+        with (Path(output) / "generations.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["id", "text", "tpot"])
+            writer.writeheader()
+            for record in records:
+                writer.writerow({"id": record["id"],
+                                 "text": tokenizer.decode(record["token_ids"], skip_special_tokens=True),
+                                 "tpot": record["decode_seconds"] * 1000 / record["decode_tokens"]
+                                 if record["decode_tokens"] else None})
     return summary

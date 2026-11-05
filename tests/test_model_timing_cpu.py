@@ -317,7 +317,7 @@ class TimingResultTests(unittest.TestCase):
                                                     "input_tokens": 1, "wall_ms": 2.0}]
                     return record
                 engine = SimpleNamespace(
-                    generate=Mock(side_effect=generate), executions={}, caches=SimpleNamespace(bytes=128),
+                    generate=Mock(side_effect=generate), set_prompt=Mock(), executions={}, caches=SimpleNamespace(bytes=128),
                     counters=lambda: {"compiles": 0, "captures": 0, "replays": 0, "calls": 4})
                 torch = fake_torch()
                 torch.no_grad = contextlib.nullcontext
@@ -331,7 +331,8 @@ class TimingResultTests(unittest.TestCase):
                 path = Path(tmp) / "plan.json"
                 path.write_text(json.dumps({"options": {"output": tmp, "mode": "eager", "depth": 0,
                                                        "warmup": 2, "repeats": 2, "max_new_tokens": 32,
-                                                       "profile": False, "model_timing": True, "tp": 2}}))
+                                                       "profile": False, "model_timing": True, "tp": 2},
+                    "prompts": [{"id": 0, "prompt_ids": [1, 2]}, {"id": "next", "prompt_ids": [3, 4]}]}))
                 def reduce(rows, tp):
                     operations.append("reduce")
                     self.assertEqual(tp, 2)
@@ -351,14 +352,17 @@ class TimingResultTests(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()):
                     runtime.main(["--plan", str(path)])
                 expected = ["warmup", "warmup"]
-                expected += ["measured", "reduce", "log"] * 2 if rank == 0 else ["measured", "reduce"] * 2
+                expected += ["measured", "reduce", "log"] * 4 if rank == 0 else ["measured", "reduce"] * 4
                 self.assertEqual(operations, expected)
-                self.assertEqual(reduction.call_count, 2)
-                self.assertEqual(log.call_count, 2 if rank == 0 else 0)
+                self.assertEqual(reduction.call_count, 4)
+                self.assertEqual(log.call_count, 4 if rank == 0 else 0)
                 self.assertEqual(summary_log.call_count, 1 if rank == 0 else 0)
                 self.assertEqual(save.call_count, 1 if rank == 0 else 0)
+                self.assertEqual([call.args[0] for call in engine.set_prompt.call_args_list], [[1, 2], [3, 4]])
                 if rank == 0:
-                    self.assertEqual(summary_log.call_args.args[0][0]["count"], 2)
+                    self.assertEqual(summary_log.call_args.args[0][0]["count"], 4)
+                    self.assertEqual([(row["id"], row["repeat"]) for row in save.call_args.args[2]],
+                                     [(0, 1), (0, 2), ("next", 1), ("next", 2)])
 
     def test_timing_results_are_diagnostic_and_keep_samples_and_summary(self):
         from vllm_bench.pangu_infer.results import save_result

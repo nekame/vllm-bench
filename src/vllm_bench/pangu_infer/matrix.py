@@ -36,7 +36,7 @@ def plans(spec, root):
                             *options, "--model", resolve(model), "--operator-config", operator,
                             "--tp", str(tp), "--depth", str(depth), "--mode", mode,
                             "--engine", engine, "--output", str(directory)])
-                        for name in ("prompt_ids", "additional_config"):
+                        for name in ("prompt_ids", "prompts", "tokenizer", "additional_config"):
                             value = getattr(args, name)
                             if value:
                                 setattr(args, name, Path(resolve(value)))
