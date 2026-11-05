@@ -267,6 +267,33 @@ MoE dispatch-группой. Chunking уменьшает активации, а 
 определяется настройкой HCCL. Для сравнения TPOT значения env должны совпадать
 у сравниваемых запусков.
 
+### Проверка Gloo отдельно от модели
+
+Если появляются `gloo/transport/tcp ... Connection refused`, сначала проверьте
+первый traceback rank перед ними: ошибка соединения может быть следствием
+завершения одного из peer-процессов. После прерванного запуска проверьте
+остаточные процессы своего запуска через `ps` и `npu-smi info`.
+Launcher использует `torchrun --standalone`, без фиксированного rendezvous-порта.
+
+Для CPU-проверки Gloo-разбиений world TP8 и одной MTP-копии TP4:
+
+```bash
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  --module vllm_bench.pangu_infer.check_gloo --mtp-tp 4 --timeout 60
+```
+
+Проверка не загружает модель и не выполняет HCCL-операций. Все rank создают
+группы в одинаковом порядке; проверяются target-группы, одноранговые layer
+groups и MTP-группы, выполняются CPU reductions и финальный barrier.
+Лог содержит rank, PID, hostname, выбранный Gloo interface и `stage`.
+Успех отмечается `[gloo-check] PASS`. Timeout ограничивает каждую distributed
+операцию, а не суммарное время всех групп. Эта проверка отделяет базовый Gloo
+transport от модели и HCCL, но не воспроизводит весь startup Omni.
+
+Если все workers находятся на одном сервере, повторение проверки с
+`GLOO_SOCKET_IFNAME=lo` позволяет отдельно проверить loopback. Переменная
+управляет только Gloo interface; этот тест не меняет настройки HCCL.
+
 ## Acceptance после prefill
 
 После prefill число `num_accepted_tokens` соответствует одному выданному
