@@ -14,6 +14,7 @@ from vllm_bench.common.runtime_env import instrumentation_pythonpath, RESET_ENV
 
 
 MODES = ("eager", "compile", "acl", "compile-acl")
+ULTRA_ARCHITECTURE = "PanguUltraMoEForCausalLM"
 UPSTREAM = "4cd855b29b5eb0a78bca645fad39e3181c35d099"
 
 
@@ -55,6 +56,8 @@ def checkpoint_identity(model):
 def parser():
     p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument("--model", type=Path, required=True)
+    p.add_argument("--ignore-architecture", action="store_true",
+                   help="Force PanguUltraMoEForCausalLM regardless of config.architectures; retain all other config fields")
     p.add_argument("--operator-config", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--engine", choices=("direct", "omni"), default="direct")
@@ -124,8 +127,9 @@ def make_plan(a):
     if not 0 < a.gpu_memory_utilization <= 1:
         raise ValueError("gpu-memory-utilization must be in (0, 1]")
     config = json.loads((a.model / "config.json").read_text())
-    if config.get("architectures") != ["PanguUltraMoEForCausalLM"]:
-        raise ValueError("This tool requires PanguUltraMoEForCausalLM; no architecture substitution")
+    if not a.ignore_architecture and config.get("architectures") != [ULTRA_ARCHITECTURE]:
+        raise ValueError("This tool requires PanguUltraMoEForCausalLM; use --ignore-architecture to force Ultra")
+    hf_overrides = {"architectures": [ULTRA_ARCHITECTURE]} if a.ignore_architecture else {}
     quantization = quantization_method(config)
     if type(config.get("num_hidden_layers")) is not int or config["num_hidden_layers"] <= 0:
         raise ValueError("Invalid target layer count")
@@ -195,7 +199,10 @@ def make_plan(a):
              "tp": a.tp, "depth": a.depth, "mode": a.mode,
              "temperature": a.temperature, "top_k": a.top_k, "top_p": a.top_p,
              "seed": a.seed, "max_new_tokens": a.max_new_tokens, "respect_eos": a.respect_eos}
+    if hf_overrides:
+        match["hf_overrides"] = hf_overrides
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
+            "hf_overrides": hf_overrides,
             "operator_config": operator, "additional_config": additional,
             "prompt_ids": prompt, "prompt_sha256": fingerprint(prompt),
             "comparison_sha256": fingerprint(match), "max_model_len": max_len,

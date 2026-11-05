@@ -171,6 +171,10 @@ class TraceProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "depth"):
                 trace.validate_replay(candidate)
             candidate["options"]["depth"] = 7
+            candidate["hf_overrides"] = {"architectures": ["PanguUltraMoEForCausalLM"]}
+            with self.assertRaisesRegex(ValueError, "hf_overrides"):
+                trace.validate_replay(candidate)
+            candidate["hf_overrides"] = {}
             (rank / "call-00001.pt").unlink()
             with self.assertRaisesRegex(ValueError, "Incomplete"):
                 trace.validate_replay(candidate)

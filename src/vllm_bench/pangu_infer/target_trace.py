@@ -55,6 +55,8 @@ def validate_replay(plan):
     if manifest.get("engine") != "omni":
         raise ValueError("Replay requires a reference trace recorded by Omni")
     source = manifest["plan"]
+    if source.get("hf_overrides", {}) != plan.get("hf_overrides", {}):
+        raise ValueError("Target replay differs in hf_overrides")
     for key in ("config", "operator_config", "additional_config", "checkpoint_identity",
                 "prompt_sha256", "max_model_len"):
         if source[key] != plan[key]:

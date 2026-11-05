@@ -14,8 +14,11 @@ compile и ACL replay требуют проверки на сервере Ascend
 - Установленное рабочее окружение OmniInfer/vLLM/torch_npu с исходными операторами
   модели; интерфейсы адаптера рассчитаны на vLLM 0.25.1 и OmniInfer commit
   `4cd855b29b5eb0a78bca645fad39e3181c35d099`. Ничего устанавливать инструмент не будет.
-- Архитектура checkpoint — строго `PanguUltraMoEForCausalLM`. Поддерживаются
-  MXFP8 и BF16 safetensors; конфигурация квантизации и scales не преобразуются.
+- По умолчанию `architectures` checkpoint должен содержать только
+  `PanguUltraMoEForCausalLM`. Флаг `--ignore-architecture` выбирает этот класс
+  при любом исходном значении `architectures`, включая отсутствие поля.
+  Поддерживаются MXFP8 и BF16 safetensors; конфигурация квантизации и scales
+  не преобразуются.
 - Полная модель либо сокращённый checkpoint. Для MTP нужны сохранённые predictor
   layers: `layer_profile.prepare_checkpoint --layers 12 --keep-mtp`. Без MTP
   подходит и checkpoint, подготовленный без `--keep-mtp`. Перенос индексов
@@ -67,6 +70,15 @@ Output должен быть новым каталогом. Явные отно�
 Для baseline замените `--engine direct` на `--engine omni` и выберите другой
 output. По умолчанию используется direct. Baseline запускает stock offline
 LLMEngine, без HTTP; в его время входят engine scheduling и IPC.
+
+Если в checkpoint указан другой класс, добавьте `--ignore-architecture`.
+В обоих движках через штатный `EngineArgs.hf_overrides` переопределяется только
+`architectures: ["PanguUltraMoEForCausalLM"]`; остальные поля конфигурации берутся
+из checkpoint. `config.json` не изменяется. В `launch_plan.json` сохраняются
+исходный `config` и отдельный `hf_overrides`, поэтому проверка изменения
+checkpoint перед запуском продолжает работать. Для сравнения движков и
+trace/replay передавайте флаг в обе команды; для matrix добавьте его в `options`.
+Веса и остальные параметры по-прежнему должны быть совместимы с Ultra.
 
 Для запуска без MTP замените `--depth 3` / `--depth 7` на `--no-mtp`
 (или `--depth 0`). Флаг работает для обоих engines, greedy и sampling, всех

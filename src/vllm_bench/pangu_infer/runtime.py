@@ -50,6 +50,8 @@ def engine_options(plan, *, direct):
                             "cudagraph_mode": "FULL" if graph_enabled else "NONE",
                             "cudagraph_capture_sizes": sorted(capture_sizes)},
         additional_config=plan["additional_config"])
+    if plan.get("hf_overrides"):
+        options["hf_overrides"] = plan["hf_overrides"]
     if a["depth"]:
         options["speculative_config"] = {
             "method": "mtp", "num_speculative_tokens": a["depth"],

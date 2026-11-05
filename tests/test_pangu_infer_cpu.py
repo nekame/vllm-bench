@@ -70,6 +70,86 @@ class DirectPlanningTests(unittest.TestCase):
                                 self.assertFalse(options["async_scheduling"])
                     self.assertFalse((Path(tmp) / "output").exists())
 
+    def test_ignore_architecture_overrides_only_architecture_for_both_engines(self):
+        for architecture in (["OtherForCausalLM"], [], None, "Other", 7, {}, "missing"):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as tmp:
+                args = self.fixture(Path(tmp))
+                path = Path(tmp) / "full/config.json"
+                config = json.loads(path.read_text())
+                if architecture == "missing":
+                    config.pop("architectures")
+                else:
+                    config["architectures"] = architecture
+                config["custom_parameters"] = {"nested": [1, 2, 3]}
+                raw = json.dumps(config, indent=2).encode()
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(ValueError, "--ignore-architecture"):
+                    run.make_plan(run.parser().parse_args(args))
+                for engine in ("direct", "omni"):
+                    for depth in (0, 3, 7):
+                        plan = run.make_plan(run.parser().parse_args([
+                            *args, "--engine", engine, "--depth", str(depth), "--context-length", "8",
+                            "--ignore-architecture"]))
+                        self.assertEqual(plan["config"], config)
+                        options = engine_options(plan, direct=engine == "direct")
+                        self.assertEqual(options["hf_overrides"], {"architectures": ["PanguUltraMoEForCausalLM"]})
+                        self.assertEqual(plan["hf_overrides"], options["hf_overrides"])
+                        self.assertEqual(path.read_bytes(), raw)
+
+    def test_forced_architecture_launch_preserves_source_config_and_change_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            path = Path(tmp) / "full/config.json"
+            config = json.loads(path.read_text())
+            plain = run.make_plan(run.parser().parse_args(args))
+            self.assertNotIn("hf_overrides", engine_options(plain, direct=True))
+            forced = run.make_plan(run.parser().parse_args([*args, "--ignore-architecture"]))
+            self.assertNotEqual(plain["comparison_sha256"], forced["comparison_sha256"])
+            config["architectures"] = ["OtherForCausalLM"]
+            path.write_text(json.dumps(config))
+            raw = path.read_bytes()
+            hashes = []
+            for engine in ("direct", "omni"):
+                output = Path(tmp) / f"forced-{engine}"
+                plan = run.make_plan(run.parser().parse_args([
+                    *args, "--engine", engine, "--output", str(output), "--ignore-architecture"]))
+                hashes.append(plan["comparison_sha256"])
+                process = SimpleNamespace(stdout=[], wait=lambda: 0)
+                with patch.object(run.subprocess, "Popen", return_value=contextlib.nullcontext(process)) as popen:
+                    self.assertEqual(run.launch(plan), 0)
+                popen.assert_called_once()
+                saved = json.loads((output / "launch_plan.json").read_text())
+                self.assertEqual(saved["config"], config)
+                self.assertEqual(saved["hf_overrides"], {"architectures": ["PanguUltraMoEForCausalLM"]})
+                self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual(hashes[0], hashes[1])
+            plan["options"]["output"] = str(Path(tmp) / "changed")
+            config["hidden_size"] = 123
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "Checkpoint changed"), patch.object(run.subprocess, "Popen") as popen:
+                run.launch(plan)
+            popen.assert_not_called()
+
+    def test_ignore_architecture_is_supported_by_matrix_and_keeps_other_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.fixture(root)
+            path = root / "full/config.json"
+            config = json.loads(path.read_text())
+            config["architectures"] = ["OtherForCausalLM"]
+            path.write_text(json.dumps(config))
+            spec = {"models": ["full"], "operator_configs": {"1": "operator.json"},
+                    "output": "matrix", "tp": [1], "modes": ["eager"],
+                    "engines": ["direct", "omni"], "options": ["--ignore-architecture"]}
+            _, items = matrix.plans(spec, root)
+            self.assertEqual(len(items), 4)
+            self.assertTrue(all(item["hf_overrides"] == {"architectures": ["PanguUltraMoEForCausalLM"]}
+                                for item in items))
+            config["num_nextn_predict_layers"] = 0
+            path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "MTP layers missing"):
+                run.make_plan(run.parser().parse_args([*args, "--ignore-architecture"]))
+
     def test_no_mtp_alias_accepts_checkpoints_with_or_without_predictors(self):
         for engine in ("direct", "omni"):
             for predictors in (3, 0, None):

@@ -102,6 +102,8 @@ def compare_traces(reference, candidate, *, rtol=1e-3, atol=1e-3):
     reference, rm = read_manifest(reference)
     candidate, cm = read_manifest(candidate)
     rp, cp = rm["plan"], cm["plan"]
+    if rp.get("hf_overrides", {}) != cp.get("hf_overrides", {}):
+        raise ValueError("Trace workloads differ in hf_overrides")
     for field in ("config", "operator_config", "additional_config", "checkpoint_identity",
                   "prompt_sha256", "max_model_len"):
         if rp[field] != cp[field]:
