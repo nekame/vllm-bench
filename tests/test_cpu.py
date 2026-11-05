@@ -16,6 +16,7 @@ from unittest.mock import patch
 from vllm_bench.layer_profile import benchmark
 from vllm_bench.layer_profile import prepare_checkpoint as extract
 from vllm_bench.layer_profile import verify_checkpoint
+from vllm_bench.layer_profile import serve
 from vllm_bench.tools import export_profile
 
 HERE = Path(__file__).resolve().parent
@@ -63,6 +64,93 @@ def fake_checkpoint(root, mxfp8=False, architecture="OpenPanguV2ForCausalLM"):
         index.update({name: filename for name in subset})
     (root / "model.safetensors.index.json").write_text(json.dumps({"weight_map": index}))
     return payloads
+
+
+class ServerTopologyTests(unittest.TestCase):
+    def prepare(self, root, mxfp8=False, architecture="OpenPanguV2ForCausalLM"):
+        model = root / "model"
+        fake_checkpoint(model, mxfp8=mxfp8, architecture=architecture)
+        cfg = extract.reduced_config(json.loads((model / "config.json").read_text()), 12)
+        (model / "config.json").write_text(json.dumps(cfg))
+        operator = root / "operators.json"
+        operator.write_text(json.dumps({"model_parallel_config": {}, "operator_optimization_config": {}}))
+        output = root / "server"
+        return ["serve", "--model", str(model), "--operator-config", str(operator),
+                "--output", str(output)], cfg, operator, output
+
+    def test_tp2_dry_run_without_ml_runtime(self):
+        code = '''
+import importlib.abc, runpy, sys
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'torch', 'torch_npu', 'vllm', 'omni_npu', 'numpy'}:
+            raise AssertionError('Unexpected ML import: ' + fullname)
+sys.meta_path.insert(0, Block())
+runpy.run_module('vllm_bench.layer_profile.serve', run_name='__main__')
+'''
+        for architecture in ("OpenPanguV2ForCausalLM", "PanguUltraMoEForCausalLM"):
+            for mxfp8 in (False, True):
+                with self.subTest(architecture=architecture, mxfp8=mxfp8), tempfile.TemporaryDirectory() as tmp:
+                    argv, cfg, operator, output = self.prepare(Path(tmp), mxfp8, architecture)
+                    result = subprocess.run([sys.executable, "-c", code, *argv[1:], "--tp", "2"],
+                                            capture_output=True, text=True,
+                                            env={k: v for k, v in os.environ.items()
+                                                 if k != "OMNI_VLLM_PATCHES_DIR"})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    command = shlex.split(next(line.removeprefix("Command: ")
+                                               for line in result.stdout.splitlines()
+                                               if line.startswith("Command: ")))
+                    self.assertEqual(command[command.index("--tensor-parallel-size") + 1], "2")
+                    self.assertEqual(command[command.index("--data-parallel-size") + 1], "1")
+                    self.assertEqual(command[command.index("serve") + 1], str(Path(tmp) / "model"))
+                    self.assertEqual(command[command.index("--dtype") + 1], "bfloat16")
+                    self.assertNotIn("--enable-expert-parallel", command)
+                    self.assertNotIn("--hf-overrides", command)
+                    self.assertIn(str(operator), result.stdout)
+                    expected = "high_throughout" if architecture.startswith("PanguUltra") else "low_latency"
+                    self.assertIn(expected, result.stdout)
+                    if mxfp8:
+                        self.assertIn("omni_custom_models", result.stdout)
+                    self.assertEqual(json.loads((Path(tmp) / "model/config.json").read_text()), cfg)
+                    self.assertFalse(output.exists())
+
+    def test_execute_records_selected_tp_and_operator_config(self):
+        for tp, mxfp8 in ((None, False), (2, False), (2, True)):
+            with self.subTest(tp=tp, mxfp8=mxfp8), tempfile.TemporaryDirectory() as tmp:
+                argv, cfg, operator, output = self.prepare(Path(tmp), mxfp8=mxfp8)
+                argv += ["--execute"] + (["--tp", str(tp)] if tp else [])
+                with patch.object(sys, "argv", argv), patch.object(serve.subprocess, "call", return_value=0) as launch, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(serve.main(), 0)
+                command = launch.call_args.args[0]
+                env = launch.call_args.kwargs["env"]
+                self.assertEqual(command[command.index("--tensor-parallel-size") + 1], str(tp or 8))
+                self.assertEqual(command[command.index("--data-parallel-size") + 1], "1")
+                self.assertNotIn("--enable-expert-parallel", command)
+                self.assertEqual(env["OMNI_CUSTOM_MODEL_CONFIG_PATH"], str(operator))
+                manifest = json.loads((output / "server_manifest.json").read_text())
+                self.assertEqual(manifest["command"], command)
+                self.assertEqual(manifest["arguments"]["tp"], tp or 8)
+                self.assertEqual(manifest["model_scope"], "reduced")
+                self.assertIsNone(manifest["speculative_config"])
+                self.assertEqual(manifest["model_config"], cfg)
+                self.assertEqual(manifest["quantization"], "mxfp8" if mxfp8 else None)
+                self.assertEqual(manifest["operator_config"], json.loads(operator.read_text()))
+                self.assertEqual(json.loads((output / "operator_config.json").read_text()), manifest["operator_config"])
+
+    def test_extra_cli_cannot_override_tp2(self):
+        for extra in (["--tensor-parallel-size", "8"], ["--tensor-parallel-size=8"]):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+                argv, _, _, output = self.prepare(Path(tmp))
+                extra_path = Path(tmp) / "extra.json"
+                extra_path.write_text(json.dumps(extra))
+                argv += ["--tp", "2", "--engine-cli-json", str(extra_path), "--execute"]
+                with patch.object(sys, "argv", argv), patch.object(serve.subprocess, "call") as launch, \
+                        contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    serve.main()
+                self.assertEqual(error.exception.code, 2)
+                launch.assert_not_called()
+                self.assertFalse(output.exists())
 
 
 class ProfileWindowTests(unittest.TestCase):

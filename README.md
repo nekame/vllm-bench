@@ -1,12 +1,13 @@
 # vllm-bench
 
-Инструменты для профилирования и отладки vLLM/OmniInfer на Ascend NPU. Сейчас сценарии рассчитаны на Pangu 505B: сокращённый стек основных слоёв, standalone MTP и диагностика speculative decoding.
+Инструменты для профилирования и отладки vLLM/OmniInfer на Ascend NPU. Сценарии рассчитаны на Pangu 505B: сокращённый или полный стек с опциональным MTP, standalone MTP и диагностика speculative decoding. Для PanguUltraMoE добавлен отдельный PoC прямого инференса и сравнения с offline OmniInfer.
 
 | Направление | Назначение | Руководство |
 | --- | --- | --- |
-| `layer_profile` | Подготовка checkpoint на 12 слоях (также 6/9), HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
+| `layer_profile` | Сокращённый checkpoint на 12 слоях (также 6/9) с опциональным сохранением MTP, полная модель; HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
 | `mtp_profile` | MTP checkpoint, synthetic profiling, запись и replay реальных входов без target model | [Профилирование MTP](doc/mtp_profile/README.md) |
 | `mtp_debug` | Проверка greedy acceptance, rejection windows и состояния MoME в полном запуске | [Отладка MTP](doc/mtp_debug/README.md) |
+| `pangu_infer` | Прямой batch-one Pangu Ultra runtime: TP1/2/4/8, MTP3/7, compile/ACL и offline comparison | [PoC инференса](doc/pangu_infer/README.md) |
 
 ## Начало работы
 
@@ -20,6 +21,7 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 python -m vllm_bench.layer_profile.serve --help
 python -m vllm_bench.mtp_profile.profile_mtp --help
 python -m vllm_bench.mtp_debug.debug_spec --help
+python -m vllm_bench.pangu_infer.run --help
 ```
 
 Команды запуска модели и wrappers по умолчанию показывают план; фактический запуск требует `--execute`. Экстракторы checkpoint используют `--dry-run` для планирования и записывают файлы без этого флага. Подробные команды и требования к model/operator config приведены в руководствах.
@@ -28,7 +30,7 @@ python -m vllm_bench.mtp_debug.debug_spec --help
 
 ## Организация
 
-- `src/vllm_bench/` — исходники трёх направлений, общие функции в `common`, анализ и экспорт в `tools`.
+- `src/vllm_bench/` — исходники сценариев, общие функции в `common`, анализ и экспорт в `tools`.
 - `conf/` — конфиги и матрицы нагрузки по направлениям; `conf/common/reference_config-hf.json` служит справочным примером.
 - `doc/` — руководства сценариев и общие справочные материалы.
 - `tests/` — CPU-проверки без NPU и ML-зависимостей.
