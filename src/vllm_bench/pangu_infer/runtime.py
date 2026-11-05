@@ -254,10 +254,12 @@ class DirectEngine:
                 self.target if kind == "target" else self.draft, self.cfg, self.caches,
                 names, size, self.device, head=head if kind == "draft" else None,
                 mode="eager" if prefill else self.a["mode"], profile=self.a["profile"],
+                memory_diagnostics=self.a.get("memory_diagnostics", False),
                 query_size=query_size, isolate_graph_tasks=self.a.get("mtp_pad_to_8", False))
-        return self.executions[key](ids, start, accepted, self.a["context_length"],
-                                    hidden=hidden, sample_index=index, draft_index=draft_index,
-                                    model_timing=self.model_timings)
+        execution = self.executions[key]
+        call = execution.diagnostic_call if self.a.get("memory_diagnostics", False) else execution
+        return call(ids, start, accepted, self.a["context_length"], hidden=hidden,
+                    sample_index=index, draft_index=draft_index, model_timing=self.model_timings)
 
     def propose(self, ids, hidden, start, index, index_value, anchor, accepted):
         import torch
@@ -405,16 +407,23 @@ def main(argv=None):
     cfg, device, rank, context, extra = setup(plan)
     setup_seconds = time.perf_counter() - started
     try:
+        from vllm_bench.pangu_infer.memory import log_memory
+        if a.get("memory_diagnostics", False):
+            log_memory("setup_done", device)
         # NPU weight packing and compilation may inspect tensor version
         # counters. Disable autograd without creating inference tensors.
         with torch.no_grad():
             started = time.perf_counter()
             target, draft, loading = load_models(plan, cfg, device)
             load_seconds = time.perf_counter() - started
+            if a.get("memory_diagnostics", False):
+                log_memory("weights_loaded", device)
             started = time.perf_counter()
             engine = DirectEngine(plan, cfg, device, rank, target, draft)
             torch.npu.synchronize()
             cache_init_seconds = time.perf_counter() - started
+            if a.get("memory_diagnostics", False):
+                log_memory("caches_allocated", device, cache_mib=round(engine.caches.bytes / (1 << 20), 2))
             if a.get("replay_target"):
                 from vllm_bench.pangu_infer.target_trace import replay_target
                 replay_target(engine, plan, output)

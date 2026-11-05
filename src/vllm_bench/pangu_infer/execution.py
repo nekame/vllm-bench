@@ -6,7 +6,7 @@ import time
 
 class Execution:
     def __init__(self, model, cfg, caches, names, size, device, *, head=None, mode="eager", profile=False,
-                 query_size=None, isolate_graph_tasks=False):
+                 query_size=None, isolate_graph_tasks=False, memory_diagnostics=False):
         import torch
 
         self.cfg, self.size, self.head = cfg, size, head
@@ -15,6 +15,9 @@ class Execution:
             raise ValueError("Padding requires an MTP execution with a valid query size")
         self.mode = mode
         self.profile = profile
+        self.device = device
+        self.memory_diagnostics = memory_diagnostics
+        self.memory_phase = "model"
         self.lane = caches.lane(names, size, query_size=self.query_size)
         self.ids = torch.empty(size, dtype=torch.int64, device=device)
         self.hidden = (torch.empty(size, cfg.model_config.hf_config.hidden_size,
@@ -51,12 +54,16 @@ class Execution:
             backend = NpuGraphExAdaptor()
 
             def compile_backend(graph, inputs):
+                self.memory_phase = "backend_compile"
+                self.log_memory("compile_begin")
                 self.compiles += 1
                 started = time.perf_counter()
                 compiled, _ = backend.compile(graph, inputs, compiler_config={})
                 self.backend_compile_seconds += time.perf_counter() - started
                 if compiled is None:
                     raise RuntimeError("NPU backend returned no compiled callable")
+                self.memory_phase = "compiled_forward"
+                self.log_memory("compile_end")
                 return compiled
 
             self.runnable = torch.compile(self.step, backend=compile_backend,
@@ -76,6 +83,28 @@ class Execution:
                 cudagraph_options=CUDAGraphOptions(gc_disable=False, weak_ref_output=False),
                 update_stream=torch.npu.Stream(), attn_layer_names=names)
             self.runnable = self.wrapper
+
+    def diagnostic_call(self, ids, start, accepted, prompt, *, hidden=None, sample_index=None, draft_index=None,
+                        model_timing=None):
+        first_call = self.calls == 0
+        self.memory_phase = "model"
+        if first_call:
+            self.log_memory("model_begin", start=start, draft_step=draft_index)
+        try:
+            result = self(ids, start, accepted, prompt, hidden=hidden, sample_index=sample_index,
+                          draft_index=draft_index, model_timing=model_timing)
+        except Exception:
+            self.log_memory("model_failed", phase=self.memory_phase, start=start, draft_step=draft_index)
+            raise
+        if first_call:
+            self.log_memory("model_end", start=start, draft_step=draft_index)
+        return result
+
+    def log_memory(self, stage, **context):
+        if self.memory_diagnostics:
+            from vllm_bench.pangu_infer.memory import log_memory
+            log_memory(stage, self.device, model="target" if self.head is None else "mtp", head=self.head,
+                       mode=self.mode, tokens=self.size, query_tokens=self.query_size, **context)
 
     def __call__(self, ids, start, accepted, prompt, *, hidden=None, sample_index=None, draft_index=None,
                  model_timing=None):
@@ -110,12 +139,18 @@ class Execution:
                     self.replays += 1
                 else:
                     # Compile and allocate workspaces before entering capture.
+                    self.memory_phase = "graph_warmup"
+                    self.log_memory("graph_warmup_begin")
                     self.wrapper.runnable(self.ids, self.lane.positions, self.hidden, self.sample_index)
                     torch.npu.synchronize()
+                    self.log_memory("graph_warmup_end")
                     self.captures += 1
                     capturing = True
             started = time.perf_counter() if capturing else None
             label = "direct/graph_replay_update" if self.wrapper else "direct/model_launch"
+            if capturing:
+                self.memory_phase = "acl_wrapper"
+                self.log_memory("acl_wrapper_begin")
             with torch.profiler.record_function(label) if self.profile else nullcontext():
                 if model_timing is not None and model_timing.cycle is not None:
                     result = model_timing.measure(
@@ -127,6 +162,7 @@ class Execution:
             if capturing:
                 torch.npu.synchronize()
                 self.capture_seconds += time.perf_counter() - started
+                self.log_memory("acl_wrapper_end")
         self.calls += 1
         if self.query_size < self.size:
             return result[0][:self.query_size], result[1]

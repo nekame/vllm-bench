@@ -420,6 +420,24 @@ baseline включает штатный worker profiler. Такие резул�
 `diagnostic`, и compare не использует их для speedup. Логирование внутри
 измеряемого decode не выполняется.
 
+### Диагностика памяти direct
+
+Добавьте `--memory-diagnostics` и новый `--output`. Флаг выводит строки
+`[memory]` на каждом TP rank после setup, загрузки весов и выделения кеша,
+до и после первого вызова каждой execution lane, компиляции и ACL wrapper.
+Они выводятся на экран и сохраняются в `runtime.log`. Поля `model`, `head`,
+`tokens`, `query_tokens`, `start` и `draft_step` идентифицируют вызов.
+Размеры `allocated_mib`, `reserved_mib`, `reserved_unallocated_mib` и
+`free_mib` отделяют активные аллокации от резерва allocator и свободной памяти
+устройства. При ошибке `model_failed.phase` указывает последний этап;
+`acl_wrapper` включает внутренний static-kernel warmup и сам capture.
+Исходное исключение сохраняется. Диагностика не добавляет вызовов модели
+или синхронизаций; счётчики памяти читаются без дополнительной синхронизации.
+Результат помечается `diagnostic` и не используется для speedup.
+
+`gpu_memory_utilization` в direct передаётся в конфигурацию Omni, но не
+ограничивает его собственное выделение кеша под `max_model_len`.
+
 ### Время вызовов target и MTP
 
 Для direct добавьте `--model-timing` и новый `--output`. Флаг по умолчанию

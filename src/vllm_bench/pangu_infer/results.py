@@ -27,7 +27,7 @@ def save_result(output, plan, records, effective, details):
     tokens = sum(r["decode_tokens"] for r in records)
     accepted = [n for r in records for n in r.get("accepted_drafts", [])]
     summary = {"format": "pangu-direct-result-v1", "engine": a["engine"],
-               "measurement": "diagnostic" if a["profile"] or a.get("model_timing", False) or a.get("trace_target", False) else "benchmark",
+               "measurement": "diagnostic" if a["profile"] or a.get("model_timing", False) or a.get("trace_target", False) or a.get("memory_diagnostics", False) else "benchmark",
                "comparison_sha256": plan["comparison_sha256"],
                "prompt_sha256": plan["prompt_sha256"], "model_scope": plan["model_scope"],
                "checkpoint_identity": plan["checkpoint_identity"],

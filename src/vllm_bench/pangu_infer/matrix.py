@@ -75,7 +75,7 @@ def main(argv=None):
                 result = json.loads((Path(case["output"]) / "result.json").read_text())
                 pair = completed.setdefault(item["comparison_sha256"], {})
                 pair[case["engine"]] = result
-                if {"omni", "direct"} <= pair.keys() and not case["profile"] and not case.get("model_timing", False):
+                if {"omni", "direct"} <= pair.keys() and not case["profile"] and not case.get("model_timing", False) and not case.get("memory_diagnostics", False):
                     try:
                         outcomes[-1]["comparison"] = compare(pair["omni"], pair["direct"])
                     except ValueError as error:
