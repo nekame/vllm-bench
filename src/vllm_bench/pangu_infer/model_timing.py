@@ -25,22 +25,19 @@ class ModelTimings:
         return result
 
 
-def reduce_model_timings(records, device, tp):
+def reduce_model_timings(records, tp):
     """Called by every rank after decode, never inside a model-call timer."""
     if tp > 1:
         import torch
+        from vllm_bench.pangu_infer.distributed import reduce_cpu_max
 
-        counts = torch.tensor([len(records), -len(records)], dtype=torch.int64, device=device)
-        torch.distributed.all_reduce(counts, op=torch.distributed.ReduceOp.MAX)
-        maximum, negative_minimum = counts.tolist()
+        maximum, negative_minimum = reduce_cpu_max([len(records), -len(records)], tp, dtype=torch.int64)
         if maximum != -negative_minimum:
             raise RuntimeError("Decode model-timing call counts differ between TP ranks: "
                                f"min={-negative_minimum}, max={maximum}")
         if not records:
             return
-        times = torch.tensor([entry["wall_ms"] for entry in records], dtype=torch.float64, device=device)
-        torch.distributed.all_reduce(times, op=torch.distributed.ReduceOp.MAX)
-        values = times.tolist()
+        values = reduce_cpu_max([entry["wall_ms"] for entry in records], tp, dtype=torch.float64)
     else:
         values = [entry["wall_ms"] for entry in records]
     for entry, value in zip(records, values):

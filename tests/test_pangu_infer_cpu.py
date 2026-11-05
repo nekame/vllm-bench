@@ -440,7 +440,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
             path = Path(tmp) / "plan.json"
             path.write_text(json.dumps({"options": {"output": tmp, "mode": "eager", "depth": 3,
                                                    "warmup": 1, "repeats": 1, "max_new_tokens": 32,
-                                                   "profile": False}}))
+                                                   "profile": False, "tp": 1}}))
             with patch.dict(sys.modules, {"torch": fake_torch}), \
                     patch.object(runtime, "setup", return_value=(cfg, "npu:1", 1, context, extra)), \
                     patch.object(runtime, "load_models", side_effect=load), \

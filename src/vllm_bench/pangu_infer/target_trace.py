@@ -343,7 +343,8 @@ def replay_target(engine, plan, output):
     torch.npu.synchronize()
     if plan["options"].get("replay_with_mtp", False):
         write_json(directory / f"rank-{rank}" / "draft-proposals.json", proposals)
-    torch.distributed.barrier()
+    from vllm.distributed import get_tp_group
+    torch.distributed.barrier(group=get_tp_group().cpu_group)
     if rank == 0:
         write_manifest(directory, plan, effective, details)
         report = compare_traces(source, directory)

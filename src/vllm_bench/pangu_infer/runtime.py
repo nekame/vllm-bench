@@ -461,7 +461,7 @@ def main(argv=None):
                                              model_timing=a.get("model_timing", False))
                     if a.get("model_timing", False):
                         from vllm_bench.pangu_infer.model_timing import reduce_model_timings, log_model_timings
-                        reduce_model_timings(record["model_timings"], device, a["tp"])
+                        reduce_model_timings(record["model_timings"], a["tp"])
                         if rank == 0:
                             log_model_timings(record["model_timings"], repeat)
                     records.append(record)
@@ -470,9 +470,9 @@ def main(argv=None):
                 raise RuntimeError("Compilation/capture occurred during measured requests; increase warmup or fix specialization")
             # Compare the slowest rank, including its host overhead; never add
             # a distributed barrier to each measured cycle.
-            times = torch.tensor([r["decode_seconds"] for r in records], dtype=torch.float64, device=device)
-            torch.distributed.all_reduce(times, op=torch.distributed.ReduceOp.MAX)
-            for record, seconds in zip(records, times.tolist()):
+            from vllm_bench.pangu_infer.distributed import reduce_cpu_max
+            times = reduce_cpu_max([r["decode_seconds"] for r in records], a["tp"], dtype=torch.float64)
+            for record, seconds in zip(records, times):
                 record["decode_seconds"] = seconds
             effective = {"operator": config_json(extra.operator_opt_config),
                          "parallel": config_json(extra.parall_config),

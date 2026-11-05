@@ -278,7 +278,9 @@ class TraceReplayTests(unittest.TestCase):
                 tensor=lambda values, **kwargs: Tensor(values), int64="int64",
                 distributed=SimpleNamespace(get_rank=lambda: 0, barrier=Mock()),
                 npu=SimpleNamespace(synchronize=Mock(), get_device_name=lambda device: "NPU"))
+            cpu_group = object()
             modules = {"torch": torch,
+                       "vllm.distributed": SimpleNamespace(get_tp_group=lambda: SimpleNamespace(cpu_group=cpu_group)),
                        "omni_npu.model_config.config_loader.loader": SimpleNamespace(model_extra_config=extra)}
             with patch.dict(sys.modules, modules), \
                     patch.object(trace, "validate_replay", return_value=(Path(tmp), manifest, 3)), \
@@ -289,6 +291,7 @@ class TraceReplayTests(unittest.TestCase):
                     patch("sys.stdout", new_callable=io.StringIO):
                 trace.replay_target(engine, plan, output)
             engine.caches.reset.assert_called_once()
+            torch.distributed.barrier.assert_called_once_with(group=cpu_group)
             if with_mtp:
                 self.assertEqual(engine.propose.call_count, 2)
                 proposal_calls = engine.propose.call_args_list

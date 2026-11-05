@@ -68,7 +68,8 @@ class Sampler:
         import torch
 
         if self.options["tp"] > 1:
-            torch.distributed.broadcast(value, src=0)
+            from vllm.distributed import get_tp_group
+            torch.distributed.broadcast(value, src=0, group=get_tp_group().device_group)
         return value
 
     def sample(self, probs):

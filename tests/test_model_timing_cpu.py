@@ -241,6 +241,13 @@ class DecodeTimingPhaseTests(unittest.TestCase):
 
 
 class TimingAggregationTests(unittest.TestCase):
+    def setUp(self):
+        self.cpu_group = object()
+        patcher = patch.dict(sys.modules, {"vllm.distributed": SimpleNamespace(
+            get_tp_group=lambda: SimpleNamespace(cpu_group=self.cpu_group))})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def rows(self):
         return [{"cycle": 0, "model": "target", "input_tokens": 8, "wall_ms": 2.0},
                 {"cycle": 1, "model": "mtp", "input_tokens": 1, "step": 1, "head": 0, "wall_ms": 3.0}]
@@ -249,13 +256,14 @@ class TimingAggregationTests(unittest.TestCase):
         rows = self.rows()
         torch = fake_torch()
         reductions = []
-        def reduce(tensor, op):
+        def reduce(tensor, op, group):
+            self.assertIs(group, self.cpu_group)
             reductions.append(tensor.tolist())
             tensor.values = [2, -2] if len(reductions) == 1 else [5.0, 4.0]
         torch.distributed.all_reduce.side_effect = reduce
         console = io.StringIO()
         with patch.dict(sys.modules, {"torch": torch}), contextlib.redirect_stdout(console):
-            reduce_model_timings(rows, "npu:0", 8)
+            reduce_model_timings(rows, 8)
         self.assertEqual(reductions, [[2, -2], [2.0, 3.0]])
         self.assertEqual([row["wall_ms_max_tp"] for row in rows], [5.0, 4.0])
         self.assertTrue(all("wall_ms" not in row for row in rows))
@@ -265,18 +273,18 @@ class TimingAggregationTests(unittest.TestCase):
         torch = fake_torch()
         torch.distributed.all_reduce.side_effect = lambda tensor, **kwargs: setattr(tensor, "values", [3, -2])
         with patch.dict(sys.modules, {"torch": torch}), self.assertRaisesRegex(RuntimeError, "call counts differ"):
-            reduce_model_timings(self.rows(), "npu:0", 2)
+            reduce_model_timings(self.rows(), 2)
         self.assertEqual(torch.distributed.all_reduce.call_count, 1)
 
     def test_empty_request_does_not_reduce_an_empty_tensor(self):
         torch = fake_torch()
         with patch.dict(sys.modules, {"torch": torch}):
-            reduce_model_timings([], "npu:0", 2)
+            reduce_model_timings([], 2)
         self.assertEqual(torch.distributed.all_reduce.call_count, 1)
 
     def test_rank_zero_log_and_grouped_summary_format(self):
         rows = self.rows()
-        reduce_model_timings(rows, "npu:0", 1)
+        reduce_model_timings(rows, 1)
         extra = {"cycle": 1, "model": "mtp", "input_tokens": 8,
                  "step": 0, "head": 0, "wall_ms_max_tp": 8.0}
         records = [{"model_timings": [*rows, extra]}, {"model_timings": [deepcopy(rows[0])]}]
@@ -324,12 +332,13 @@ class TimingResultTests(unittest.TestCase):
                 path.write_text(json.dumps({"options": {"output": tmp, "mode": "eager", "depth": 0,
                                                        "warmup": 2, "repeats": 2, "max_new_tokens": 32,
                                                        "profile": False, "model_timing": True, "tp": 2}}))
-                def reduce(rows, device, tp):
+                def reduce(rows, tp):
                     operations.append("reduce")
                     self.assertEqual(tp, 2)
                     for entry in rows:
                         entry["wall_ms_max_tp"] = entry.pop("wall_ms")
-                with patch.dict(sys.modules, {"torch": torch}), \
+                with patch.dict(sys.modules, {"torch": torch, "vllm.distributed": SimpleNamespace(
+                        get_tp_group=lambda: SimpleNamespace(cpu_group=object()))}), \
                         patch.object(runtime, "setup", return_value=(cfg, "npu:0", rank, context, extra)), \
                         patch.object(runtime, "load_models", return_value=(object(), None, {})), \
                         patch.object(runtime, "DirectEngine", return_value=engine), \

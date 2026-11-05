@@ -406,6 +406,10 @@ Defaults: TP1/2/4/8 × depth3/7 × четыре direct modes и три baseline 
 остаются штатными. Синхронизация workers после первого output исключена из
 decode, завершающая синхронизация через RPC включена в его wall time.
 Контекст начинается с 8192 и растёт, это не fixed-context replay benchmark.
+Итоговые времена и статистика `--model-timing` сводятся через существующую
+TP CPU-группу (Gloo), вне измеряемого decode. Для них не создаётся HCCL
+communicator на default process group. Broadcast при случайном sampling
+использует существующую TP device group.
 Последний speculative cycle может вычислить больше токенов, чем выдаётся
 пользователю; время включает эту работу в обоих движках.
 
