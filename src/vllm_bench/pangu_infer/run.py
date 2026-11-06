@@ -61,6 +61,8 @@ def parser():
     p.add_argument("--operator-config", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--engine", choices=("direct", "omni"), default="direct")
+    p.add_argument("--async-scheduling", action="store_true",
+                   help="Omni only: enable async scheduling and time decode between host-visible outputs")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
                    help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
@@ -116,6 +118,8 @@ def make_plan(a):
                for key, value in vars(a).items()}
     if a.compact_kv_cache and a.engine != "direct":
         raise ValueError("--compact-kv-cache requires --engine direct")
+    if a.async_scheduling and a.engine != "omni":
+        raise ValueError("--async-scheduling requires --engine omni")
     if a.mtp_tp is not None:
         if a.depth == 0 or a.mtp_tp > a.tp or a.tp % a.mtp_tp:
             raise ValueError("--mtp-tp requires positive MTP depth and must divide target TP")
@@ -131,6 +135,8 @@ def make_plan(a):
     if a.mtp_no_static_kernels and (a.engine != "direct" or not a.depth or "compile" not in a.mode):
         raise ValueError("--mtp-no-static-kernels requires direct, positive depth and a compile mode")
     diagnostic_trace = a.trace_target or a.replay_target is not None
+    if a.async_scheduling and diagnostic_trace:
+        raise ValueError("Target trace/replay requires synchronous scheduling")
     if a.tokenizer and not a.prompts:
         raise ValueError("--tokenizer requires --prompts")
     if a.prompts and diagnostic_trace:
@@ -250,6 +256,8 @@ def make_plan(a):
         match["mtp_tp"] = a.mtp_tp
     if a.mtp_no_static_kernels:
         match["mtp_no_static_kernels"] = True
+    if a.async_scheduling:
+        match["async_scheduling"] = True
     if a.prefill_chunk_size:
         match["prefill_chunk_size"] = a.prefill_chunk_size
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,

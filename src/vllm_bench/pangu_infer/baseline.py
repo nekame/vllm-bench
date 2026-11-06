@@ -24,6 +24,7 @@ def worker_state(worker):
     cfg = worker.model_runner.vllm_config
     return {"operator": config_json(model_extra_config.operator_opt_config),
             "parallel": config_json(model_extra_config.parall_config),
+            "async_scheduling": bool(cfg.scheduler_config.async_scheduling),
             "block_size": cfg.cache_config.block_size,
             "mamba_block_size": cfg.cache_config.mamba_block_size,
             "compilation": config_json(cfg.compilation_config.mode),
@@ -37,6 +38,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
     from vllm import SamplingParams
 
     a = plan["options"]
+    async_scheduling = a.get("async_scheduling", False)
     params = SamplingParams(
         temperature=a["temperature"], top_k=a["top_k"] or -1, top_p=a["top_p"],
         seed=a["seed"], max_tokens=limit, ignore_eos=not a["respect_eos"], detokenize=False)
@@ -56,13 +58,19 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
             if first_time is not None and a["depth"] and len(tokens) > previous_count:
                 accepted_drafts.append(max(0, len(tokens) - previous_count - 1))
             if first_time is None and tokens:
-                # Synchronous scheduling prevents the engine from starting
-                # the next step while we establish this device-complete bound.
-                engine.collective_rpc(synchronize_worker)
+                # Async scheduling may already have queued the next decode.
+                # Its first-token boundary is host-visible output delivery;
+                # synchronizing here would drain that queue and distort TPOT.
+                if not async_scheduling:
+                    engine.collective_rpc(synchronize_worker)
                 first_time, first_count = time.perf_counter(), len(tokens)
                 first_cycle = cycles
-    engine.collective_rpc(synchronize_worker)
-    end = time.perf_counter()
+    if async_scheduling:
+        end = time.perf_counter()
+        engine.collective_rpc(synchronize_worker)
+    else:
+        engine.collective_rpc(synchronize_worker)
+        end = time.perf_counter()
     if first_time is None:
         raise RuntimeError("Offline engine produced no tokens")
     if first_count != 1:
@@ -102,6 +110,11 @@ def main(argv=None):
         request(engine, plan, f"warmup-{i}", max(2 * (a["depth"] + 1) + 1, 17))
     warmup_seconds = time.perf_counter() - warmup_start
     states_before = engine.collective_rpc(worker_state)
+    requested_async = a.get("async_scheduling", False)
+    if any(s.get("async_scheduling", False) != requested_async for s in states_before):
+        raise RuntimeError("Effective Omni async_scheduling differs from the requested setting")
+    print(f"[execution] async_scheduling={str(requested_async).lower()} "
+          f"timing_boundary={'host_outputs' if requested_async else 'device_complete'}", flush=True)
     if "acl" in a["mode"] and not all(s["compile_counter"].get("num_cudagraph_captured", 0) for s in states_before):
         raise RuntimeError("Offline engine did not capture ACL graphs")
     if "compile" in a["mode"] and not all(
@@ -139,11 +152,14 @@ def main(argv=None):
            for state in states_after):
         raise ValueError("Offline ranks disagree on effective configuration")
     effective = {key: first[key] for key in ("operator", "parallel", "block_size", "mamba_block_size")}
+    effective["async_scheduling"] = first.get("async_scheduling", False)
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
     details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,
         "workers_after": states_after, "versions": versions(), "hardware": first["hardware"],
-        "timing_boundary": "offline step outputs, including engine scheduling and IPC; no HTTP"}
+        "timing_boundary": ("offline first-to-final host-visible outputs; final device drain excluded; no HTTP"
+                            if requested_async else
+                            "offline device-complete first-to-final outputs, including final synchronization; no HTTP")}
     save_result(output, plan, records, effective, details)
     if a.get("trace_target", False):
         from vllm_bench.pangu_infer.target_trace import write_manifest

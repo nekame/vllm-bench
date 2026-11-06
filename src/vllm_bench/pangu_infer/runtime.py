@@ -44,7 +44,7 @@ def engine_options(plan, *, direct):
         max_model_len=plan["max_model_len"], max_num_seqs=1,
         max_num_batched_tokens=a.get("prefill_chunk_size", 0) or plan["max_model_len"],
         enable_chunked_prefill=bool(a.get("prefill_chunk_size", 0)), enable_prefix_caching=False,
-        async_scheduling=False,
+        async_scheduling=a.get("async_scheduling", False) if not direct else False,
         gpu_memory_utilization=a["gpu_memory_utilization"], seed=a["seed"],
         compilation_config={"mode": 0 if direct or not compile_enabled else 3,
                             "cudagraph_mode": "FULL" if graph_enabled else "NONE",

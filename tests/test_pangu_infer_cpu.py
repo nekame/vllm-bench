@@ -23,6 +23,27 @@ from vllm_bench.pangu_infer.sampling import reference_rejection
 
 
 class DirectPlanningTests(unittest.TestCase):
+    def test_async_scheduling_is_omni_only_and_changes_workload_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([*args, *flags]))
+            sync = plan("--engine", "omni")
+            async_plan = plan("--engine", "omni", "--async-scheduling", "--prefill-chunk-size", "2048")
+            sync_chunked = plan("--engine", "omni", "--prefill-chunk-size", "2048")
+            options = engine_options(async_plan, direct=False)
+            self.assertTrue(options["async_scheduling"])
+            self.assertTrue(options["enable_chunked_prefill"])
+            self.assertEqual(options["max_num_batched_tokens"], 2048)
+            self.assertFalse(engine_options(sync, direct=False)["async_scheduling"])
+            self.assertNotEqual(async_plan["comparison_sha256"], sync_chunked["comparison_sha256"])
+            self.assertFalse(engine_options(async_plan, direct=True)["async_scheduling"])
+            with self.assertRaisesRegex(ValueError, "requires --engine omni"):
+                plan("--async-scheduling")
+            with self.assertRaisesRegex(ValueError, "synchronous scheduling"):
+                plan("--engine", "omni", "--async-scheduling", "--trace-target",
+                     "--temperature", "0", "--repeats", "1")
+
     def fixture(self, root, *, reduced=False, quantized=True):
         model = root / ("reduced" if reduced else "full")
         model.mkdir()
@@ -391,6 +412,34 @@ class RejectionMathTests(unittest.TestCase):
 
 
 class LoadingAndBaselineTests(unittest.TestCase):
+    def test_async_output_timing_does_not_drain_decode_at_first_token(self):
+        from vllm_bench.pangu_infer import baseline
+        from unittest.mock import Mock
+        state = {"time": 0, "tokens": [], "sync_counts": []}
+        windows = iter([[], [4], [], [4, 5, 6, 7], [4, 5, 6, 7, 8]])
+        def rpc(*args):
+            state["sync_counts"].append(len(state["tokens"]))
+            state["time"] += 100
+        def step():
+            state["time"] += 1
+            tokens = next(windows)
+            if not tokens:
+                return []
+            state["tokens"] = tokens
+            return [SimpleNamespace(request_id="r", outputs=[SimpleNamespace(token_ids=tokens)])]
+        engine = SimpleNamespace(collective_rpc=rpc, add_request=Mock(), step=step,
+                                 has_unfinished_requests=lambda: len(state["tokens"]) < 5)
+        options = {"temperature": 0, "top_k": 0, "top_p": 1, "seed": 0, "respect_eos": False,
+                   "depth": 3, "context_length": 8192, "async_scheduling": True}
+        with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=lambda **kwargs: kwargs)}), \
+                patch.object(baseline.time, "perf_counter", side_effect=lambda: state["time"]):
+            record = baseline.request(engine, {"options": options, "prompt_ids": [2, 3]}, "r", 5)
+        self.assertEqual(state["sync_counts"], [0, 5])
+        self.assertEqual(record["prefill_seconds"], 2)
+        self.assertEqual(record["decode_seconds"], 3)
+        self.assertEqual(record["decode_tokens"], 4)
+        self.assertEqual(record["accepted_drafts"], [2, 0])
+
     def test_runtime_initialization_and_execution_use_no_grad(self):
         from unittest.mock import Mock
         from vllm_bench.pangu_infer import runtime

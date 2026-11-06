@@ -145,6 +145,33 @@ class TextPromptTests(unittest.TestCase):
         self.assertEqual([(row["id"], row["repeat"]) for row in save.call_args.args[2]],
                          [(0, 1), (0, 2), ("two", 1), ("two", 2)])
 
+    def test_omni_async_reports_effective_scheduler_and_rejects_silent_disable(self):
+        plan = self.plan("--engine", "omni", "--async-scheduling", "--warmup", "1")
+        path = self.root / "async-plan.json"
+        path.write_text(json.dumps(plan))
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
+                         "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU",
+                         "async_scheduling": enabled}
+                engine = SimpleNamespace(collective_rpc=Mock(return_value=[state]))
+                factory = Mock(return_value=engine)
+                modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
+                    "vllm.engine.arg_utils": SimpleNamespace(EngineArgs=lambda **kwargs: kwargs),
+                    "vllm.v1.engine.llm_engine": SimpleNamespace(LLMEngine=SimpleNamespace(from_engine_args=factory))}
+                with patch.dict("sys.modules", modules), patch.object(baseline, "require_npu_platform"), \
+                        patch.object(baseline, "request", return_value={"decode_seconds": .1}), \
+                        patch.object(baseline, "versions", return_value={}), patch.object(baseline, "save_result") as save:
+                    if not enabled:
+                        with self.assertRaisesRegex(RuntimeError, "async_scheduling differs"):
+                            baseline.main(["--plan", str(path)])
+                        save.assert_not_called()
+                    else:
+                        baseline.main(["--plan", str(path)])
+                        self.assertTrue(factory.call_args.args[0]["async_scheduling"])
+                        self.assertTrue(save.call_args.args[3]["async_scheduling"])
+                        self.assertIn("host-visible", save.call_args.args[4]["timing_boundary"])
+
 
 if __name__ == "__main__":
     unittest.main()
