@@ -77,11 +77,14 @@ class BoundaryRecorder:
         self.active, self.references, self.handles = None, {}, []
         self.layers = {}
         registry = runner.vllm_config.compilation_config.static_forward_context
+        draft_names = set(runner.drafter.attn_layer_names)
+        mome_names = []
         for name, layer in registry.items():
             getter = getattr(layer, "get_attn_backend", None)
             if getter is None or getter().get_name() != "NPUPanguMome":
                 continue
-            kind = "mtp" if name.startswith("draft_model.") else "target"
+            mome_names.append(name)
+            kind = "mtp" if name in draft_names else "target"
             if kind in self.layers:
                 continue
             for group_id, groups in enumerate(runner.attn_groups):
@@ -89,7 +92,11 @@ class BoundaryRecorder:
                     if name in group.layer_names:
                         self.layers[kind] = (name, layer, group_id, group.get_metadata_builder())
         if set(self.layers) != {"target", "mtp"}:
-            raise ValueError("Boundary trace requires target and MTP MoME layers")
+            grouped_names = [name for groups in runner.attn_groups for group in groups
+                             for name in group.layer_names]
+            raise ValueError("Boundary trace requires target and MTP MoME layers: "
+                             f"found={list(self.layers)}, mome={mome_names}, "
+                             f"draft={sorted(draft_names)}, grouped={grouped_names}")
         target = runner.get_model()
         draft = runner.get_drafter_model()
         try:

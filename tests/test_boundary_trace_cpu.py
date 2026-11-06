@@ -110,7 +110,8 @@ class BoundaryTraceTests(unittest.TestCase):
 
     def test_hooks_capture_only_first_window_compare_repeats_and_detect_target_state_writes(self):
         target, draft = HookModule(), HookModule()
-        names = ["model.layers.0.attn.mome", "draft_model.model.layers.12.attn.mome"]
+        # Native draft layer ownership does not require a draft_model prefix.
+        names = ["model.layers.0.attn.mome", "model.layers.12.attn.mome"]
         backend = SimpleNamespace(get_name=lambda: "NPUPanguMome")
         registry = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in names}
         builder = SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=128))
@@ -118,6 +119,7 @@ class BoundaryTraceTests(unittest.TestCase):
         batch = SimpleNamespace(req_id_to_index={"r-0": 0}, num_computed_tokens_cpu=[7680])
         runner = SimpleNamespace(get_model=lambda: SimpleNamespace(logits_processor=target),
             get_drafter_model=lambda: SimpleNamespace(model=SimpleNamespace(logits_processor=draft)),
+            drafter=SimpleNamespace(attn_layer_names=[names[1]]),
             input_batch=batch, attn_groups=[[group]], query_start_loc=SimpleNamespace(np=[0, 512]),
             vllm_config=SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=registry)))
         torch = torch_stub()
