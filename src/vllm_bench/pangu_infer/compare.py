@@ -41,6 +41,9 @@ def compare(reference, candidate, *, correctness=False):
     for key in ("operator", "parallel", "block_size", "mamba_block_size"):
         if reference["effective"].get(key) != candidate["effective"].get(key):
             raise ValueError(f"Effective {key} differs; cannot attribute timing differences to the engine")
+    if (not correctness and reference["effective"].get("cache_dtype", "auto")
+            != candidate["effective"].get("cache_dtype", "auto")):
+        raise ValueError("Effective cache_dtype differs; cannot attribute timing differences to the engine")
     if reference["details"].get("hardware") != candidate["details"].get("hardware"):
         raise ValueError("Different hardware")
     if reference["details"].get("versions") != candidate["details"].get("versions"):

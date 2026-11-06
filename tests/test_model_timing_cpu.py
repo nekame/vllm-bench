@@ -324,7 +324,8 @@ class TimingResultTests(unittest.TestCase):
                 torch.distributed.is_initialized = lambda: False
                 torch.npu.max_memory_allocated = lambda device: 1024
                 torch.npu.get_device_name = lambda device: "NPU"
-                cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=128),
+                cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=128,
+                                                                  cache_dtype="auto"),
                                       compilation_config=SimpleNamespace(mode=0, cudagraph_mode="NONE"))
                 context = SimpleNamespace(__exit__=Mock())
                 extra = SimpleNamespace(operator_opt_config={}, parall_config={})

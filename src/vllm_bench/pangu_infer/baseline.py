@@ -27,6 +27,7 @@ def worker_state(worker):
             "async_scheduling": bool(cfg.scheduler_config.async_scheduling),
             "enable_prefix_caching": bool(cfg.cache_config.enable_prefix_caching),
             "mamba_cache_mode": config_json(cfg.cache_config.mamba_cache_mode),
+            "cache_dtype": cfg.cache_config.cache_dtype,
             "block_size": cfg.cache_config.block_size,
             "mamba_block_size": cfg.cache_config.mamba_block_size,
             "compilation": config_json(cfg.compilation_config.mode),
@@ -120,10 +121,14 @@ def main(argv=None):
     requested_prefix = a.get("enable_prefix_caching", False)
     if any(s.get("enable_prefix_caching", False) != requested_prefix for s in states_before):
         raise RuntimeError("Effective Omni enable_prefix_caching differs from the requested setting")
+    requested_cache_dtype = a.get("kv_cache_dtype", "auto")
+    if any(s.get("cache_dtype", "auto") != requested_cache_dtype for s in states_before):
+        raise RuntimeError("Effective Omni cache_dtype differs from the requested --kv-cache-dtype")
     print(f"[execution] async_scheduling={str(requested_async).lower()} "
           f"timing_boundary={'host_outputs' if requested_async else 'device_complete'}", flush=True)
     cache_state = states_before[0]
-    print(f"[cache] enable_prefix_caching={str(requested_prefix).lower()} "
+    print(f"[cache] cache_dtype={cache_state.get('cache_dtype', 'auto')} "
+          f"enable_prefix_caching={str(requested_prefix).lower()} "
           f"block_size={cache_state['block_size']} mamba_block_size={cache_state['mamba_block_size']} "
           f"mamba_cache_mode={cache_state.get('mamba_cache_mode')}", flush=True)
     if "acl" in a["mode"] and not all(s["compile_counter"].get("num_cudagraph_captured", 0) for s in states_before):
@@ -166,6 +171,7 @@ def main(argv=None):
     effective["async_scheduling"] = first.get("async_scheduling", False)
     effective["enable_prefix_caching"] = first.get("enable_prefix_caching", False)
     effective["mamba_cache_mode"] = first.get("mamba_cache_mode")
+    effective["cache_dtype"] = first.get("cache_dtype", "auto")
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
     details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,

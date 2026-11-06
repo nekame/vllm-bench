@@ -68,6 +68,8 @@ def parser():
     p.add_argument("--block-size", type=int, help="Omni only: override the KV cache block size")
     p.add_argument("--mamba-block-size", type=int,
                    help="Omni only: override MoME state block size; requires --enable-prefix-caching")
+    p.add_argument("--kv-cache-dtype", default="auto",
+                   help="KV cache format passed to Omni, e.g. auto, bfloat16 or hif8_ds_mla; default: auto")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
                    help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
@@ -121,6 +123,8 @@ def parser():
 def make_plan(a):
     options = {key: str(value.resolve()) if isinstance(value, Path) else value
                for key, value in vars(a).items()}
+    if not a.kv_cache_dtype.strip():
+        raise ValueError("--kv-cache-dtype must not be empty")
     if a.compact_kv_cache and a.engine != "direct":
         raise ValueError("--compact-kv-cache requires --engine direct")
     if a.async_scheduling and a.engine != "omni":
@@ -273,6 +277,8 @@ def make_plan(a):
         match["async_scheduling"] = True
     if a.enable_prefix_caching:
         match["enable_prefix_caching"] = True
+    if a.kv_cache_dtype != "auto":
+        match["kv_cache_dtype"] = a.kv_cache_dtype
     for name in ("block_size", "mamba_block_size"):
         if options[name] is not None:
             match[name] = options[name]

@@ -23,6 +23,29 @@ from vllm_bench.pangu_infer.sampling import reference_rejection
 
 
 class DirectPlanningTests(unittest.TestCase):
+    def test_kv_cache_dtype_is_forwarded_to_both_engines_and_changes_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([*args, *flags]))
+            plain = plan()
+            explicit_auto = plan("--kv-cache-dtype", "auto")
+            self.assertEqual(plain["comparison_sha256"], explicit_auto["comparison_sha256"])
+            quantized = []
+            for engine in ("direct", "omni"):
+                for dtype in ("bfloat16", "hif8_ds_mla"):
+                    item = plan("--engine", engine, "--kv-cache-dtype", dtype)
+                    options = engine_options(item, direct=engine == "direct")
+                    self.assertEqual(options["kv_cache_dtype"], dtype)
+                    self.assertEqual(options["dtype"], "bfloat16")
+                    self.assertNotEqual(plain["comparison_sha256"], item["comparison_sha256"])
+                    if dtype == "hif8_ds_mla":
+                        quantized.append(item)
+            self.assertEqual(quantized[0]["comparison_sha256"], quantized[1]["comparison_sha256"])
+            self.assertEqual(engine_options(plain, direct=True)["kv_cache_dtype"], "auto")
+            with self.assertRaisesRegex(ValueError, "must not be empty"):
+                plan("--kv-cache-dtype", " ")
+
     def test_omni_prefix_cache_and_block_sizes_are_explicit_and_affect_comparison(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp))
@@ -516,7 +539,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
                                 empty_cache=lambda: check("release unused packing buffers")),
             distributed=SimpleNamespace(all_reduce=lambda *args, **kwargs: None,
                                         ReduceOp=SimpleNamespace(MAX="max"), is_initialized=lambda: False))
-        cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=128),
+        cfg = SimpleNamespace(cache_config=SimpleNamespace(block_size=128, mamba_block_size=128, cache_dtype="auto"),
                               compilation_config=SimpleNamespace(mode=0, cudagraph_mode="NONE"))
         context = SimpleNamespace(__exit__=Mock())
         extra = SimpleNamespace(operator_opt_config={}, parall_config={})
@@ -625,6 +648,15 @@ class LoadingAndBaselineTests(unittest.TestCase):
 
 
 class ResultComparisonTests(unittest.TestCase):
+    def test_effective_cache_dtype_mismatch_rejects_speedup_but_allows_token_check(self):
+        reference, candidate = self.fixture(), self.fixture()
+        candidate["effective"]["cache_dtype"] = "hif8_ds_mla"
+        with self.assertRaisesRegex(ValueError, "cache_dtype differs"):
+            compare(reference, candidate)
+        self.assertTrue(compare(reference, candidate, correctness=True)["greedy_tokens_match"])
+        candidate["effective"]["cache_dtype"] = "auto"
+        self.assertEqual(compare(reference, candidate)["speedup"], 1)
+
     def fixture(self):
         return {"format": "pangu-direct-result-v1", "measurement": "benchmark", "engine": "direct",
                 "options": {"model": "/model", "tp": 2, "temperature": 0, "depth": 3,

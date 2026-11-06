@@ -39,7 +39,8 @@ def engine_options(plan, *, direct):
     # The direct model is compiled explicitly, outside the vLLM decorators.
     options = dict(
         model=a["model"], trust_remote_code=True, skip_tokenizer_init=True,
-        dtype="bfloat16", tensor_parallel_size=a["tp"], data_parallel_size=1,
+        dtype="bfloat16", kv_cache_dtype=a.get("kv_cache_dtype", "auto"),
+        tensor_parallel_size=a["tp"], data_parallel_size=1,
         enable_expert_parallel=False, enforce_eager=False,
         max_model_len=plan["max_model_len"], max_num_seqs=1,
         max_num_batched_tokens=a.get("prefill_chunk_size", 0) or plan["max_model_len"],
@@ -500,6 +501,8 @@ def main(argv=None):
                 log_memory("weights_loaded", device)
             started = time.perf_counter()
             engine = DirectEngine(plan, cfg, device, rank, target, draft, mtp=mtp)
+            if rank == 0:
+                print(f"[cache] cache_dtype={cfg.cache_config.cache_dtype}", flush=True)
             if rank == 0 and a.get("mtp_no_static_kernels", False):
                 print("[execution] mtp_static_kernel_compile=false mtp_super_kernel_optimize=false"
                       " target_compilation_config=unchanged", flush=True)
@@ -577,7 +580,8 @@ def main(argv=None):
                          "compilation": {"mode": a["mode"], "vllm": config_json(cfg.compilation_config.mode),
                                          "cudagraph": config_json(cfg.compilation_config.cudagraph_mode)},
                          "block_size": cfg.cache_config.block_size,
-                         "mamba_block_size": cfg.cache_config.mamba_block_size}
+                         "mamba_block_size": cfg.cache_config.mamba_block_size,
+                         "cache_dtype": cfg.cache_config.cache_dtype}
             if mtp is not None:
                 effective["mtp_tp"] = mtp.tp
                 effective["mtp_ranks"] = list(range(mtp.tp))
