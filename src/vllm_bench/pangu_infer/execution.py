@@ -6,9 +6,13 @@ import time
 
 class Execution:
     def __init__(self, model, cfg, caches, names, size, device, *, head=None, mode="eager", profile=False,
-                 query_size=None, isolate_graph_tasks=False, memory_diagnostics=False):
+                 query_size=None, isolate_graph_tasks=False, memory_diagnostics=False,
+                 disable_static_kernels=False):
         import torch
 
+        if disable_static_kernels:
+            from vllm_bench.pangu_infer.compilation import without_static_kernels
+            cfg = without_static_kernels(cfg)
         self.cfg, self.size, self.head = cfg, size, head
         self.query_size = size if query_size is None else query_size
         if not 1 <= self.query_size <= size or (self.query_size < size and head is None):
@@ -50,8 +54,12 @@ class Execution:
         self.step = Step().eval()
         self.runnable = self.step
         if "compile" in mode:
-            from omni_npu.compilation.npugraph_ex import NpuGraphExAdaptor
-            backend = NpuGraphExAdaptor()
+            if disable_static_kernels:
+                from vllm_bench.pangu_infer.compilation import MtpNpuGraphExAdaptor
+                backend = MtpNpuGraphExAdaptor(cfg.additional_config["npugraph_ex_config"])
+            else:
+                from omni_npu.compilation.npugraph_ex import NpuGraphExAdaptor
+                backend = NpuGraphExAdaptor()
 
             def compile_backend(graph, inputs):
                 self.memory_phase = "backend_compile"

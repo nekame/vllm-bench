@@ -73,6 +73,8 @@ def parser():
                      help="Run only the target model; equivalent to --depth 0")
     p.add_argument("--mtp-pad-to-8", action="store_true",
                    help="Direct only: pad recurrent single-token MTP calls to 8 input rows")
+    p.add_argument("--mtp-no-static-kernels", action="store_true",
+                   help="Direct compile modes only: disable MTP static kernels and super-kernel optimization; retain target settings")
     p.add_argument("--mode", choices=MODES, default="eager")
     prompt = p.add_mutually_exclusive_group()
     prompt.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
@@ -126,6 +128,8 @@ def make_plan(a):
         raise ValueError("--model-timing requires --engine direct; stock OmniInfer instrumentation is not supported")
     if a.mtp_pad_to_8 and (a.engine != "direct" or a.depth == 0):
         raise ValueError("--mtp-pad-to-8 requires --engine direct and positive depth")
+    if a.mtp_no_static_kernels and (a.engine != "direct" or not a.depth or "compile" not in a.mode):
+        raise ValueError("--mtp-no-static-kernels requires direct, positive depth and a compile mode")
     diagnostic_trace = a.trace_target or a.replay_target is not None
     if a.tokenizer and not a.prompts:
         raise ValueError("--tokenizer requires --prompts")
@@ -244,6 +248,8 @@ def make_plan(a):
         match["hf_overrides"] = hf_overrides
     if split_mtp:
         match["mtp_tp"] = a.mtp_tp
+    if a.mtp_no_static_kernels:
+        match["mtp_no_static_kernels"] = True
     if a.prefill_chunk_size:
         match["prefill_chunk_size"] = a.prefill_chunk_size
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,

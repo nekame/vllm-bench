@@ -201,6 +201,14 @@ class MtpPlanningTests(unittest.TestCase):
             def plan(*flags):
                 return run.make_plan(run.parser().parse_args([*args, *flags]))
             normal = plan()
+            compiled = plan("--mode", "compile-acl", "--mtp-tp", "2")
+            no_static = plan("--mode", "compile-acl", "--mtp-tp", "2", "--mtp-no-static-kernels")
+            self.assertTrue(no_static["options"]["mtp_no_static_kernels"])
+            self.assertNotEqual(compiled["comparison_sha256"], no_static["comparison_sha256"])
+            for flags in (("--no-mtp", "--mode", "compile-acl"), ("--mode", "eager"),
+                          ("--mode", "acl"), ("--engine", "omni", "--mode", "compile-acl")):
+                with self.assertRaisesRegex(ValueError, "mtp-no-static-kernels"):
+                    plan("--mtp-no-static-kernels", *flags)
             self.assertEqual(normal["comparison_sha256"], plan("--mtp-tp", "8")["comparison_sha256"])
             for tp in (1, 2, 4):
                 for depth in (3, 7):

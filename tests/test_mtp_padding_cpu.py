@@ -140,6 +140,32 @@ class PaddingMetadataTests(unittest.TestCase):
 
 
 class PaddingExecutionTests(unittest.TestCase):
+    def test_mtp_static_override_reaches_backend_and_acl_wrapper_without_changing_target(self):
+        cache, modules = fixture()
+        cache.cfg.additional_config = {"npugraph_ex_config": {
+            "enable": True, "static_kernel_compile": True, "super_kernel_optimize": True}}
+        cache.cfg.compilation_config = object()
+        wrapper = Mock()
+        modules["torch"].compile = Mock(return_value=object())
+        modules["torch"].npu = SimpleNamespace(Stream=lambda: object())
+        modules.update({
+            "omni_npu.compilation.npugraph_ex": SimpleNamespace(NpuGraphExAdaptor=Mock()),
+            "omni_npu.compilation.acl_graph": SimpleNamespace(ACLGraphWrapper=wrapper),
+            "vllm.config": SimpleNamespace(CUDAGraphMode=SimpleNamespace(FULL="FULL")),
+            "vllm.compilation.cuda_graph": SimpleNamespace(CUDAGraphOptions=lambda **kwargs: object()),
+        })
+        with patch.dict(sys.modules, modules):
+            execution = Execution(object(), cache.cfg, cache, ["draft.attn"], 8, "npu:0",
+                                  head=0, mode="compile-acl", disable_static_kernels=True)
+        self.assertIs(wrapper.call_args.args[1], execution.cfg)
+        self.assertIsNot(execution.cfg, cache.cfg)
+        self.assertIs(execution.cfg.compilation_config, cache.cfg.compilation_config)
+        self.assertFalse(execution.cfg.additional_config["npugraph_ex_config"]["static_kernel_compile"])
+        self.assertFalse(execution.cfg.additional_config["npugraph_ex_config"]["super_kernel_optimize"])
+        self.assertTrue(cache.cfg.additional_config["npugraph_ex_config"]["static_kernel_compile"])
+        self.assertTrue(cache.cfg.additional_config["npugraph_ex_config"]["super_kernel_optimize"])
+        modules["torch"].compile.assert_called_once()
+
     def test_buffers_are_zero_padded_and_only_valid_hidden_rows_are_returned(self):
         cache, modules = fixture()
         context = SimpleNamespace(capturing=False)
@@ -210,7 +236,8 @@ class PaddingExecutionTests(unittest.TestCase):
 
     def test_mixed_tp_isolates_both_models_graphs_without_padding(self):
         engine = DirectEngine.__new__(DirectEngine)
-        engine.a = {"depth": 7, "context_length": 8192, "profile": False, "mode": "compile-acl"}
+        engine.a = {"depth": 7, "context_length": 8192, "profile": False, "mode": "compile-acl",
+                    "mtp_no_static_kernels": True}
         engine.plan = {"config": {"num_hidden_layers": 12, "num_nextn_predict_layers": 3}}
         engine.names = {"target": ["model.layers.0.attn"], "draft": ["draft_model.model.layers.12.attn"]}
         engine.executions, engine.model_timings = {}, None
@@ -224,6 +251,8 @@ class PaddingExecutionTests(unittest.TestCase):
             self.assertTrue(all(call.kwargs["isolate_graph_tasks"] for call in execution.call_args_list))
             self.assertIs(execution.call_args_list[0].args[1], engine.cfg)
             self.assertIs(execution.call_args_list[1].args[1], engine.mtp.cfg)
+            self.assertFalse(execution.call_args_list[0].kwargs["disable_static_kernels"])
+            self.assertTrue(execution.call_args_list[1].kwargs["disable_static_kernels"])
 
     def test_cli_only_allows_direct_mtp_and_registers_size_eight(self):
         with tempfile.TemporaryDirectory() as tmp:

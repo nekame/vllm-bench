@@ -10,6 +10,15 @@
 | `attention.py` | `MomeAttentionMixin._build_mome_conv` из `npu_mla.py`; `NPUMoMEPatch.MomeAttention` из `patch_mome_hybrid.py` | Явный MoME-класс и обычные подклассы attention вместо зависимости от динамического `vllm.model_executor.layers.npumome`; arithmetic, convolution operators и state spec сохранены |
 | `acl_graph.py` | `omni/compilation/acl_graph.py`, `ACLGraphWrapper._update_graph_tasks` | При разных TP или `--mtp-pad-to-8`: отдельные task handles и workspaces каждого графа, изоляция registry при capture; протокол dynamic kwargs/update/events сохранён |
 
+`compilation.py` адаптирует non-static ветку `NpuGraphExAdaptor.compile` из
+`omni/compilation/npugraph_ex.py` для `--mtp-no-static-kernels`. Локальный backend
+принимает отдельные MTP options; tuple output, FakeTensor tracing context и
+прочие параметры компиляции сохранены. Для ACL wrapper создаётся поверхностная
+копия VllmConfig с отдельным additional_config и выключенными static/super kernels;
+static-forward registry остаётся общим. Глобальный конфиг Omni не изменяется.
+Без флага обе модели используют исходный backend. Поддержка subgroup в static
+compiler здесь не реализуется; эксперимент требует проверки на сервере.
+
 Оригинальные license/copyright headers сохранены. MoME adapter содержит
 атрибуцию исходному коду; его patch-источник использует Apache-2.0.
 

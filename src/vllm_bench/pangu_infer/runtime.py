@@ -281,6 +281,7 @@ class DirectEngine:
                 names, size, self.device, head=head if kind == "draft" else None,
                 mode="eager" if prefill else self.a["mode"], profile=self.a["profile"],
                 memory_diagnostics=self.a.get("memory_diagnostics", False),
+                disable_static_kernels=kind == "draft" and self.a.get("mtp_no_static_kernels", False),
                 query_size=query_size,
                 isolate_graph_tasks=self.a.get("mtp_pad_to_8", False) or getattr(self, "mtp", None) is not None)
         execution = self.executions[key]
@@ -494,6 +495,9 @@ def main(argv=None):
                 log_memory("weights_loaded", device)
             started = time.perf_counter()
             engine = DirectEngine(plan, cfg, device, rank, target, draft, mtp=mtp)
+            if rank == 0 and a.get("mtp_no_static_kernels", False):
+                print("[execution] mtp_static_kernel_compile=false mtp_super_kernel_optimize=false"
+                      " target_compilation_config=unchanged", flush=True)
             torch.npu.synchronize()
             # HCCL initializes lazily and allocates outside the torch caching
             # allocator. Release unused packing buffers before the first forward.
@@ -572,6 +576,9 @@ def main(argv=None):
             if mtp is not None:
                 effective["mtp_tp"] = mtp.tp
                 effective["mtp_ranks"] = list(range(mtp.tp))
+            if a.get("mtp_no_static_kernels", False):
+                effective["mtp_compilation"] = {**plan["additional_config"]["npugraph_ex_config"],
+                                              "static_kernel_compile": False, "super_kernel_optimize": False}
             if a.get("compact_kv_cache", False):
                 effective["cache_layout"] = "per_layer_pages"
             from vllm_bench.pangu_infer.results import save_result, versions

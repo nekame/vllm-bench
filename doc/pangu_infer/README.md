@@ -182,6 +182,31 @@ workspace между этими графами небезопасно. Изол�
 Проверки CPU покрывают владение ресурсами; mixed-TP capture/replay требует
 проверки на NPU.
 
+Для проверки задержек static-kernel compilation при разных TP добавьте
+`--mtp-no-static-kernels` к прежнему запуску и укажите новый `--output`:
+
+```text
+--tp 8 --mtp-tp 2 --depth 7 --mode compile-acl --mtp-no-static-kernels --memory-diagnostics
+```
+
+Флаг отключает `static_kernel_compile` и `super_kernel_optimize` только для
+MTP, включая backend и ACL wrapper. MTP продолжает использовать `torch.compile`
+и внешний ACL capture/replay; target сохраняет исходные настройки. Все остальные
+опции backend, включая `frozen_parameter` и `clone_input`, сохраняются.
+Флаг разрешён только для direct с положительной depth в `compile`/`compile-acl`;
+без него поведение прежнее. На старте выводится подтверждение отключения;
+в `result.json` настройки MTP записываются в `effective.mtp_compilation`.
+Флаг входит в идентификатор сравнения: обычное сравнение производительности
+не смешивает запуски с разными настройками компиляции MTP.
+
+Причина проверки: static compiler backend создаёт Gloo-группу по
+`LOCAL_WORLD_SIZE`, независимо от scoped TP модели. При MTP TP2 в мире TP8
+в этот путь входят только rank 0–1, хотя backend ожидает все восемь rank.
+Это может приводить к таймаутам MTP и нарушению порядка создания групп при
+следующей компиляции target. Изменение TP или `LOCAL_WORLD_SIZE` не заменяет
+отдельную поддержку группы компиляции в backend. В этом эксперименте
+исходники Omni/backend и переменные окружения не изменяются.
+
 Отличающийся MTP TP поддерживается только direct. В
 `model_parallel_config.layer_parallel_config` разрешены переопределения вида
 `"self_attn.o_proj": {"tp_size_or_ranks": 1}`: одноранговые группы сохраняют
@@ -661,6 +686,52 @@ baseline включает штатный worker profiler. Такие резул�
 на устройство операций. Внешний ACL capture начинается после этих этапов.
 `warmup_end`, `measured_begin` и `measured_end` отделяют полный прогрев от
 измеряемой генерации на каждом rank.
+
+Полный список `stage` приведён ниже. Каждый rank пишет собственные строки,
+поэтому в общем логе этапы разных rank могут перемешиваться.
+
+| Stage | Префикс | Описание |
+|---|---|---|
+| `setup_done` | `[memory]` | Конфигурация и распределённые группы созданы; загрузка модели ещё не началась. |
+| `weights_loaded` | `[memory]` | Веса загружены и подготовлены. |
+| `caches_allocated` | `[memory]` | Кеши и runtime-буферы выделены; выполнены синхронизация и освобождение неиспользуемого резерва allocator. |
+| `model_begin` | `[memory]` | Начало первого вызова конкретного варианта исполнения: target/MTP, размер входа, head, prefill/decode. |
+| `graph_warmup_begin` | `[memory]` | Начало подготовки модели перед внешним ACL capture. |
+| `graph_warmup_forward_begin` | `[execution]` | Начало прямого вызова модели до внешнего ACL capture. В `compile-acl` вызов проходит через `torch.compile`. |
+| `compile_begin` | `[memory]` | Вход в `backend.compile` после трассировки Dynamo. |
+| `compile_end` | `[memory]` | Backend вернул callable; ленивая компиляция и первый запуск ещё могут продолжаться. |
+| `graph_warmup_forward_end` | `[execution]` | Вызов модели вернул управление Python. `elapsed_seconds` включает компиляцию, если она происходила внутри вызова. |
+| `graph_warmup_sync_begin` | `[execution]` | Начало ожидания завершения операций NPU после вызова. |
+| `graph_warmup_sync_end` | `[execution]` | Синхронизация завершена. `elapsed_seconds` — время ожидания. |
+| `graph_warmup_end` | `[memory]` | Подготовительный вызов и синхронизация завершены. |
+| `acl_wrapper_begin` | `[memory]` | Начало первого вызова внешнего ACL wrapper: возможный внутренний прогрев и capture. |
+| `acl_wrapper_end` | `[memory]` | Внешний wrapper завершил capture; последующая синхронизация тоже завершена. |
+| `model_end` | `[memory]` | Первый вызов данного варианта исполнения успешно завершён. |
+| `model_failed` | `[memory]` | Вызов завершился исключением; `phase` показывает последний отмеченный этап. Может появиться и после прогрева. |
+| `warmup_end` | `[execution]` | Все прогревочные генерации на этом rank завершены. `elapsed_seconds` — полный прогрев. |
+| `measured_begin` | `[execution]` | Начало блока измеряемых запросов. |
+| `measured_end` | `[execution]` | Измеряемые запросы и включённая обработка model timing завершены; итоговое сохранение результатов ещё впереди. |
+
+Для первого decode-вызова в `compile-acl` обычный порядок следующий:
+
+```text
+model_begin
+  graph_warmup_begin
+    graph_warmup_forward_begin
+      compile_begin
+      compile_end
+    graph_warmup_forward_end
+    graph_warmup_sync_begin
+    graph_warmup_sync_end
+  graph_warmup_end
+  acl_wrapper_begin
+  acl_wrapper_end
+model_end
+```
+
+Последовательность повторяется для каждого нового варианта исполнения.
+Обычные replay-вызовы не печатают её заново. Prefill выполняется в eager,
+поэтому у него обычно только `model_begin` / `model_end`.
 
 `gpu_memory_utilization` в direct передаётся в конфигурацию Omni, но не
 ограничивает его собственное выделение кеша под `max_model_len`.
