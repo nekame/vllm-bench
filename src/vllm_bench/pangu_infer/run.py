@@ -72,6 +72,10 @@ def parser():
                    help="Omni only: override MoME state block size; requires --enable-prefix-caching")
     p.add_argument("--kv-cache-dtype", default="auto",
                    help="KV cache format passed to Omni, e.g. auto, bfloat16 or hif8_ds_mla; default: auto")
+    p.add_argument("--max-model-len", type=int,
+                   help="Override engine context capacity; default: context-length + generation reserve")
+    p.add_argument("--cudagraph-capture-sizes", type=int, nargs="+",
+                   help="Omni only: explicit graph capture sizes, e.g. 8; default: 1 and depth+1")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
                    help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
@@ -129,6 +133,12 @@ def make_plan(a):
                for key, value in vars(a).items()}
     if not a.kv_cache_dtype.strip():
         raise ValueError("--kv-cache-dtype must not be empty")
+    if a.cudagraph_capture_sizes is not None:
+        if a.engine != "omni" or "acl" not in a.mode:
+            raise ValueError("--cudagraph-capture-sizes requires --engine omni and an ACL mode")
+        if min(a.cudagraph_capture_sizes) < 1 or max(a.cudagraph_capture_sizes) < a.depth + 1:
+            raise ValueError("Capture sizes must be positive and cover the target verification window")
+        options["cudagraph_capture_sizes"] = sorted(set(a.cudagraph_capture_sizes))
     if a.compact_kv_cache and a.engine != "direct":
         raise ValueError("--compact-kv-cache requires --engine direct")
     if a.async_scheduling and a.engine != "omni":
@@ -267,9 +277,16 @@ def make_plan(a):
     # Reserve the largest supported verification window in every run. Besides
     # allowing warmup of short benchmarks, this keeps APC-off MoME block sizes
     # identical for target-only and MTP correctness comparisons.
-    max_len = a.context_length + max(a.max_new_tokens, 17) + 8
+    required_len = a.context_length + max(a.max_new_tokens, 17) + 8
+    max_len = required_len if a.max_model_len is None else a.max_model_len
+    if max_len < required_len:
+        raise ValueError(f"max-model-len must be at least {required_len}, including generation reserve")
     if max_len > config.get("max_position_embeddings", max_len):
-        raise ValueError("Prompt + generation + speculative window exceeds model position limit")
+        raise ValueError("Requested engine capacity exceeds model position limit")
+    if a.cudagraph_capture_sizes is not None:
+        batch_budget = a.prefill_chunk_size or max_len
+        if max(a.cudagraph_capture_sizes) > batch_budget:
+            raise ValueError("Capture sizes must not exceed max_num_batched_tokens; vLLM would discard them")
     scope = "reduced" if (a.model / "extraction_manifest.json").is_file() else "full"
     identity = checkpoint_identity(a.model)
     prompt_hash = fingerprint(prompts if prompts is not None else prompt)
@@ -296,6 +313,11 @@ def make_plan(a):
             match[name] = options[name]
     if a.prefill_chunk_size:
         match["prefill_chunk_size"] = a.prefill_chunk_size
+    if max_len != required_len:
+        match["max_model_len"] = max_len
+    if options["cudagraph_capture_sizes"] is not None:
+        if options["cudagraph_capture_sizes"] != sorted({1, a.depth + 1}):
+            match["cudagraph_capture_sizes"] = options["cudagraph_capture_sizes"]
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
             "hf_overrides": hf_overrides,
             "operator_config": operator, "additional_config": additional,

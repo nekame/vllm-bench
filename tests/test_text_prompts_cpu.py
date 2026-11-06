@@ -218,6 +218,36 @@ class TextPromptTests(unittest.TestCase):
                 self.assertIn("host-visible" if enabled else "device-complete",
                               save.call_args.args[4]["timing_boundary"])
 
+    def test_explicit_capacity_and_capture_sizes_are_checked_against_workers(self):
+        plan = self.plan("--engine", "omni", "--mode", "compile-acl", "--depth", "7",
+                         "--max-model-len", "133120", "--cudagraph-capture-sizes", "8")
+        path = self.root / "capacity-plan.json"
+        path.write_text(json.dumps(plan))
+        for mismatch in (None, "max_model_len", "cudagraph_capture_sizes"):
+            with self.subTest(mismatch=mismatch):
+                settings = {"max_model_len": 133120, "cudagraph_capture_sizes": [8]}
+                if mismatch is not None:
+                    settings[mismatch] = 1024 if mismatch == "max_model_len" else [1]
+                state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
+                         "compilation": 3, "cudagraph": "FULL", "hardware": "NPU",
+                         "execution_settings": settings,
+                         "compile_counter": {"num_cudagraph_captured": 1, "num_graphs_seen": 1}}
+                engine = SimpleNamespace(collective_rpc=Mock(return_value=[state]))
+                modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
+                    "vllm.engine.arg_utils": SimpleNamespace(EngineArgs=lambda **kwargs: kwargs),
+                    "vllm.v1.engine.llm_engine": SimpleNamespace(LLMEngine=SimpleNamespace(
+                        from_engine_args=lambda *args: engine))}
+                with patch.dict("sys.modules", modules), patch.object(baseline, "require_npu_platform"), \
+                        patch.object(baseline, "request", return_value={"decode_seconds": .1}), \
+                        patch.object(baseline, "versions", return_value={}), patch.object(baseline, "save_result") as save:
+                    if mismatch is None:
+                        baseline.main(["--plan", str(path)])
+                        self.assertEqual(save.call_args.args[3]["execution_settings"], settings)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "Effective Omni"):
+                            baseline.main(["--plan", str(path)])
+                        save.assert_not_called()
+
     def test_boundary_trace_is_armed_per_measured_request_and_closed_on_failure(self):
         from vllm_bench.pangu_infer import boundary_trace
         plan = self.plan("--engine", "omni", "--trace-mtp-boundary", "--temperature", "0",

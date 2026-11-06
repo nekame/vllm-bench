@@ -120,6 +120,49 @@ class DirectPlanningTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "in-process engine"):
                     plan("--engine", "omni", "--omni-multiprocessing", trace)
 
+    def test_explicit_max_model_len_reproduces_server_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = self.fixture(root)
+            config_path = root / "full/config.json"
+            config = json.loads(config_path.read_text())
+            config["max_position_embeddings"] = 262144
+            config_path.write_text(json.dumps(config))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([*args, "--max-new-tokens", "1024", *flags]))
+            plain = plan()
+            explicit_default = plan("--max-model-len", str(plain["max_model_len"]))
+            self.assertEqual(plain["comparison_sha256"], explicit_default["comparison_sha256"])
+            for engine in ("direct", "omni"):
+                override = plan("--engine", engine, "--max-model-len", "133120")
+                self.assertEqual(override["max_model_len"], 133120)
+                self.assertEqual(engine_options(override, direct=engine == "direct")["max_model_len"], 133120)
+                self.assertEqual(plain["prompt_ids"], override["prompt_ids"])
+                self.assertNotEqual(plain["comparison_sha256"], override["comparison_sha256"])
+            for value in ("0", "-1", "8192", "262145"):
+                with self.assertRaises(ValueError):
+                    plan("--max-model-len", value)
+
+    def test_explicit_capture_sizes_reproduce_server_graph_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([
+                    *args, "--engine", "omni", "--mode", "compile-acl", "--depth", "7", *flags]))
+            plain = plan()
+            override = plan("--cudagraph-capture-sizes", "8", "8")
+            self.assertEqual(override["options"]["cudagraph_capture_sizes"], [8])
+            self.assertEqual(engine_options(override, direct=False)["compilation_config"]["cudagraph_capture_sizes"], [8])
+            self.assertEqual(engine_options(plain, direct=False)["compilation_config"]["cudagraph_capture_sizes"], [1, 8])
+            self.assertNotEqual(plain["comparison_sha256"], override["comparison_sha256"])
+            self.assertEqual(plain["comparison_sha256"], plan("--cudagraph-capture-sizes", "8", "1")["comparison_sha256"])
+            for flags in (("--cudagraph-capture-sizes", "4"), ("--cudagraph-capture-sizes", "0", "8"),
+                          ("--engine", "direct", "--cudagraph-capture-sizes", "8"),
+                          ("--mode", "eager", "--cudagraph-capture-sizes", "8"),
+                          ("--prefill-chunk-size", "2048", "--cudagraph-capture-sizes", "1", "4096")):
+                with self.assertRaises(ValueError):
+                    plan(*flags)
+
     def fixture(self, root, *, reduced=False, quantized=True):
         model = root / ("reduced" if reduced else "full")
         model.mkdir()

@@ -38,8 +38,10 @@ def worker_state(worker):
     import torch
     from omni_npu.model_config.config_loader.loader import model_extra_config
     from vllm.compilation.counter import compilation_counter
+    from vllm_bench.pangu_infer.audit import execution_settings, runtime_manifest
 
     cfg = worker.model_runner.vllm_config
+    model_type = type(worker.model_runner.get_model())
     return {"operator": config_json(model_extra_config.operator_opt_config),
             "parallel": config_json(model_extra_config.parall_config),
             "async_scheduling": bool(cfg.scheduler_config.async_scheduling),
@@ -51,6 +53,10 @@ def worker_state(worker):
             "compilation": config_json(cfg.compilation_config.mode),
             "cudagraph": config_json(cfg.compilation_config.cudagraph_mode),
             "compile_counter": {k: v for k, v in vars(compilation_counter).items() if type(v) is int},
+            "execution_settings": config_json(execution_settings(cfg)),
+            "runtime_manifest": runtime_manifest(),
+            "model_runner_class": f"{type(worker.model_runner).__module__}.{type(worker.model_runner).__qualname__}",
+            "model_class": f"{model_type.__module__}.{model_type.__qualname__}",
             "peak_allocated_bytes": torch.npu.max_memory_allocated(),
             "hardware": torch.npu.get_device_name()}
 
@@ -184,6 +190,13 @@ def main(argv=None):
     requested_cache_dtype = a.get("kv_cache_dtype", "auto")
     if any(s.get("cache_dtype", "auto") != requested_cache_dtype for s in states_before):
         raise RuntimeError("Effective Omni cache_dtype differs from the requested --kv-cache-dtype")
+    if a.get("max_model_len") is not None and any(
+            s["execution_settings"]["max_model_len"] != plan["max_model_len"] for s in states_before):
+        raise RuntimeError("Effective Omni max_model_len differs from the requested --max-model-len")
+    if a.get("cudagraph_capture_sizes") is not None and any(
+            sorted(s["execution_settings"]["cudagraph_capture_sizes"]) != a["cudagraph_capture_sizes"]
+            for s in states_before):
+        raise RuntimeError("Effective Omni capture sizes differ from the requested --cudagraph-capture-sizes")
     print(f"[execution] async_scheduling={str(requested_async).lower()} "
           f"engine_core={core_mode} "
           f"timing_boundary={'host_outputs' if host_timing else 'device_complete'}", flush=True)
@@ -192,6 +205,8 @@ def main(argv=None):
           f"enable_prefix_caching={str(requested_prefix).lower()} "
           f"block_size={cache_state['block_size']} mamba_block_size={cache_state['mamba_block_size']} "
           f"mamba_cache_mode={cache_state.get('mamba_cache_mode')}", flush=True)
+    if "execution_settings" in cache_state:
+        print("[execution-config] " + json.dumps(cache_state["execution_settings"]), flush=True)
     if "acl" in a["mode"] and not all(s["compile_counter"].get("num_cudagraph_captured", 0) for s in states_before):
         raise RuntimeError("Offline engine did not capture ACL graphs")
     if "compile" in a["mode"] and not all(
@@ -250,6 +265,8 @@ def main(argv=None):
     effective["mamba_cache_mode"] = first.get("mamba_cache_mode")
     effective["cache_dtype"] = first.get("cache_dtype", "auto")
     effective["engine_core_mode"] = core_mode
+    if "execution_settings" in first:
+        effective["execution_settings"] = first["execution_settings"]
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
     details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,

@@ -134,6 +134,41 @@ process-режима уберите `--trace-mtp-boundary`, сохранив tem
 число повторов и остальные параметры. `[repeat-check]` работает как прежде.
 Оба режима остаются offline LLMEngine без HTTP-сервера.
 
+Для точного воспроизведения известной серверной конфигурации доступны
+`--max-model-len 133120` и `--cudagraph-capture-sizes 8`.
+Без них сохраняются прежние настройки: ёмкость равна
+`context_length + max(max_new_tokens, 17) + 8`, capture sizes —
+`[1, depth + 1]` без дубликатов. Это настройки для выравнивания конфигураций,
+а не подтверждённое исправление nondeterminism.
+
+`--max-model-len` поддерживается обоими engines, должен вмещать prompt,
+generation reserve и не превышать HF position limit. В direct он также
+увеличивает выделяемый KV-кеш. `--cudagraph-capture-sizes` разрешён только
+для Omni в ACL-режиме; размеры должны быть положительными, покрывать окно
+проверки и не превышать token budget. Явные значения проверяются по
+фактическим настройкам workers, чтобы vLLM не мог незаметно отбросить размер.
+Изменение ёмкости или списка capture sizes меняет comparison hash;
+явное указание прежних значений его не меняет.
+
+Строка `[execution-config]` и `effective.execution_settings` содержат
+фактические max length, token budget, capture sizes, hybrid marker и
+npugraph_ex options. В `details.workers_before/after[].runtime_manifest`
+добавлены выбранные environment values, пути и SHA256 ключевых Python
+исходников. Сначала используются пути уже загруженных модулей, затем пути
+из установленного пакета. Это не хеши весов или CANN binaries.
+
+Отдельный аудит окружения можно сохранить без загрузки модели, импорта
+torch/vLLM и обращения к NPU, запустив в соответствующем Python environment:
+
+```bash
+PYTHONPATH="$PWD/src" python -m vllm_bench.pangu_infer.audit --output runtime-manifest.json
+```
+
+Он фиксирует установленные файлы и переменные окружения на момент вызова;
+поля `loaded=false` явно отличают их от модулей, загруженных worker.
+Он не восстанавливает effective config уже завершённого HTTP-запуска.
+Для одинакового package version хеши исходников могут различаться.
+
 Для async и process-режима каждый запрос выводит `[request-end]`: число кешированных prompt-токенов,
 начальную длину оставшейся очереди `queued_batches`, число дополнительных
 `cleanup_steps` и время завершения `cleanup_seconds`, включая финальную

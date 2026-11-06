@@ -126,3 +126,112 @@ transport SyncMPClient без включения insecure serialization.
 случайный суффикс. Boundary trace активируется по возвращённому ID до
 первого `step()`, без отключения штатной рандомизации IDs.
 См. [InputProcessor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/engine/input_processor.py).
+
+## Проверка repeat divergence без NPU, 2026-11-06
+
+После перехода на процессный EngineCore пользователь подтвердил, что
+расхождение сохранилось. Сам переход не считается исправлением. Astra
+проверил startup/config-путь, родительский агент — MoME state transition,
+историю исходников и контракт оператора. Новых запусков модели не было.
+
+Наблюдения из ранее записанной трассы:
+
+- Последний prefill и семь MTP-вызовов имеют одинаковые LM-head inputs
+  и logits между повторами.
+- Первая target verification получает одинаковые IDs/positions и runner
+  GPU accepted counts, но LM-head inputs и argmax уже различаются.
+- Перед verification первый target MoME block 63 совпадает во всех строках;
+  в block 64 первые две строки компонента q различаются до 1.36e35.
+- Снятая persistent metadata: computed=8192, initial block=64, accepted=1.
+  В выбранных target-блоках изменений во время MTP не зафиксировано.
+
+### Механизм выбора состояния
+
+В `omni/attention/backends/mome.py` текущий builder сохраняет accepted=1
+при computed==prompt: условие нормализации использует строгое `<`.
+В `_compute_prefix_caching_block_indices` при этом выбирается speculative
+ветка с `>=`. Для depth 7 и block size 128:
+
+```text
+ceil((8192 - 1 + 7 + 1) / 128) - 1 = 64
+```
+
+Последний prefill заканчивается на позиции 8191, поэтому его last scheduled
+block равен 63. Полный prefill-tail в состоянии длиной 9 занимает строки 7/8.
+Новый block 64 не становится актуальным лишь от факта выделения памяти.
+
+В истории read-only checkout найден commit
+`a4a75d16408274bd2c6fe7e8bed567d891e8dfb5` от 2026-10-14. Он одновременно
+поменял `computed > prompt` на `>=` в выборе initial block и
+`computed <= prompt` на `<` в нормализации accepted. До этого изменения
+тот же первый target decode выбирал block 63 / accepted=8.
+Проверяется командой `git show a4a75d16 -- omni/attention/backends/mome.py`.
+Изменение касалось общего builder; отдельный draft step0 имеет свой offset.
+
+Официальный [контракт CANN inplace convolution](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/920beta1/API/aolapi/context/ops-transformer/aclnnInplaceFusedCausalConv1d.md)
+описывает выбор APC-страницы через `cacheIndices[batch, initialStateIdx]`
+и смещение истории `accepted - 1`. Для K=3 и accepted=1 это первые две
+строки выбранного состояния. Таким образом, наблюдения соответствуют
+чтению неактуальной истории. Но версия фактического CANN kernel и его
+graph bindings на сервере не проверены.
+
+Есть дополнительное ограничение трассы: состояния выбирались по
+`input_batch.block_table` с проверкой CPU request block IDs; фактический
+`builder.cache_indices_tensor`, переданный captured operator, не снимался.
+Поэтому read-after-prefill механизм имеет сильное подтверждение по коду и
+данным, но полная цепочка фактических аргументов NPU ещё не доказана.
+
+Общий пул страниц и их повторное использование допускают разные остаточные
+байты до инициализации новым владельцем. Это правдоподобно объясняет
+зависимость от истории запросов и размеров буферов; происхождение огромных
+значений именно из другого типа кеша не установлено. Совпадение package
+version также не доказывает одинаковые Python-исходники двух установок.
+
+Нормализация accepted задаёт не только initial block, но и смещение внутри
+него. При выключенном APC номер страницы может оставаться прежним, а
+accepted=1 и accepted=8 всё равно выбирают разные строки истории. Это
+согласуется с ранним наблюдением пользователя: greedy target-only и MTP
+различались уже на втором токене даже до появления repeat nondeterminism.
+Это дополнительное следствие контракта, не отдельное подтверждение
+поведения установленного на сервере kernel.
+
+### Различия конфигураций
+
+| Параметр | Известный HTTP-запуск | Прежняя обвязка | Статус |
+| --- | --- | --- | --- |
+| max_model_len | 133120 | 9224 при context=8192/output=1024 | Подтверждённое различие размеров буферов; теперь есть `--max-model-len` |
+| capture sizes | [8] | [1, 8] | Подтверждённое различие startup capture; теперь есть `--cudagraph-capture-sizes` |
+| static_kernel_compile | true | Поле передаётся только через additional-config, default false | Фактический launch plan пользователя неизвестен |
+| AOT | Зависит от env и версии torch | launcher принудительно задаёт 0 | Условное различие; не установленная причина |
+| История APC | Неизвестна | По умолчанию два warmup-запроса по 17 output tokens | Истории ещё не сопоставлены |
+| EngineCore process | Штатный процесс | Добавлен отдельный режим | Пользователь проверил: расхождение сохранилось |
+
+`max_model_len` здесь меняет размеры MoME cache-index buffers, NPUInputBatch
+и graph block tables. В Ultra RoPE берёт position limit из HF config, поэтому
+этот параметр сам по себе не меняет формулу RoPE. Capture 8 используется для
+первой verification в обоих случаях; дополнительный capture 1 не доказывает
+разную форму этого конкретного вызова. Размеры могут менять проявление
+ошибочного чтения, но это пока причинная гипотеза.
+
+Проверенные подозрения, не подтвердившиеся по исходникам:
+
+- `--ignore-architecture` создаёт тот же HF override, что указан для HTTP.
+  Исполнение функций draft override на CPU stand-ins дало одинаковые
+  `openpangu_mtp`, `OpenPanguMTPModel`, `n_predict=7`.
+- В baseline не импортируются локальные model classes direct engine;
+  registry не заменяется нашим runtime.
+- Принудительный MRv1 соответствует native default для этой Ultra-модели.
+  Различие с явно включённым MRv2 в HTTP не проверялось.
+- max_num_seqs=1 и token budget=2048 заданы явно; различие UsageContext
+  не меняет эти два параметра.
+- Greedy draft возвращает argmax до top-k фильтра. Sampling seed,
+  detokenization и generation defaults не объясняют уже отличающийся вход
+  LM head при одинаковых входных token IDs.
+
+Новые настройки и `audit.py` дают точное управление двумя известными
+различиями и сохраняют effective settings/selected source fingerprints.
+Defaults, numerical policy, содержимое кеша и checkout OmniInfer не меняются.
+Это подготовка воспроизводимого сравнения, а не подтверждённый numerical fix.
+Standalone audit читает package specs и файлы без импорта ML-пакетов;
+worker audit предпочитает файлы уже загруженных модулей. Набор fingerprints
+ограничен перечисленными Python-файлами, без весов и CANN binaries.

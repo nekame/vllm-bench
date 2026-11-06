@@ -33,6 +33,8 @@ def engine_options(plan, *, direct):
     compile_enabled = "compile" in a["mode"]
     graph_enabled = "acl" in a["mode"]
     capture_sizes = {1, a["depth"] + 1}
+    if a.get("cudagraph_capture_sizes") is not None:
+        capture_sizes = set(a["cudagraph_capture_sizes"])
     if direct and a.get("mtp_pad_to_8", False):
         capture_sizes.add(8)
     # Keep enforce_eager=False in every mode: it changes operator optimizations.
