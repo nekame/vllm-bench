@@ -235,3 +235,17 @@ Defaults, numerical policy, содержимое кеша и checkout OmniInfer 
 Standalone audit читает package specs и файлы без импорта ML-пакетов;
 worker audit предпочитает файлы уже загруженных модулей. Набор fingerprints
 ограничен перечисленными Python-файлами, без весов и CANN binaries.
+
+`scripts/check_mome_cpu.py` запускает отдельные численные проверки исходных
+методов MoME builder и `causal_conv1d_ref` на настоящем CPU PyTorch. Поддержка
+импортов в `tests/mome_cpu_support.py` изолирована контекстом и восстанавливается
+после suite; методы builder, reference arithmetic и torch не заменяются.
+Builder constructor обходится fixture-буферами, а history selection — явный
+адаптер контракта CANN. Candidate patch применяется git только к временной
+копии backend; reference копируется без изменений. Bytecode write отключён
+на время загрузки read-only файлов. NPU/operator/ACL semantics этим не доказаны.
+В доступном окружении PyTorch отсутствует и его установка не удалась из-за
+DNS, поэтому численный результат пока не получен. Astra проверил API/формы
+и нашёл две исправленные ошибки стенда: tuple output reference и возможную
+запись upstream pycache. Stdlib-тесты проверяют изоляцию, временное применение
+патча и отсутствие ложного успешного результата при missing torch.

@@ -683,6 +683,75 @@ TPOT измеряется отдельно без диагностики. Пат
 на NPU локально недоступны. Если `apply --check` не проходит, нужен просмотр
 различий с серверной версией; принудительное применение не предусмотрено.
 
+## Численные CPU-тесты MoME без модели
+
+Для проверки перехода prefill → первая target verification добавлены
+`scripts/check_mome_cpu.py` и `tests/test_mome_boundary_torch_cpu.py`.
+Нужны Python 3.10+, CPU PyTorch, git и исходный checkout OmniInfer;
+checkpoint, vLLM, torch_npu и NPU не требуются. По умолчанию используется
+соседняя папка `../omniinfer`; другой путь задаётся через `--omni-source`.
+
+Можно использовать отдельное окружение:
+
+```bash
+python3 -m venv /tmp/pangu-mome-cpu
+/tmp/pangu-mome-cpu/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+/tmp/pangu-mome-cpu/bin/python scripts/check_mome_cpu.py \
+  --omni-source ../omniinfer --threads 1 --output results/mome-cpu.json
+```
+
+Если подходящий torch уже установлен, достаточно последней команды с
+соответствующим Python. Runner отключает
+[автозагрузку device extensions](https://docs.pytorch.org/tutorials/unstable/python_extension_autoload.html)
+перед импортом torch и явно создаёт тензоры на CPU. Исходники Omni загружаются
+без записи `__pycache__`; кандидат патча применяется только к временной копии.
+Исходный checkout не изменяется.
+
+Проверяются реальные `build`, `build_for_drafting` и block-index arithmetic
+из `omni/attention/backends/mome.py`, а также `causal_conv1d_ref` из
+`omni/layers/ops/causal_conv1d.py`. Заглушки заменяют только импорты внешних
+framework/hardware dependencies. Сам torch и проверяемые методы исходные.
+Конструктор builder не проверяется: тест создаёт маленькие CPU buffers
+и batch-one metadata. Split-helper поддерживает упорядоченные CPU fixtures;
+SP/TP/HCCL протоколы этим тестом не проверяются.
+
+Девять тестов охватывают:
+
+- context 8192, depth 3/7, APC on/off, float32/bfloat16;
+- выбор блока 64 / accepted=1 в текущем исходнике и блока 63 / accepted=depth+1
+  в исправленной временной копии;
+- два разных содержимых повторно выделенной будущей страницы при одинаковом
+  актуальном prefill-tail;
+- сравнение с исходной reference convolution на непрерывном prompt + query;
+- правильный target-only control и chunked prefill 2048/2048/2048/1536/512;
+- соседние с границей блока длины 8184/8191/8192/8193/8320;
+- сохранение draft/последующего target/PD metadata после кандидата правки;
+- ветку обновления постоянных buffers на CPU, без захвата или replay графа.
+
+Выбор истории из APC-страницы выполняет явный тестовый адаптер по публичному
+контракту CANN. Сама convolution — исходная PyTorch reference. Разный мусор
+страницы моделируется известными sentinel values; реальный allocator vLLM
+и фактический fused NPU-оператор не исполняются. Поэтому тест проверяет
+предполагаемый механизм, а не воспроизводит полный сервер или модель.
+
+JSON содержит версии, хеши исходного/исправленного builder и reference,
+результаты отдельных контрпримеров, время и peak RSS процесса. Успешные
+reproduction assertions означают, что воспроизведена зависимость текущего
+исходника от неактуального состояния. Они не означают, что текущий builder
+корректен. Candidate-fix assertions требуют точного совпадения с reference.
+Тесты закрепляют поведение исходной ревизии 4cd855b2; при другой или уже
+исправленной версии нужно смотреть хеши, ошибки применения патча и ожидания.
+
+Если torch отсутствует, обычный unittest discovery пропускает эти девять
+тестов. Явный runner возвращает exit code 2 и не создаёт успешный отчёт.
+Код 0 возможен только при выполненных тестах без failures/errors/skips.
+В текущем локальном окружении torch отсутствует, загрузка пакета недоступна
+из-за DNS; численная часть пока не выполнена. Проверены инфраструктура
+изоляции импортов, запрет записи bytecode, применение патча во временной
+копии и корректный отказ runner при отсутствии torch. Для конфигурации
+по умолчанию достаточно одного CPU-потока и нескольких гигабайт RAM;
+фактический RSS после численного запуска попадёт в JSON.
+
 ## Диагностика расхождений target: запись Omni и replay в direct
 
 Этот режим сравнивает основную модель на одинаковых входных окнах. Он нужен,

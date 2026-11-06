@@ -11,12 +11,13 @@
     "doc/layer_profile/README.md": "55d1abf26e703d853bbe3a3b074959dbb717efff92fb83ac8b968f284624222e",
     "doc/mtp_debug/README.md": "5b0b5f24acfaf8c6688fac3b0678d02a49b67dc4c4537813a4f975ed4f056bc0",
     "doc/mtp_profile/README.md": "7e8f28879945d10204269ec9254c4acd17bc42e9d51a16be290dd9af7905fda6",
-    "doc/pangu_infer/README.md": "495fe9e0bef17323dd359ac01fff7e5e6dc29377430875ca46e779c68fa8d017",
-    "doc/pangu_infer/UPSTREAM.md": "280b33de48c4326d49aeb4cfc12d9a84145201f3ef534bc28850a661605f6bfa",
+    "doc/pangu_infer/README.md": "e97a3c1044262f2b031663a5c426c3a8ce83f7f58fc1b0ab118b4ec28c6a129d",
+    "doc/pangu_infer/UPSTREAM.md": "9526beda18b74691c561ea935ef556db351b7f8df04a49800a15d8d1b0fac627",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
     "doc/reference/PANGU_505B_RU.md": "3105fd8bf9ae2510d3a3931b04aa29905dad2b7cde2a34ea7a4e3dfbbcc0ec1e",
     "patches/omniinfer/mome-target-prefill-state.patch": "57011e0853158bc90dc4b638325284431f5637dba02d159b7078f0f23028a26a",
+    "scripts/check_mome_cpu.py": "74112b7466d961a8c98c32a8a145f03828668d7fc5089a369f81fb5aa83a5c3e",
     "scripts/extract_token_choices.sh": "2fae37bb45c4e414bb406f41d36e5084edbdfa0a4fc468b5222081b2f413c6b8",
     "scripts/find_first_difference.sh": "6e3b2c0611ec1f634ce596fbf1f8d7f8a3adfe450ca09970d1255b4c103bd7eb",
     "scripts/inspect_mtp_boundary.py": "d67a50ff81ede50147fde6a0cfef97477ffbcfa302a2f883593fb14d30883848",
@@ -80,6 +81,7 @@
     "src/vllm_bench/tools/__init__.py": "1a5a2cd0ec11b59a55eddd3c78db9300a20103ef6385e2915a50d5b9a237fe85",
     "src/vllm_bench/tools/analyze_trace.py": "0bfd684aafdcda779b1fdee5c9571ffaf14c4b72512dd1990209f934d8ccb8a5",
     "src/vllm_bench/tools/export_profile.py": "f225f6ce9421a38909a0894eefa673c32506ecfc07717bb9cebab94265453b77",
+    "tests/mome_cpu_support.py": "b032f3296016debcd1a111890f7d09bcfb99e9d1981ba5864eaa66ad17c904d1",
     "tests/test_boundary_trace_cpu.py": "e78c6fe21fec8862b6ac082744ddd1323cbd693d19dec1ed4efe0b62f2721b5c",
     "tests/test_chunked_prefill_cpu.py": "24a2262438b39ec7f92b7f76f93fac4cbfd872f838ab3ec2909dc020264f0a49",
     "tests/test_compact_cache_cpu.py": "925957d5224e55ad7464815c5dc901a00b13246eca9f412c64504197ddcb9728",
@@ -93,6 +95,8 @@
     "tests/test_locate_output_cpu.py": "56e9fd6e7054d98d5f91a5626715d3f30b301e73e5e456a91db22597ad215593",
     "tests/test_memory_diagnostics_cpu.py": "94c99e323f3fd74cc2b53336bb681d229b3c49b2525b116c479d655a2107f26e",
     "tests/test_model_timing_cpu.py": "0ea32faf4606f92f62481aed7ec4156e6433604b2e062ec03a658662681948e1",
+    "tests/test_mome_boundary_torch_cpu.py": "e0c255c5052e250ba1c722e6f4dbf5de300606195e12baa46e4c286fc722962d",
+    "tests/test_mome_cpu_runner_cpu.py": "00eb7e3e1deb2661c53cae415f419f155453ce3cadf5c22eb3aa8fccfdeea381",
     "tests/test_mtp_compilation_cpu.py": "7ff32726ae55c8a512077ada453ad3035947678bdb13059bbf1bdf008fc1d3af",
     "tests/test_mtp_cpu.py": "480ca08c786f33da52f1596d79b7210ded1a12bcce84ed040b7eb5521d7c4d52",
     "tests/test_mtp_padding_cpu.py": "eb7ae8072d5efb5983f20f212e15a721e88c4fa1443e858963132ef618668ab4",
@@ -107,7 +111,7 @@
     "tests/test_weight_packing_cpu.py": "9b6eb3b62434c5b92036bc80501ad2f1630376ce5f4946fb776d1899674add2e"
   },
   "validation": {
-    "cpu_tests": 248,
+    "cpu_tests": 260,
     "cpu_tests_passed": true,
     "cpu_test_command": "PYTHONPATH=\"$PWD/src\" python -m unittest discover -s tests",
     "npu_execution_performed": false,
@@ -122,7 +126,7 @@
     "full_model_profile_validation": "CPU checks: V2/Ultra BF16/MXFP8 full-model dry-run without ML imports or checkpoint changes; MTP disabled or depths 3/7; manifest and benchmark/profile client dry-run; argument/checkpoint validation; target/MTP decoder annotations in mock workers; NPU smoke tests pending",
     "reduced_mtp_profile_validation": "CPU checks: V2/Ultra BF16/MXFP8 prefix target plus MTP extraction, payload/scales byte preservation, 50-52 to 12-14 remapping, SWA windows and quantization references, missing-weight/config rejection, verification and hashes, TP2 MTP launch/manifest/client, remapped decoder annotations; NPU smoke tests pending",
     "cpu_tests_skipped": 6,
-    "pangu_infer_validation": "242 tests passed, 6 optional CPU torch tests skipped (torch unavailable). New CPU coverage: stdlib CLI/matrix planning, workload matching, no silent compile bypass, streamed weight selection, missing-parameter rejection, metadata grouping, offline timing boundaries, exact rejection math, comparison guards and initial EOS results. NPU model loading, MXFP8 packing, MoME state correctness, TP collectives, torch.compile and ACL replay remain unverified; server smoke tests required.",
+    "pangu_infer_validation": "245 tests passed, 15 torch-dependent tests skipped (torch unavailable). New CPU coverage: stdlib CLI/matrix planning, workload matching, no silent compile bypass, streamed weight selection, missing-parameter rejection, metadata grouping, offline timing boundaries, exact rejection math, comparison guards and initial EOS results. NPU model loading, MXFP8 packing, MoME state correctness, TP collectives, torch.compile and ACL replay remain unverified; server smoke tests required.",
     "pangu_infer_npu_execution_performed": false,
     "pangu_infer_platform_validation": "CPU regression checks: platform plugin omni-npu survives VLLM_PLUGINS filtering for direct/offline launches, user plugins preserved and deduplicated, empty/non-NPU platforms rejected before EngineArgs configuration. NPU execution remains pending.",
     "pangu_infer_tensor_context_validation": "CPU mock runtime regression: model loading/post-processing, cache/buffer initialization, warmup and decode run under no_grad; inference_mode is never entered. Actual tensor version counters and NPU weight post-processing require server validation.",
@@ -154,6 +158,8 @@
     "pangu_infer_mome_target_prefill_patch_validation": "Prepared an explicit upstream patch without modifying the read-only OmniInfer checkout. Non-PD target build normalizes accepted count at computed==prompt to num_spec+1, selecting the committed prefill tail; build_for_drafting explicitly preserves draft behavior, and subsequent target decode and PD retain previous semantics. Patch includes actual builder regression tests for depth 3/7, accepted input isolation, subsequent target decode, draft calls, PD and per-request masks. Applied and reverse-checked on a temporary copy of the two upstream files; both patched files pass Python compilation. Torch tests and NPU causal validation have not been executed locally. Existing vllm-bench suite last passed 238 tests: 232 passed, 6 skipped; this does not validate the upstream correction.",
     "pangu_infer_omni_multiprocessing_validation": "Explicit Omni-only --omni-multiprocessing launches the native EngineCoreProc through LLMEngine.from_engine_args(enable_multiprocessing=True) and VLLM_ENABLE_V1_MULTIPROCESSING=1. Default remains in-process. The process core owns its queue cleanup; frontend never accesses private queues in this mode. Both sync and async schedulers use host-output timing without a first-token synchronization; final NPU sync is outside TPOT. CLI/env routing, trace incompatibilities, unchanged model workload identity, factory forwarding, effective mode reporting and timing/cleanup isolation covered on CPU. 241 tests ran: 235 passed, 6 skipped. No OmniInfer changes; equivalence to HTTP output, repeat determinism and NPU process startup remain unverified.",
     "pangu_infer_omni_multiprocessing_rpc_validation": "Astra review found callable collective RPC incompatible with SyncMPClient msgpack under default serialization settings. MP mode now registers OmniBaselineWorkerExtension through the supported worker_extension_cls API and sends named string RPCs for NPU synchronization and worker state. Extension has no constructor or overrides; in-process callable routing remains unchanged. CPU transport stand-ins reject non-string MP methods, verify registered method names and factory extension propagation, and retain timing/cleanup coverage. 241 tests ran: 235 passed, 6 skipped. Public API and extension MRO/conflict rules source-reviewed by Astra; real NPU startup, msgpack transport and repeat-determinism cause remain unverified.",
-    "pangu_infer_http_configuration_audit_validation": "Source-only joint Astra review after process EngineCore failed to eliminate repeat divergence. Added explicit --max-model-len for both engines and Omni ACL --cudagraph-capture-sizes without changing defaults; reserve/HF limits, capture coverage/token budget, canonical identity and effective worker values checked. Effective settings and selected loaded/installed source paths/hashes recorded. Stdlib-only audit CLI locates packages without importing ML modules; tests reject imports of fake torch/torch_npu/vllm/omni packages and verify loaded-path precedence, missing-file reporting and effective values. 248 tests ran: 242 passed, 6 skipped. Astra found and reviewed the fixed capture-budget guard. Documented native Mome boundary predicate change in a4a75d16, prior trace evidence, CANN public contract and actual operator-pointer/version limitations. No OmniInfer edits or NPU model tests; token divergence remains unresolved."
+    "pangu_infer_http_configuration_audit_validation": "Source-only joint Astra review after process EngineCore failed to eliminate repeat divergence. Added explicit --max-model-len for both engines and Omni ACL --cudagraph-capture-sizes without changing defaults; reserve/HF limits, capture coverage/token budget, canonical identity and effective worker values checked. Effective settings and selected loaded/installed source paths/hashes recorded. Stdlib-only audit CLI locates packages without importing ML modules; tests reject imports of fake torch/torch_npu/vllm/omni packages and verify loaded-path precedence, missing-file reporting and effective values. 248 tests ran: 242 passed, 6 skipped. Astra found and reviewed the fixed capture-budget guard. Documented native Mome boundary predicate change in a4a75d16, prior trace evidence, CANN public contract and actual operator-pointer/version limitations. No OmniInfer edits or NPU model tests; token divergence remains unresolved.",
+    "pangu_infer_mome_cpu_numerical_tests_executed": false,
+    "pangu_infer_mome_cpu_test_harness_validation": "Added 9 real-PyTorch CPU tests loading the original full MoME builder and causal_conv1d_ref source modules with import-only framework/hardware stand-ins. Candidate patch is applied only to a temporary copy; original/reference bytes preserved, upstream bytecode writes disabled. Tests cover depth3/7, context8192 and adjacent boundaries, APC on/off, float32/BF16, future-page poison sensitivity versus uninterrupted reference, target-only/chunked-prefill controls, draft/later-target/PD metadata and persistent CPU buffer aliasing. Standalone runner disables backend autoload, reports timing/RSS/source hashes, and refuses success with skipped/missing tests. Astra fixed-reviewed reference tuple unpacking and read-only loader behavior. Infrastructure tests verify module/flag restoration, temporary patch isolation and exit2 without torch. 260 tests ran: 245 passed, 15 skipped (9 new numerical plus 6 existing torch tests). Actual numerical suite NOT executed: torch absent, pip download blocked by DNS, no cached wheel found. No model weights, NPU execution or OmniInfer edits."
   }
 }
