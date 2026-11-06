@@ -485,7 +485,9 @@ class LoadingAndBaselineTests(unittest.TestCase):
             state["tokens"] = tokens
             return [SimpleNamespace(request_id="r", outputs=[SimpleNamespace(token_ids=tokens)])]
         engine = SimpleNamespace(collective_rpc=rpc, add_request=Mock(), step=step,
-                                 has_unfinished_requests=lambda: len(state["tokens"]) < 5)
+                                 has_unfinished_requests=lambda: len(state["tokens"]) < 5,
+                                 engine_core=SimpleNamespace(engine_core=SimpleNamespace(
+                                     batch_queue=[], scheduler=SimpleNamespace(has_requests=lambda: False))))
         options = {"temperature": 0, "top_k": 0, "top_p": 1, "seed": 0, "respect_eos": False,
                    "depth": 3, "context_length": 8192, "async_scheduling": True}
         with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=lambda **kwargs: kwargs)}), \
@@ -496,6 +498,48 @@ class LoadingAndBaselineTests(unittest.TestCase):
         self.assertEqual(record["decode_seconds"], 3)
         self.assertEqual(record["decode_tokens"], 4)
         self.assertEqual(record["accepted_drafts"], [2, 0])
+
+    def test_async_request_drains_queued_outputs_and_scheduler_cleanup_before_next_add(self):
+        from vllm_bench.pangu_infer import baseline
+        state = {"time": 0, "active": False, "cleanup": False, "step": 0}
+        core = SimpleNamespace(batch_queue=[], scheduler=SimpleNamespace(has_requests=lambda: state["cleanup"]))
+        def add(request_id, *args):
+            self.assertFalse(core.batch_queue)
+            self.assertFalse(state["cleanup"])
+            state.update(active=True, step=0, request_id=request_id)
+        def step():
+            state["time"] += 1
+            if not state["active"]:
+                if core.batch_queue:
+                    core.batch_queue.pop()
+                else:
+                    state["cleanup"] = False
+                return []
+            state["step"] += 1
+            tokens = [4] if state["step"] == 1 else [4, 5]
+            if state["step"] == 2:
+                state.update(active=False, cleanup=True)
+                core.batch_queue.append("pending result")
+            return [SimpleNamespace(request_id=state["request_id"], outputs=[SimpleNamespace(token_ids=tokens)])]
+        def rpc(*args):
+            state["time"] += 100
+        engine = SimpleNamespace(collective_rpc=rpc, add_request=add, step=step,
+                                 has_unfinished_requests=lambda: state["active"],
+                                 engine_core=SimpleNamespace(engine_core=core))
+        options = {"temperature": 0, "top_k": 0, "top_p": 1, "seed": 0, "respect_eos": False,
+                   "depth": 3, "context_length": 8192, "async_scheduling": True}
+        with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=lambda **kwargs: kwargs)}), \
+                patch.object(baseline.time, "perf_counter", side_effect=lambda: state["time"]):
+            records = [baseline.request(engine, {"options": options, "prompt_ids": [2, 3]}, f"r-{i}", 2)
+                       for i in range(2)]
+        self.assertEqual([r["token_ids"] for r in records], [[4, 5], [4, 5]])
+        for record in records:
+            self.assertEqual(record["post_request_queued_batches"], 1)
+            self.assertEqual(record["post_request_cleanup_steps"], 2)
+            self.assertEqual(record["post_request_cleanup_seconds"], 102)
+            self.assertEqual(record["decode_seconds"], 1)
+        self.assertFalse(core.batch_queue)
+        self.assertFalse(state["cleanup"])
 
     def test_runtime_initialization_and_execution_use_no_grad(self):
         from unittest.mock import Mock
@@ -648,6 +692,37 @@ class LoadingAndBaselineTests(unittest.TestCase):
 
 
 class ResultComparisonTests(unittest.TestCase):
+    def test_repeat_consistency_reports_first_token_difference_and_cache_counts(self):
+        from vllm_bench.pangu_infer.results import repeat_consistency
+        records = [{"token_ids": [3, 4, 5], "cached_prompt_tokens": 7680},
+                   {"token_ids": [3, 7, 5], "cached_prompt_tokens": 7936},
+                   {"token_ids": [3, 4, 5], "cached_prompt_tokens": 7680}]
+        check = repeat_consistency(records)
+        self.assertEqual(check["checked_pairs"], 2)
+        self.assertFalse(check["matches"])
+        self.assertEqual(check["first_differences"], [{"reference_record": 0, "candidate_record": 1,
+            "id": None, "position": 1, "reference": 4, "candidate": 7,
+            "reference_cached_prompt_tokens": 7680, "candidate_cached_prompt_tokens": 7936}])
+
+    def test_repeat_consistency_compares_only_matching_prompt_ids_and_detects_length(self):
+        from vllm_bench.pangu_infer.results import repeat_consistency
+        records = [{"id": 0, "token_ids": [1]}, {"id": "0", "token_ids": [2]},
+                   {"id": 0, "token_ids": [1]}, {"id": "0", "token_ids": [2]}]
+        self.assertTrue(repeat_consistency(records)["matches"])
+        self.assertIsNone(repeat_consistency(records[:2])["matches"])
+        records[-1]["token_ids"].append(3)
+        difference = repeat_consistency(records)["first_differences"][0]
+        self.assertEqual(difference["reference_record"], 1)
+        self.assertEqual(difference["position"], 1)
+        self.assertEqual(difference["candidate_length"], 2)
+
+    def test_inconsistent_greedy_repeats_reject_speedup_but_allow_token_inspection(self):
+        reference, candidate = self.fixture(), self.fixture()
+        candidate["repeat_consistency"] = {"matches": False}
+        with self.assertRaisesRegex(ValueError, "Greedy outputs differ between repeats"):
+            compare(reference, candidate)
+        self.assertTrue(compare(reference, candidate, correctness=True)["greedy_tokens_match"])
+
     def test_effective_cache_dtype_mismatch_rejects_speedup_but_allows_token_check(self):
         reference, candidate = self.fixture(), self.fixture()
         candidate["effective"]["cache_dtype"] = "hif8_ds_mla"

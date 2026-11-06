@@ -15,6 +15,23 @@ def synchronize_worker(worker):
     torch.npu.synchronize()
 
 
+def drain_async_batches(engine):
+    """Finish the in-process core's work after the final visible output.
+
+    Match EngineCoreProc.has_work for DP=1: a finished request may leave
+    queued batches or scheduler cleanup. Device synchronization alone does
+    not consume these results. Use LLMEngine.step for its normal post_step
+    and output-processing protocol; do not modify scheduler/worker state.
+    """
+    core = engine.engine_core.engine_core
+    queued_batches = len(core.batch_queue or ())
+    steps = 0
+    while core.batch_queue or core.scheduler.has_requests():
+        engine.step()
+        steps += 1
+    return queued_batches, steps
+
+
 def worker_state(worker):
     """Read-only RPC, outside timings, on every stock OmniInfer worker."""
     import torch
@@ -51,6 +68,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
     first_time, first_count, first_cycle, tokens, cycles = None, 0, 0, [], 0
     cached_prompt_tokens = None
     accepted_drafts = []
+    queued_batches, cleanup_steps, cleanup_seconds = 0, 0, 0.0
     while engine.has_unfinished_requests():
         outputs = engine.step()
         cycles += 1
@@ -72,7 +90,10 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
                 first_cycle = cycles
     if async_scheduling:
         end = time.perf_counter()
+        cleanup_started = end
+        queued_batches, cleanup_steps = drain_async_batches(engine)
         engine.collective_rpc(synchronize_worker)
+        cleanup_seconds = time.perf_counter() - cleanup_started
     else:
         engine.collective_rpc(synchronize_worker)
         end = time.perf_counter()
@@ -80,11 +101,17 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
         raise RuntimeError("Offline engine produced no tokens")
     if first_count != 1:
         raise RuntimeError("Expected one prefill output token; decode timing boundaries are not comparable")
+    if async_scheduling:
+        print("[request-end] " + json.dumps({"request_id": request_id,
+            "cached_prompt_tokens": cached_prompt_tokens, "queued_batches": queued_batches,
+            "cleanup_steps": cleanup_steps, "cleanup_seconds": cleanup_seconds}), flush=True)
     return {"token_ids": tokens, "prefill_seconds": first_time - start,
             "decode_seconds": end - first_time, "decode_tokens": len(tokens) - first_count,
             "cycles": cycles - first_cycle, "accepted_drafts": accepted_drafts,
             "acceptance_measurement": "from output increments; final truncated cycle is a lower bound",
-            "initial_context": a["context_length"], "cached_prompt_tokens": cached_prompt_tokens}
+            "initial_context": a["context_length"], "cached_prompt_tokens": cached_prompt_tokens,
+            "post_request_queued_batches": queued_batches, "post_request_cleanup_steps": cleanup_steps,
+            "post_request_cleanup_seconds": cleanup_seconds}
 
 
 def main(argv=None):

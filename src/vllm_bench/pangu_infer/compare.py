@@ -25,6 +25,8 @@ def compare(reference, candidate, *, correctness=False):
             raise ValueError("Unexpected measurement type")
         if not correctness and record["measurement"] != "benchmark":
             raise ValueError("Diagnostic runs cannot be used for benchmark comparison; use --correctness to check tokens")
+        if not correctness and record.get("repeat_consistency", {}).get("matches") is False:
+            raise ValueError("Greedy outputs differ between repeats; use --correctness to inspect token differences")
     ra, ca = reference["options"], candidate["options"]
     if correctness:
         if ra["temperature"] != 0 or ca["temperature"] != 0:

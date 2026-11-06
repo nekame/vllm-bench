@@ -2,10 +2,34 @@
 
 import csv
 from importlib import metadata
+import json
 from pathlib import Path
 import statistics
 
 from vllm_bench.pangu_infer.run import write_json
+
+
+def repeat_consistency(records):
+    """Compare repeated greedy requests within each prompt ID."""
+    from vllm_bench.pangu_infer.compare import first_difference
+
+    references, differences, checked = {}, [], 0
+    for index, record in enumerate(records):
+        key = ("id", record["id"]) if "id" in record else ("synthetic",)
+        if key not in references:
+            references[key] = index
+            continue
+        reference_index = references[key]
+        reference = records[reference_index]
+        checked += 1
+        difference = first_difference(reference["token_ids"], record["token_ids"])
+        if difference is not None:
+            differences.append({"reference_record": reference_index, "candidate_record": index,
+                                "id": record.get("id"), **difference,
+                                "reference_cached_prompt_tokens": reference.get("cached_prompt_tokens"),
+                                "candidate_cached_prompt_tokens": record.get("cached_prompt_tokens")})
+    return {"checked_pairs": checked, "matches": not differences if checked else None,
+            "first_differences": differences}
 
 
 def versions():
@@ -42,6 +66,9 @@ def save_result(output, plan, records, effective, details):
     if a.get("model_timing", False):
         from vllm_bench.pangu_infer.model_timing import summarize_model_timings
         summary["model_timing_summary"] = summarize_model_timings(records)
+    if a.get("temperature", 1) == 0:
+        summary["repeat_consistency"] = repeat_consistency(records)
+        print("[repeat-check] " + json.dumps(summary["repeat_consistency"]), flush=True)
     write_json(Path(output) / "result.json", summary)
     with (Path(output) / "summary.csv").open("w", newline="") as handle:
         fields = ["engine", "measurement", "model_scope", "decode_tokens_per_second", "median_tpot_ms", "acceptance_rate"]
