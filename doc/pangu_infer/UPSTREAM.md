@@ -101,6 +101,17 @@ workspaces и восстановление registry на stand-ins.
 [LogitsProcessor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/model_executor/layers/logits_processor.py),
 [MambaBase](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/model_executor/layers/mamba/abstract.py).
 
+`--omni-multiprocessing` использует публичный
+`LLMEngine.from_engine_args(enable_multiprocessing=True)` и штатный SyncMPClient
+с фоновым EngineCoreProc. HTTP AsyncLLM использует AsyncMPClient с тем же
+процессным core; frontend API и транспорт получения outputs остаются разными.
+См. [AsyncLLM](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/engine/async_llm.py)
+и [EngineCoreClient](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/engine/core_client.py).
+В process-режиме frontend не шагает по приватной batch queue; она обслуживается
+штатным core loop. Этот путь позволяет проверить различие lifecycle без
+изменения OmniInfer или model methods; его влияние на repeat divergence
+ещё требует NPU-проверки.
+
 `LLMEngine.add_request()` возвращает внутренний request ID после
 `InputProcessor.assign_request_id()`: к внешнему ID может добавляться
 случайный суффикс. Boundary trace активируется по возвращённому ID до

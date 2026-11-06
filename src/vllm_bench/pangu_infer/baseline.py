@@ -60,6 +60,8 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
 
     a = plan["options"]
     async_scheduling = a.get("async_scheduling", False)
+    multiprocessing = a.get("omni_multiprocessing", False)
+    host_timing = async_scheduling or multiprocessing
     params = SamplingParams(
         temperature=a["temperature"], top_k=a["top_k"] or -1, top_p=a["top_p"],
         seed=a["seed"], max_tokens=limit, ignore_eos=not a["respect_eos"], detokenize=False)
@@ -88,17 +90,22 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
             if first_time is not None and a["depth"] and len(tokens) > previous_count:
                 accepted_drafts.append(max(0, len(tokens) - previous_count - 1))
             if first_time is None and tokens:
-                # Async scheduling may already have queued the next decode.
-                # Its first-token boundary is host-visible output delivery;
-                # synchronizing here would drain that queue and distort TPOT.
-                if not async_scheduling:
+                # Async scheduling or EngineCoreProc may already be advancing
+                # decode. Synchronizing here would move the first-token
+                # boundary past the first host-visible output and distort TPOT.
+                if not host_timing:
                     engine.collective_rpc(synchronize_worker)
                 first_time, first_count = time.perf_counter(), len(tokens)
                 first_cycle = cycles
-    if async_scheduling:
+    if host_timing:
         end = time.perf_counter()
         cleanup_started = end
-        queued_batches, cleanup_steps = drain_async_batches(engine)
+        if multiprocessing:
+            # EngineCoreProc advances its own queue and scheduler, like HTTP.
+            # The frontend has no in-process core to step or inspect here.
+            queued_batches, cleanup_steps = None, None
+        else:
+            queued_batches, cleanup_steps = drain_async_batches(engine)
         engine.collective_rpc(synchronize_worker)
         cleanup_seconds = time.perf_counter() - cleanup_started
     else:
@@ -108,10 +115,11 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
         raise RuntimeError("Offline engine produced no tokens")
     if first_count != 1:
         raise RuntimeError("Expected one prefill output token; decode timing boundaries are not comparable")
-    if async_scheduling:
+    if host_timing:
         print("[request-end] " + json.dumps({"request_id": request_id,
             "cached_prompt_tokens": cached_prompt_tokens, "queued_batches": queued_batches,
-            "cleanup_steps": cleanup_steps, "cleanup_seconds": cleanup_seconds}), flush=True)
+            "cleanup_steps": cleanup_steps, "cleanup_seconds": cleanup_seconds,
+            "cleanup_owner": "engine_core_process" if multiprocessing else "frontend"}), flush=True)
     return {"token_ids": tokens, "prefill_seconds": first_time - start,
             "decode_seconds": end - first_time, "decode_tokens": len(tokens) - first_count,
             "cycles": cycles - first_cycle, "accepted_drafts": accepted_drafts,
@@ -142,7 +150,8 @@ def main(argv=None):
         options["profiler_config"] = {"profiler": "torch", "torch_profiler_dir": str(output / "traces"),
                                       "ignore_frontend": True, "torch_profiler_with_stack": False}
     started = time.perf_counter()
-    engine = LLMEngine.from_engine_args(EngineArgs(**options))
+    factory_options = {"enable_multiprocessing": True} if a.get("omni_multiprocessing", False) else {}
+    engine = LLMEngine.from_engine_args(EngineArgs(**options), **factory_options)
     startup_seconds = time.perf_counter() - started
     warmup_start = time.perf_counter()
     for i in range(a["warmup"]):
@@ -150,6 +159,9 @@ def main(argv=None):
     warmup_seconds = time.perf_counter() - warmup_start
     states_before = engine.collective_rpc(worker_state)
     requested_async = a.get("async_scheduling", False)
+    multiprocessing = a.get("omni_multiprocessing", False)
+    host_timing = requested_async or multiprocessing
+    core_mode = "process" if multiprocessing else "inproc"
     if any(s.get("async_scheduling", False) != requested_async for s in states_before):
         raise RuntimeError("Effective Omni async_scheduling differs from the requested setting")
     requested_prefix = a.get("enable_prefix_caching", False)
@@ -159,7 +171,8 @@ def main(argv=None):
     if any(s.get("cache_dtype", "auto") != requested_cache_dtype for s in states_before):
         raise RuntimeError("Effective Omni cache_dtype differs from the requested --kv-cache-dtype")
     print(f"[execution] async_scheduling={str(requested_async).lower()} "
-          f"timing_boundary={'host_outputs' if requested_async else 'device_complete'}", flush=True)
+          f"engine_core={core_mode} "
+          f"timing_boundary={'host_outputs' if host_timing else 'device_complete'}", flush=True)
     cache_state = states_before[0]
     print(f"[cache] cache_dtype={cache_state.get('cache_dtype', 'auto')} "
           f"enable_prefix_caching={str(requested_prefix).lower()} "
@@ -222,12 +235,13 @@ def main(argv=None):
     effective["enable_prefix_caching"] = first.get("enable_prefix_caching", False)
     effective["mamba_cache_mode"] = first.get("mamba_cache_mode")
     effective["cache_dtype"] = first.get("cache_dtype", "auto")
+    effective["engine_core_mode"] = core_mode
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
     details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,
         "workers_after": states_after, "versions": versions(), "hardware": first["hardware"],
         "timing_boundary": ("offline first-to-final host-visible outputs; final device drain excluded; no HTTP"
-                            if requested_async else
+                            if host_timing else
                             "offline device-complete first-to-final outputs, including final synchronization; no HTTP")}
     if a.get("trace_mtp_boundary", False):
         details["mtp_boundary_reports"] = boundary_reports

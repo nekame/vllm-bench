@@ -181,6 +181,30 @@ class TextPromptTests(unittest.TestCase):
                         self.assertTrue(save.call_args.args[3]["async_scheduling"])
                         self.assertIn("host-visible", save.call_args.args[4]["timing_boundary"])
 
+    def test_omni_engine_factory_enables_native_process_and_reports_timing(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                flags = ["--omni-multiprocessing"] if enabled else []
+                plan = self.plan("--engine", "omni", *flags)
+                path = self.root / "process-plan.json"
+                path.write_text(json.dumps(plan))
+                state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
+                         "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU"}
+                engine = SimpleNamespace(collective_rpc=Mock(return_value=[state]))
+                factory = Mock(return_value=engine)
+                modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
+                    "vllm.engine.arg_utils": SimpleNamespace(EngineArgs=lambda **kwargs: kwargs),
+                    "vllm.v1.engine.llm_engine": SimpleNamespace(LLMEngine=SimpleNamespace(from_engine_args=factory))}
+                with patch.dict("sys.modules", modules), patch.object(baseline, "require_npu_platform"), \
+                        patch.object(baseline, "request", return_value={"decode_seconds": .1}), \
+                        patch.object(baseline, "versions", return_value={}), patch.object(baseline, "save_result") as save:
+                    baseline.main(["--plan", str(path)])
+                self.assertEqual(factory.call_args.kwargs, {"enable_multiprocessing": True} if enabled else {})
+                self.assertFalse(factory.call_args.args[0]["async_scheduling"])
+                self.assertEqual(save.call_args.args[3]["engine_core_mode"], "process" if enabled else "inproc")
+                self.assertIn("host-visible" if enabled else "device-complete",
+                              save.call_args.args[4]["timing_boundary"])
+
     def test_boundary_trace_is_armed_per_measured_request_and_closed_on_failure(self):
         from vllm_bench.pangu_infer import boundary_trace
         plan = self.plan("--engine", "omni", "--trace-mtp-boundary", "--temperature", "0",

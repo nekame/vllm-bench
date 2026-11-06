@@ -63,6 +63,8 @@ def parser():
     p.add_argument("--engine", choices=("direct", "omni"), default="direct")
     p.add_argument("--async-scheduling", action="store_true",
                    help="Omni only: enable async scheduling and time decode between host-visible outputs")
+    p.add_argument("--omni-multiprocessing", action="store_true",
+                   help="Omni only: run EngineCore in its native background process, as in the HTTP server")
     p.add_argument("--enable-prefix-caching", action="store_true",
                    help="Omni only: enable prefix caching, including prompt reuse between warmup and repeats")
     p.add_argument("--block-size", type=int, help="Omni only: override the KV cache block size")
@@ -152,6 +154,10 @@ def make_plan(a):
     if a.mtp_no_static_kernels and (a.engine != "direct" or not a.depth or "compile" not in a.mode):
         raise ValueError("--mtp-no-static-kernels requires direct, positive depth and a compile mode")
     diagnostic_trace = a.trace_target or a.replay_target is not None
+    if a.omni_multiprocessing and a.engine != "omni":
+        raise ValueError("--omni-multiprocessing requires --engine omni")
+    if a.omni_multiprocessing and (diagnostic_trace or a.trace_mtp_boundary):
+        raise ValueError("Target and MTP boundary traces require the in-process engine; omit --omni-multiprocessing")
     if a.trace_mtp_boundary and (a.engine != "omni" or not a.depth or a.temperature != 0):
         raise ValueError("--trace-mtp-boundary requires --engine omni, positive depth and temperature=0")
     if a.trace_mtp_boundary and (diagnostic_trace or a.profile):
@@ -319,7 +325,7 @@ def child_environment(plan):
                VLLM_USE_V2_MODEL_RUNNER="0", VLLM_USE_AOT_COMPILE="0", OMNI_DRAFT_TOP_K="-1",
                PYTHONUNBUFFERED="1")
     if plan["options"]["engine"] == "omni":
-        env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1" if plan["options"].get("omni_multiprocessing", False) else "0"
     plugins = [name for name in env.get("VLLM_PLUGINS", "").split(",") if name]
     # vLLM applies this allow-list to platform plugins as well as general
     # plugins. Omitting omni-npu leaves current_platform.device_type empty.

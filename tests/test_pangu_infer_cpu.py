@@ -101,6 +101,25 @@ class DirectPlanningTests(unittest.TestCase):
                 plan("--engine", "omni", "--async-scheduling", "--trace-target",
                      "--temperature", "0", "--repeats", "1")
 
+    def test_omni_multiprocessing_is_explicit_and_preserves_model_workload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([*args, *flags]))
+            plain = plan("--engine", "omni")
+            process = plan("--engine", "omni", "--omni-multiprocessing")
+            self.assertEqual(plain["comparison_sha256"], process["comparison_sha256"])
+            self.assertEqual(engine_options(plain, direct=False), engine_options(process, direct=False))
+            with patch.dict(os.environ, {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}):
+                self.assertEqual(run.child_environment(process)["VLLM_ENABLE_V1_MULTIPROCESSING"], "1")
+            with patch.dict(os.environ, {"VLLM_ENABLE_V1_MULTIPROCESSING": "1"}):
+                self.assertEqual(run.child_environment(plain)["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
+            with self.assertRaisesRegex(ValueError, "requires --engine omni"):
+                plan("--omni-multiprocessing")
+            for trace in ("--trace-target", "--trace-mtp-boundary"):
+                with self.assertRaisesRegex(ValueError, "in-process engine"):
+                    plan("--engine", "omni", "--omni-multiprocessing", trace)
+
     def fixture(self, root, *, reduced=False, quantized=True):
         model = root / ("reduced" if reduced else "full")
         model.mkdir()
@@ -469,6 +488,40 @@ class RejectionMathTests(unittest.TestCase):
 
 
 class LoadingAndBaselineTests(unittest.TestCase):
+    def test_process_engine_uses_host_timing_without_frontend_draining_or_first_token_sync(self):
+        from vllm_bench.pangu_infer import baseline
+        from unittest.mock import Mock
+        for async_scheduling in (False, True):
+            with self.subTest(async_scheduling=async_scheduling):
+                state = {"time": 0, "tokens": [], "sync_counts": []}
+                windows = iter([[], [4], [], [4, 5, 6, 7], [4, 5, 6, 7, 8]])
+                def rpc(*args):
+                    state["sync_counts"].append(len(state["tokens"]))
+                    state["time"] += 100
+                def step():
+                    state["time"] += 1
+                    tokens = next(windows)
+                    if not tokens:
+                        return []
+                    state["tokens"] = tokens
+                    return [SimpleNamespace(request_id="r", outputs=[SimpleNamespace(token_ids=tokens)])]
+                # A process client has no locally accessible engine_core object.
+                engine = SimpleNamespace(collective_rpc=rpc, add_request=Mock(), step=step,
+                                         has_unfinished_requests=lambda: len(state["tokens"]) < 5)
+                options = {"temperature": 0, "top_k": 0, "top_p": 1, "seed": 0, "respect_eos": False,
+                           "depth": 3, "context_length": 8192, "async_scheduling": async_scheduling,
+                           "omni_multiprocessing": True}
+                with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=lambda **kwargs: kwargs)}), \
+                        patch.object(baseline.time, "perf_counter", side_effect=lambda: state["time"]), \
+                        patch.object(baseline, "drain_async_batches", side_effect=AssertionError("Frontend drain")):
+                    record = baseline.request(engine, {"options": options, "prompt_ids": [2, 3]}, "r", 5)
+                self.assertEqual(state["sync_counts"], [0, 5])
+                self.assertEqual(record["prefill_seconds"], 2)
+                self.assertEqual(record["decode_seconds"], 3)
+                self.assertEqual(record["accepted_drafts"], [2, 0])
+                self.assertIsNone(record["post_request_queued_batches"])
+                self.assertIsNone(record["post_request_cleanup_steps"])
+
     def test_async_output_timing_does_not_drain_decode_at_first_token(self):
         from vllm_bench.pangu_infer import baseline
         from unittest.mock import Mock

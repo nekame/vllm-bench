@@ -96,10 +96,37 @@ decode уже может исполняться. Финальная синхро
 прироста выходных токенов и не заменяет внутреннюю статистику Omni.
 Без флага сохраняется прежняя граница с синхронизацией после первого и
 последнего токенов. Граница записывается в `details.timing_boundary`.
-`VLLM_ENABLE_V1_MULTIPROCESSING=0` сохраняется и при async scheduling;
-этот режим остаётся offline LLMEngine, без HTTP-сервера.
+По умолчанию сохраняется `VLLM_ENABLE_V1_MULTIPROCESSING=0`, в том числе
+при async scheduling. Это offline LLMEngine с in-process EngineCore.
 
-Для async каждый запрос выводит `[request-end]`: число кешированных prompt-токенов,
+Для проверки различий со штатным HTTP-запуском добавьте
+`--omni-multiprocessing`: launcher устанавливает
+`VLLM_ENABLE_V1_MULTIPROCESSING=1`, а `LLMEngine.from_engine_args()` вызывается
+с `enable_multiprocessing=True`. EngineCore работает в штатном фоновом
+процессе через SyncMPClient. HTTP использует AsyncMPClient, поэтому полный
+frontend-путь всё ещё отличается, но цикл EngineCoreProc становится общим.
+Модель, metadata builders, operators и prefix cache не подменяются.
+Флаг не включает async scheduling автоматически: для него сохраняется
+отдельный `--async-scheduling`.
+
+В process-режиме TPOT всегда измеряется между host-visible outputs, даже
+при синхронном scheduler: фоновый core продолжает работу без frontend step,
+поэтому синхронизация после первого токена исказила бы измерение.
+Завершением batch queue и scheduler управляет сам EngineCoreProc; frontend
+не обращается к его внутренним очередям. `queued_batches` и `cleanup_steps`
+при этом равны `null`, а `[request-end].cleanup_owner=engine_core_process`.
+Финальная NPU-синхронизация остаётся вне TPOT. В логе выводится
+`[execution] engine_core=process`, а в результате сохраняется
+`effective.engine_core_mode`. Выбор core относится к реализации engine и
+не меняет comparison hash нагрузки.
+
+Флаг разрешён только для Omni и несовместим с target/MTP boundary tracing:
+внешний core может начать запрос до RPC, активирующего hooks. Для проверки
+process-режима уберите `--trace-mtp-boundary`, сохранив temperature=0,
+число повторов и остальные параметры. `[repeat-check]` работает как прежде.
+Оба режима остаются offline LLMEngine без HTTP-сервера.
+
+Для async и process-режима каждый запрос выводит `[request-end]`: число кешированных prompt-токенов,
 начальную длину оставшейся очереди `queued_batches`, число дополнительных
 `cleanup_steps` и время завершения `cleanup_seconds`, включая финальную
 синхронизацию. В `records[]` эти поля называются `cached_prompt_tokens`,
@@ -580,6 +607,11 @@ Metadata выбирает initial block 64 и accepted=1. Перед прове�
 совпадает полностью, а строки 0 и 1 блока 64 имеют огромные различия
 (до 1.36e35). Это указывает на выбор неактуального состояния после prefill.
 Причинность нужно подтвердить повтором с корректировкой.
+
+Это гипотеза о builder, а не доказанное отличие от рабочего HTTP-сервера.
+Сначала следует проверить штатный процессный EngineCore через
+`--omni-multiprocessing` на неизменённом OmniInfer: прежний launcher принудительно
+использовал in-process core. Патч ниже для такой проверки применять не нужно.
 
 `patches/omniinfer/mome-target-prefill-state.patch` содержит явную правку
 исходного MoME builder и regression tests. Для non-PD target при
