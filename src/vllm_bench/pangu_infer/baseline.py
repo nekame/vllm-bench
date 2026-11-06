@@ -25,6 +25,8 @@ def worker_state(worker):
     return {"operator": config_json(model_extra_config.operator_opt_config),
             "parallel": config_json(model_extra_config.parall_config),
             "async_scheduling": bool(cfg.scheduler_config.async_scheduling),
+            "enable_prefix_caching": bool(cfg.cache_config.enable_prefix_caching),
+            "mamba_cache_mode": config_json(cfg.cache_config.mamba_cache_mode),
             "block_size": cfg.cache_config.block_size,
             "mamba_block_size": cfg.cache_config.mamba_block_size,
             "compilation": config_json(cfg.compilation_config.mode),
@@ -46,6 +48,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
     start = time.perf_counter()
     engine.add_request(request_id, {"prompt_token_ids": plan["prompt_ids"] if prompt_ids is None else prompt_ids}, params)
     first_time, first_count, first_cycle, tokens, cycles = None, 0, 0, [], 0
+    cached_prompt_tokens = None
     accepted_drafts = []
     while engine.has_unfinished_requests():
         outputs = engine.step()
@@ -55,6 +58,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
                 continue
             previous_count = len(tokens)
             tokens = list(output.outputs[0].token_ids)
+            cached_prompt_tokens = getattr(output, "num_cached_tokens", cached_prompt_tokens)
             if first_time is not None and a["depth"] and len(tokens) > previous_count:
                 accepted_drafts.append(max(0, len(tokens) - previous_count - 1))
             if first_time is None and tokens:
@@ -79,7 +83,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
             "decode_seconds": end - first_time, "decode_tokens": len(tokens) - first_count,
             "cycles": cycles - first_cycle, "accepted_drafts": accepted_drafts,
             "acceptance_measurement": "from output increments; final truncated cycle is a lower bound",
-            "initial_context": a["context_length"]}
+            "initial_context": a["context_length"], "cached_prompt_tokens": cached_prompt_tokens}
 
 
 def main(argv=None):
@@ -113,8 +117,15 @@ def main(argv=None):
     requested_async = a.get("async_scheduling", False)
     if any(s.get("async_scheduling", False) != requested_async for s in states_before):
         raise RuntimeError("Effective Omni async_scheduling differs from the requested setting")
+    requested_prefix = a.get("enable_prefix_caching", False)
+    if any(s.get("enable_prefix_caching", False) != requested_prefix for s in states_before):
+        raise RuntimeError("Effective Omni enable_prefix_caching differs from the requested setting")
     print(f"[execution] async_scheduling={str(requested_async).lower()} "
           f"timing_boundary={'host_outputs' if requested_async else 'device_complete'}", flush=True)
+    cache_state = states_before[0]
+    print(f"[cache] enable_prefix_caching={str(requested_prefix).lower()} "
+          f"block_size={cache_state['block_size']} mamba_block_size={cache_state['mamba_block_size']} "
+          f"mamba_cache_mode={cache_state.get('mamba_cache_mode')}", flush=True)
     if "acl" in a["mode"] and not all(s["compile_counter"].get("num_cudagraph_captured", 0) for s in states_before):
         raise RuntimeError("Offline engine did not capture ACL graphs")
     if "compile" in a["mode"] and not all(
@@ -153,6 +164,8 @@ def main(argv=None):
         raise ValueError("Offline ranks disagree on effective configuration")
     effective = {key: first[key] for key in ("operator", "parallel", "block_size", "mamba_block_size")}
     effective["async_scheduling"] = first.get("async_scheduling", False)
+    effective["enable_prefix_caching"] = first.get("enable_prefix_caching", False)
+    effective["mamba_cache_mode"] = first.get("mamba_cache_mode")
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
     details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,

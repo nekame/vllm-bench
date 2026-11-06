@@ -124,11 +124,13 @@ class TextPromptTests(unittest.TestCase):
         torch.tensor.assert_called_once_with(ids, dtype=torch.int64, device="npu:0")
 
     def test_omni_runs_each_prompt_and_repeat_without_reloading_engine(self):
-        plan = self.plan("--engine", "omni", "--repeats", "2", "--warmup", "1")
+        plan = self.plan("--engine", "omni", "--repeats", "2", "--warmup", "1",
+                         "--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128")
         path = self.root / "plan.json"
         path.write_text(json.dumps(plan))
         state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
-                 "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU"}
+                 "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU",
+                 "enable_prefix_caching": True, "mamba_cache_mode": "all"}
         engine = SimpleNamespace(collective_rpc=Mock(return_value=[state]))
         factory = Mock(return_value=engine)
         modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
@@ -139,6 +141,10 @@ class TextPromptTests(unittest.TestCase):
                 patch.object(baseline, "save_result") as save, patch.object(baseline, "versions", return_value={}):
             baseline.main(["--plan", str(path)])
         factory.assert_called_once()
+        self.assertTrue(factory.call_args.args[0]["enable_prefix_caching"])
+        self.assertEqual(factory.call_args.args[0]["mamba_block_size"], 128)
+        self.assertTrue(save.call_args.args[3]["enable_prefix_caching"])
+        self.assertEqual(save.call_args.args[3]["mamba_cache_mode"], "all")
         self.assertEqual(request.call_count, 5)
         self.assertEqual([call.kwargs["prompt_ids"] for call in request.call_args_list[1:]],
                          [row["prompt_ids"] for row in plan["prompts"] for _ in range(2)])

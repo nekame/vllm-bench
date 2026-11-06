@@ -43,13 +43,18 @@ def engine_options(plan, *, direct):
         enable_expert_parallel=False, enforce_eager=False,
         max_model_len=plan["max_model_len"], max_num_seqs=1,
         max_num_batched_tokens=a.get("prefill_chunk_size", 0) or plan["max_model_len"],
-        enable_chunked_prefill=bool(a.get("prefill_chunk_size", 0)), enable_prefix_caching=False,
+        enable_chunked_prefill=bool(a.get("prefill_chunk_size", 0)),
+        enable_prefix_caching=a.get("enable_prefix_caching", False) if not direct else False,
         async_scheduling=a.get("async_scheduling", False) if not direct else False,
         gpu_memory_utilization=a["gpu_memory_utilization"], seed=a["seed"],
         compilation_config={"mode": 0 if direct or not compile_enabled else 3,
                             "cudagraph_mode": "FULL" if graph_enabled else "NONE",
                             "cudagraph_capture_sizes": sorted(capture_sizes)},
         additional_config=plan["additional_config"])
+    if not direct:
+        for name in ("block_size", "mamba_block_size"):
+            if a.get(name) is not None:
+                options[name] = a[name]
     if plan.get("hf_overrides"):
         options["hf_overrides"] = plan["hf_overrides"]
     if a["depth"]:

@@ -63,6 +63,11 @@ def parser():
     p.add_argument("--engine", choices=("direct", "omni"), default="direct")
     p.add_argument("--async-scheduling", action="store_true",
                    help="Omni only: enable async scheduling and time decode between host-visible outputs")
+    p.add_argument("--enable-prefix-caching", action="store_true",
+                   help="Omni only: enable prefix caching, including prompt reuse between warmup and repeats")
+    p.add_argument("--block-size", type=int, help="Omni only: override the KV cache block size")
+    p.add_argument("--mamba-block-size", type=int,
+                   help="Omni only: override MoME state block size; requires --enable-prefix-caching")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
                    help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
@@ -120,6 +125,12 @@ def make_plan(a):
         raise ValueError("--compact-kv-cache requires --engine direct")
     if a.async_scheduling and a.engine != "omni":
         raise ValueError("--async-scheduling requires --engine omni")
+    if a.engine != "omni" and (a.enable_prefix_caching or a.block_size is not None or a.mamba_block_size is not None):
+        raise ValueError("--enable-prefix-caching, --block-size and --mamba-block-size require --engine omni")
+    if any(value is not None and value <= 0 for value in (a.block_size, a.mamba_block_size)):
+        raise ValueError("Cache block sizes must be positive")
+    if a.mamba_block_size is not None and not a.enable_prefix_caching:
+        raise ValueError("--mamba-block-size requires --enable-prefix-caching")
     if a.mtp_tp is not None:
         if a.depth == 0 or a.mtp_tp > a.tp or a.tp % a.mtp_tp:
             raise ValueError("--mtp-tp requires positive MTP depth and must divide target TP")
@@ -135,6 +146,8 @@ def make_plan(a):
     if a.mtp_no_static_kernels and (a.engine != "direct" or not a.depth or "compile" not in a.mode):
         raise ValueError("--mtp-no-static-kernels requires direct, positive depth and a compile mode")
     diagnostic_trace = a.trace_target or a.replay_target is not None
+    if a.enable_prefix_caching and diagnostic_trace:
+        raise ValueError("Target trace/replay requires disabled prefix caching")
     if a.async_scheduling and diagnostic_trace:
         raise ValueError("Target trace/replay requires synchronous scheduling")
     if a.tokenizer and not a.prompts:
@@ -258,6 +271,11 @@ def make_plan(a):
         match["mtp_no_static_kernels"] = True
     if a.async_scheduling:
         match["async_scheduling"] = True
+    if a.enable_prefix_caching:
+        match["enable_prefix_caching"] = True
+    for name in ("block_size", "mamba_block_size"):
+        if options[name] is not None:
+            match[name] = options[name]
     if a.prefill_chunk_size:
         match["prefill_chunk_size"] = a.prefill_chunk_size
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,

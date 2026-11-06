@@ -23,6 +23,40 @@ from vllm_bench.pangu_infer.sampling import reference_rejection
 
 
 class DirectPlanningTests(unittest.TestCase):
+    def test_omni_prefix_cache_and_block_sizes_are_explicit_and_affect_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([*args, *flags]))
+            plain = plan("--engine", "omni")
+            prefix = plan("--engine", "omni", "--enable-prefix-caching")
+            blocked = plan("--engine", "omni", "--enable-prefix-caching", "--block-size", "128",
+                           "--mamba-block-size", "128", "--async-scheduling", "--prefill-chunk-size", "2048")
+            options = engine_options(blocked, direct=False)
+            self.assertTrue(options["enable_prefix_caching"])
+            self.assertTrue(options["enable_chunked_prefill"])
+            self.assertTrue(options["async_scheduling"])
+            self.assertEqual(options["block_size"], 128)
+            self.assertEqual(options["mamba_block_size"], 128)
+            self.assertFalse(engine_options(plain, direct=False)["enable_prefix_caching"])
+            self.assertNotIn("block_size", engine_options(plain, direct=False))
+            self.assertNotIn("mamba_block_size", engine_options(plain, direct=False))
+            self.assertNotEqual(plain["comparison_sha256"], prefix["comparison_sha256"])
+            prefix_blocks = plan("--engine", "omni", "--enable-prefix-caching", "--block-size", "128",
+                                 "--mamba-block-size", "128")
+            self.assertNotEqual(prefix["comparison_sha256"], prefix_blocks["comparison_sha256"])
+            for flags in (("--enable-prefix-caching",), ("--block-size", "128"),
+                          ("--mamba-block-size", "128")):
+                with self.assertRaisesRegex(ValueError, "require --engine omni"):
+                    plan(*flags)
+            for flags in (("--mamba-block-size", "128"), ("--block-size", "0"),
+                          ("--enable-prefix-caching", "--mamba-block-size", "-8")):
+                with self.assertRaises(ValueError):
+                    plan("--engine", "omni", *flags)
+            with self.assertRaisesRegex(ValueError, "disabled prefix caching"):
+                plan("--engine", "omni", "--enable-prefix-caching", "--trace-target",
+                     "--temperature", "0", "--repeats", "1")
+
     def test_async_scheduling_is_omni_only_and_changes_workload_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp))
@@ -574,8 +608,10 @@ class LoadingAndBaselineTests(unittest.TestCase):
         from unittest.mock import Mock
         engine = Mock()
         engine.has_unfinished_requests.side_effect = [True, True, False]
-        engine.step.side_effect = [[SimpleNamespace(request_id="r", outputs=[SimpleNamespace(token_ids=[4])])],
-                                   [SimpleNamespace(request_id="r", outputs=[SimpleNamespace(token_ids=[4, 5, 6, 7, 8])])]]
+        engine.step.side_effect = [[SimpleNamespace(request_id="r", num_cached_tokens=8064,
+                                                   outputs=[SimpleNamespace(token_ids=[4])])],
+                                   [SimpleNamespace(request_id="r", num_cached_tokens=8064,
+                                                    outputs=[SimpleNamespace(token_ids=[4, 5, 6, 7, 8])])]]
         a = {"temperature": 0, "top_k": 0, "top_p": 1, "seed": 0, "respect_eos": False,
              "depth": 3, "context_length": 8192}
         with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=lambda **kwargs: SimpleNamespace(**kwargs))}):
@@ -583,6 +619,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
         self.assertEqual(record["decode_tokens"], 4)
         self.assertEqual(record["accepted_drafts"], [3])
         self.assertEqual(record["token_ids"], [4, 5, 6, 7, 8])
+        self.assertEqual(record["cached_prompt_tokens"], 8064)
         self.assertEqual(engine.collective_rpc.call_count, 3)
         engine.collective_rpc.assert_called_with(synchronize_worker)
 
