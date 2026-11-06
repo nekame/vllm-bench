@@ -55,6 +55,16 @@ def worker_state(worker):
             "hardware": torch.npu.get_device_name()}
 
 
+class OmniBaselineWorkerExtension:
+    """Named RPC methods for the native process client's msgpack transport."""
+
+    def pangu_bench_synchronize(self):
+        synchronize_worker(self)
+
+    def pangu_bench_worker_state(self):
+        return worker_state(self)
+
+
 def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
     from vllm import SamplingParams
 
@@ -62,10 +72,11 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
     async_scheduling = a.get("async_scheduling", False)
     multiprocessing = a.get("omni_multiprocessing", False)
     host_timing = async_scheduling or multiprocessing
+    sync_method = "pangu_bench_synchronize" if multiprocessing else synchronize_worker
     params = SamplingParams(
         temperature=a["temperature"], top_k=a["top_k"] or -1, top_p=a["top_p"],
         seed=a["seed"], max_tokens=limit, ignore_eos=not a["respect_eos"], detokenize=False)
-    engine.collective_rpc(synchronize_worker)
+    engine.collective_rpc(sync_method)
     start = time.perf_counter()
     internal_request_id = engine.add_request(
         request_id, {"prompt_token_ids": plan["prompt_ids"] if prompt_ids is None else prompt_ids}, params)
@@ -94,7 +105,7 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
                 # decode. Synchronizing here would move the first-token
                 # boundary past the first host-visible output and distort TPOT.
                 if not host_timing:
-                    engine.collective_rpc(synchronize_worker)
+                    engine.collective_rpc(sync_method)
                 first_time, first_count = time.perf_counter(), len(tokens)
                 first_cycle = cycles
     if host_timing:
@@ -106,10 +117,10 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
             queued_batches, cleanup_steps = None, None
         else:
             queued_batches, cleanup_steps = drain_async_batches(engine)
-        engine.collective_rpc(synchronize_worker)
+        engine.collective_rpc(sync_method)
         cleanup_seconds = time.perf_counter() - cleanup_started
     else:
-        engine.collective_rpc(synchronize_worker)
+        engine.collective_rpc(sync_method)
         end = time.perf_counter()
     if first_time is None:
         raise RuntimeError("Offline engine produced no tokens")
@@ -146,6 +157,10 @@ def main(argv=None):
         # runtime mode != FULL. Calling that "compile-only" would be false.
         raise ValueError("Stock OmniInfer bypasses torch.compile without FULL ACL Graph; use eager, acl or compile-acl baseline")
     options = engine_options(plan, direct=False)
+    multiprocessing = a.get("omni_multiprocessing", False)
+    state_method = "pangu_bench_worker_state" if multiprocessing else worker_state
+    if multiprocessing:
+        options["worker_extension_cls"] = "vllm_bench.pangu_infer.baseline.OmniBaselineWorkerExtension"
     if a["profile"]:
         options["profiler_config"] = {"profiler": "torch", "torch_profiler_dir": str(output / "traces"),
                                       "ignore_frontend": True, "torch_profiler_with_stack": False}
@@ -157,9 +172,8 @@ def main(argv=None):
     for i in range(a["warmup"]):
         request(engine, plan, f"warmup-{i}", max(2 * (a["depth"] + 1) + 1, 17))
     warmup_seconds = time.perf_counter() - warmup_start
-    states_before = engine.collective_rpc(worker_state)
+    states_before = engine.collective_rpc(state_method)
     requested_async = a.get("async_scheduling", False)
-    multiprocessing = a.get("omni_multiprocessing", False)
     host_timing = requested_async or multiprocessing
     core_mode = "process" if multiprocessing else "inproc"
     if any(s.get("async_scheduling", False) != requested_async for s in states_before):
@@ -222,7 +236,7 @@ def main(argv=None):
                 raise RuntimeError("Target trace requires matching TP call counts including decode")
     if a["profile"]:
         engine.stop_profile()
-    states_after = engine.collective_rpc(worker_state)
+    states_after = engine.collective_rpc(state_method)
     if any(before["compile_counter"] != after["compile_counter"]
            for before, after in zip(states_before, states_after)):
         raise RuntimeError("Stock engine compiled/captured during measurement; increase warmup")

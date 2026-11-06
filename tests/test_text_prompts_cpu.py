@@ -190,7 +190,15 @@ class TextPromptTests(unittest.TestCase):
                 path.write_text(json.dumps(plan))
                 state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
                          "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU"}
-                engine = SimpleNamespace(collective_rpc=Mock(return_value=[state]))
+                def rpc(method):
+                    if enabled:
+                        self.assertEqual(method, "pangu_bench_worker_state")
+                        self.assertTrue(callable(getattr(baseline.OmniBaselineWorkerExtension, method)))
+                        json.dumps([method, []])
+                    else:
+                        self.assertIs(method, baseline.worker_state)
+                    return [state]
+                engine = SimpleNamespace(collective_rpc=Mock(side_effect=rpc))
                 factory = Mock(return_value=engine)
                 modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
                     "vllm.engine.arg_utils": SimpleNamespace(EngineArgs=lambda **kwargs: kwargs),
@@ -200,6 +208,11 @@ class TextPromptTests(unittest.TestCase):
                         patch.object(baseline, "versions", return_value={}), patch.object(baseline, "save_result") as save:
                     baseline.main(["--plan", str(path)])
                 self.assertEqual(factory.call_args.kwargs, {"enable_multiprocessing": True} if enabled else {})
+                if enabled:
+                    self.assertEqual(factory.call_args.args[0]["worker_extension_cls"],
+                                     "vllm_bench.pangu_infer.baseline.OmniBaselineWorkerExtension")
+                else:
+                    self.assertNotIn("worker_extension_cls", factory.call_args.args[0])
                 self.assertFalse(factory.call_args.args[0]["async_scheduling"])
                 self.assertEqual(save.call_args.args[3]["engine_core_mode"], "process" if enabled else "inproc")
                 self.assertIn("host-visible" if enabled else "device-complete",

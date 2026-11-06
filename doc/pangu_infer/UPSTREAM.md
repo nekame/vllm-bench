@@ -112,6 +112,15 @@ workspaces и восстановление registry на stand-ins.
 изменения OmniInfer или model methods; его влияние на repeat divergence
 ещё требует NPU-проверки.
 
+MP RPC использует штатный `worker_extension_cls` с двумя новыми методами:
+`pangu_bench_synchronize` и `pangu_bench_worker_state`. Extension без
+конструктора и без overrides импортируется по qualified path; frontend
+передаёт строковые method names. В in-process режиме остаются исходные
+callables. Это устраняет несовместимость функций с безопасным msgpack
+transport SyncMPClient без включения insecure serialization.
+См. [WorkerWrapperBase](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/worker/worker_base.py)
+и [serial_utils](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/serial_utils.py).
+
 `LLMEngine.add_request()` возвращает внутренний request ID после
 `InputProcessor.assign_request_id()`: к внешнему ID может добавляться
 случайный суффикс. Boundary trace активируется по возвращённому ID до

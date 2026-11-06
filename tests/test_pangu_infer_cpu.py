@@ -495,7 +495,10 @@ class LoadingAndBaselineTests(unittest.TestCase):
             with self.subTest(async_scheduling=async_scheduling):
                 state = {"time": 0, "tokens": [], "sync_counts": []}
                 windows = iter([[], [4], [], [4, 5, 6, 7], [4, 5, 6, 7, 8]])
-                def rpc(*args):
+                def rpc(method, *args):
+                    self.assertEqual(method, "pangu_bench_synchronize")
+                    self.assertTrue(callable(getattr(baseline.OmniBaselineWorkerExtension, method)))
+                    json.dumps([method, args])
                     state["sync_counts"].append(len(state["tokens"]))
                     state["time"] += 100
                 def step():

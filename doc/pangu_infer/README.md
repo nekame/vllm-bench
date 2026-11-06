@@ -109,6 +109,14 @@ frontend-путь всё ещё отличается, но цикл EngineCorePr
 Флаг не включает async scheduling автоматически: для него сохраняется
 отдельный `--async-scheduling`.
 
+Для синхронизации NPU и чтения worker state process-режим регистрирует
+`OmniBaselineWorkerExtension` через штатный `worker_extension_cls`.
+По RPC передаются строковые имена `pangu_bench_synchronize` и
+`pangu_bench_worker_state`: Python callables не проходят стандартный
+msgpack transport SyncMPClient при выключенной insecure serialization.
+Существующие worker/model methods не переопределяются; настройки сериализации
+не меняются. In-process режим сохраняет прежний callable RPC путь.
+
 В process-режиме TPOT всегда измеряется между host-visible outputs, даже
 при синхронном scheduler: фоновый core продолжает работу без frontend step,
 поэтому синхронизация после первого токена исказила бы измерение.
