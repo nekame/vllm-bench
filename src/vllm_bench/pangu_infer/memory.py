@@ -2,6 +2,14 @@
 
 import json
 import os
+import time
+
+
+def log_progress(stage, **context):
+    """Mark host progress without querying or synchronizing the device."""
+    record = {"rank": int(os.environ.get("RANK", 0)), "stage": stage,
+              "monotonic_seconds": round(time.monotonic(), 6), **context}
+    print("[execution] " + json.dumps(record), flush=True)
 
 
 def log_memory(stage, device, **context):

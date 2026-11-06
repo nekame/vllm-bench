@@ -106,6 +106,16 @@ class Execution:
             log_memory(stage, self.device, model="target" if self.head is None else "mtp", head=self.head,
                        mode=self.mode, tokens=self.size, query_tokens=self.query_size, **context)
 
+    def log_progress(self, stage, **context):
+        if self.memory_diagnostics:
+            from vllm.distributed import parallel_state
+            from vllm_bench.pangu_infer.memory import log_progress
+
+            group = parallel_state.get_tp_group()
+            log_progress(stage, model="target" if self.head is None else "mtp", head=self.head,
+                         mode=self.mode, tokens=self.size, query_tokens=self.query_size,
+                         tp_group=group.unique_name, tp_ranks=group.ranks, **context)
+
     def __call__(self, ids, start, accepted, prompt, *, hidden=None, sample_index=None, draft_index=None,
                  model_timing=None):
         import torch
@@ -141,8 +151,17 @@ class Execution:
                     # Compile and allocate workspaces before entering capture.
                     self.memory_phase = "graph_warmup"
                     self.log_memory("graph_warmup_begin")
+                    self.log_progress("graph_warmup_forward_begin")
+                    warmup_started = time.perf_counter()
                     self.wrapper.runnable(self.ids, self.lane.positions, self.hidden, self.sample_index)
+                    self.log_progress("graph_warmup_forward_end",
+                                      elapsed_seconds=round(time.perf_counter() - warmup_started, 6))
+                    self.memory_phase = "graph_warmup_sync"
+                    self.log_progress("graph_warmup_sync_begin")
+                    sync_started = time.perf_counter()
                     torch.npu.synchronize()
+                    self.log_progress("graph_warmup_sync_end",
+                                      elapsed_seconds=round(time.perf_counter() - sync_started, 6))
                     self.log_memory("graph_warmup_end")
                     self.captures += 1
                     capturing = True

@@ -650,6 +650,18 @@ baseline включает штатный worker profiler. Такие резул�
 или синхронизаций; счётчики памяти читаются без дополнительной синхронизации.
 Результат помечается `diagnostic` и не используется для speedup.
 
+Строки `[execution]` разделяют первый вызов compiled callable и ожидание NPU:
+`graph_warmup_forward_begin` → `graph_warmup_forward_end` →
+`graph_warmup_sync_begin` → `graph_warmup_sync_end`. Они содержат монотонное
+время, rank, модель, размеры входа, фактическое имя TP-группы и её ranks;
+`*_end` также сообщает `elapsed_seconds`. Эти отметки не обращаются к NPU API.
+Интервал forward включает создание backend и ленивую работу первого вызова:
+`compile_end` сообщает только о возврате `backend.compile`, статические ядра
+могут компилироваться позже. Интервал sync показывает ожидание уже поставленных
+на устройство операций. Внешний ACL capture начинается после этих этапов.
+`warmup_end`, `measured_begin` и `measured_end` отделяют полный прогрев от
+измеряемой генерации на каждом rank.
+
 `gpu_memory_utilization` в direct передаётся в конфигурацию Omni, но не
 ограничивает его собственное выделение кеша под `max_model_len`.
 

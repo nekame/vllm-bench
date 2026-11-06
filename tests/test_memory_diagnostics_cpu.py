@@ -8,11 +8,30 @@ import unittest
 from unittest.mock import Mock, patch
 
 from vllm_bench.pangu_infer.execution import Execution
-from vllm_bench.pangu_infer.memory import log_memory
+from vllm_bench.pangu_infer.memory import log_memory, log_progress
 from vllm_bench.pangu_infer import run
 
 
 class MemoryDiagnosticsTests(unittest.TestCase):
+    def test_host_progress_does_not_access_device_and_reports_actual_tp_group(self):
+        group = SimpleNamespace(unique_name="tp:1", ranks=[0, 1])
+        state = SimpleNamespace(get_tp_group=lambda: group)
+        execution = Execution.__new__(Execution)
+        execution.memory_diagnostics = True
+        execution.head, execution.mode = 0, "compile-acl"
+        execution.size, execution.query_size = 8, 8
+        output = io.StringIO()
+        with patch.dict("sys.modules", {"torch": None,
+                "vllm.distributed": SimpleNamespace(parallel_state=state)}), redirect_stdout(output):
+            execution.log_progress("graph_warmup_forward_end", elapsed_seconds=18)
+            log_progress("warmup_end")
+        records = [json.loads(line.removeprefix("[execution] ")) for line in output.getvalue().splitlines()]
+        self.assertEqual(records[0]["tp_ranks"], [0, 1])
+        self.assertEqual(records[0]["tp_group"], "tp:1")
+        self.assertEqual(records[0]["model"], "mtp")
+        self.assertEqual(records[0]["elapsed_seconds"], 18)
+        self.assertLessEqual(records[0]["monotonic_seconds"], records[1]["monotonic_seconds"])
+
     def test_snapshot_reports_device_and_allocator_memory_separately(self):
         mib = 1 << 20
         npu = SimpleNamespace(mem_get_info=Mock(return_value=(525 * mib, 94000 * mib)),

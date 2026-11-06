@@ -509,6 +509,9 @@ def main(argv=None):
             for _ in range(a["warmup"]):
                 engine.generate(max(2 * (a["depth"] + 1) + 1, 17))
             warmup_seconds = time.perf_counter() - warmup_start
+            if a.get("memory_diagnostics", False):
+                from vllm_bench.pangu_infer.memory import log_progress
+                log_progress("warmup_end", elapsed_seconds=round(warmup_seconds, 6))
             before = engine.counters()
             if "compile" in a["mode"] and before["compiles"] == 0:
                 raise RuntimeError("Requested torch.compile did not compile any decode graph")
@@ -531,6 +534,8 @@ def main(argv=None):
                     record_shapes=True, with_stack=False)
             else:
                 profiler = nullcontext()
+            if a.get("memory_diagnostics", False):
+                log_progress("measured_begin")
             with profiler:
                 records = []
                 for prompt in plan.get("prompts", [None]):
@@ -547,6 +552,8 @@ def main(argv=None):
                             if rank == 0:
                                 log_model_timings(record["model_timings"], len(records) + 1)
                         records.append(record)
+            if a.get("memory_diagnostics", False):
+                log_progress("measured_end")
             after = engine.counters()
             if any(after[k] != before[k] for k in ("compiles", "captures")):
                 raise RuntimeError("Compilation/capture occurred during measured requests; increase warmup or fix specialization")
