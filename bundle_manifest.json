@@ -10,8 +10,8 @@
     "doc/layer_profile/README.md": "55d1abf26e703d853bbe3a3b074959dbb717efff92fb83ac8b968f284624222e",
     "doc/mtp_debug/README.md": "5b0b5f24acfaf8c6688fac3b0678d02a49b67dc4c4537813a4f975ed4f056bc0",
     "doc/mtp_profile/README.md": "7e8f28879945d10204269ec9254c4acd17bc42e9d51a16be290dd9af7905fda6",
-    "doc/pangu_infer/README.md": "f9b0eda2785ec79e13746f56e7776bd61ae46ac91bdb018c9298db238044e1b7",
-    "doc/pangu_infer/UPSTREAM.md": "6c72df60e5a307a08b33566cd85a00530497e53fafd9a995e78a7c995edc0586",
+    "doc/pangu_infer/README.md": "6f5baf21ea8181424d56b1f254f63bc345c8a2dd456303e4dadb863ee9e2fb5c",
+    "doc/pangu_infer/UPSTREAM.md": "d3998257b2690bb8a9d3c0fbda0102f1b6b55a84110ae9243aa382422371d109",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
     "doc/reference/PANGU_505B_RU.md": "3105fd8bf9ae2510d3a3931b04aa29905dad2b7cde2a34ea7a4e3dfbbcc0ec1e",
@@ -48,8 +48,8 @@
     "src/vllm_bench/mtp_profile/record_mtp.py": "bbfc207f01c78f49787f1ea14df5c73932f667eb8304b1a457fe6aad9549811a",
     "src/vllm_bench/mtp_profile/verify_mtp_checkpoint.py": "25c235d89abc293930991a22da4355e887c77192f119b281ebe63ef736e69157",
     "src/vllm_bench/pangu_infer/__init__.py": "1e9ddf67fce354fe8cf498e533e9af8efc379719aadda785f8d7f4a0a5807463",
-    "src/vllm_bench/pangu_infer/baseline.py": "0199e150f001779a6a5f71f9149e0c4573461ac56db8a79a15fc73cae4a5ffa8",
-    "src/vllm_bench/pangu_infer/boundary_trace.py": "8696889926fcc96cd7664f713216d66d12379554aac154a5272f46bb9685e65d",
+    "src/vllm_bench/pangu_infer/baseline.py": "809ee4f6365c0505fbffa643de9c5e5128432b03f2bce24519c5bc29bfdc121f",
+    "src/vllm_bench/pangu_infer/boundary_trace.py": "71c8eb1d18c8048d1e0027b227faa5e6ee53f180190c0d3cf76f06a187c069ee",
     "src/vllm_bench/pangu_infer/cache.py": "ea3b7251ba69bc5df470166cf506741fda8f711b7dbe287fbf19c2b827ca760a",
     "src/vllm_bench/pangu_infer/check_gloo.py": "19c9cfc52446a6a4cc3ba74e007c24413aa1ee444e9df16195727b2a6340379a",
     "src/vllm_bench/pangu_infer/compare.py": "617444de4bfd46360eaf0d4e6ddc2663c8b513b61e8c0a23480030b69b402ee6",
@@ -97,7 +97,7 @@
     "tests/test_spec_debug_cpu.py": "19184f7cfa4f934c33f45f05cb922abca9f957cf9458b039f14e7eb5493bda31",
     "tests/test_spec_rejection_cpu.py": "9e180edd4d2e85dd8ae490df50d70cdce25df4a5fef0b5ae3645fe4b206a290d",
     "tests/test_target_trace_cpu.py": "b210d1259476d3d8befceed17b5dd952c3f74f51d08319fe365d55a7ddb58efa",
-    "tests/test_text_prompts_cpu.py": "bf118bac0181c65342b7cec13095362812befc7ca6096ce8df433084bc58ce23",
+    "tests/test_text_prompts_cpu.py": "192d3e531b5d27be46229cd715487835311ea36c29014bc0ece81ce742913f73",
     "tests/test_weight_packing_cpu.py": "9b6eb3b62434c5b92036bc80501ad2f1630376ce5f4946fb776d1899674add2e"
   },
   "validation": {
@@ -143,6 +143,6 @@
     "pangu_infer_omni_prefix_cache_validation": "Omni-only --enable-prefix-caching, --block-size and --mamba-block-size forwarded to EngineArgs; mamba override requires APC. Defaults retain APC off. Effective prefix caching is verified, cache mode and sizes reported, and cached prompt token count preserved from RequestOutput. CLI guards, chunked/async compatibility, comparison identity and repeated prompt orchestration covered on CPU. 223 tests ran: 217 passed, 6 skipped. Actual NPU prefix cache/MoME state behavior and token equivalence against HTTP require server validation.",
     "pangu_infer_kv_cache_dtype_validation": "Explicit --kv-cache-dtype forwarded to both engines with auto default and unchanged BF16 model dtype. Non-default format changes workload identity; effective cache_dtype is logged and recorded, checked against requested dtype in Omni and used to guard speedup comparison. Correctness-only token comparisons permit cache dtype differences. CPU tests cover CLI propagation/identity for auto, bfloat16 and hif8_ds_mla plus effective reporting and comparison guards. 225 tests ran: 219 passed, 6 skipped. Quantized cache layout/arithmetic remain delegated to original Omni specs/backends; NPU HIF8 execution and HTTP token equality are unverified.",
     "pangu_infer_async_request_cleanup_validation": "After async final-output timestamp, advance public LLMEngine.step until the DP1 in-process core batch queue and scheduler cleanup are empty, then synchronize. Prefix cache and model settings preserved; cleanup steps/time excluded from TPOT/cycle count and recorded. CPU lifecycle test covers a queued late result plus separate finished-request cleanup before next add. Greedy repeat consistency reports first differences per prompt ID and cache hit counts; speedup rejects inconsistent repeats. 229 tests ran: 223 passed, 6 skipped. Lifecycle mismatch is source-verified; causal connection to reported NPU repeat divergence remains unverified.",
-    "pangu_infer_mtp_boundary_validation": "Omni greedy diagnostic uses ordinary logits-processor hooks via worker RPC to snapshot the final prefill, first draft proposal and first target verification across repeats. Partial prefill logits are skipped; CPU snapshots separate computed outputs, inputs and raw MoME states, validate physical block mappings and gate persistent metadata reads to current full-graph decode buffers. CLI, hook lifecycle, comparison and RPC cleanup covered on CPU. 235 tests ran: 229 passed, 6 skipped. CPU copies synchronize execution and may mask a race; NPU execution and cause of repeat divergence remain unverified. Draft MoME ownership uses the native drafter.attn_layer_names set rather than assuming a draft_model name prefix; regression coverage uses unprefixed draft layer names."
+    "pangu_infer_mtp_boundary_validation": "Omni greedy diagnostic uses ordinary logits-processor hooks via worker RPC to snapshot the final prefill, first draft proposal and first target verification across repeats. Partial prefill logits are skipped; CPU snapshots separate computed outputs, inputs and raw MoME states, validate physical block mappings and gate persistent metadata reads to current full-graph decode buffers. CLI, hook lifecycle, comparison and RPC cleanup covered on CPU. 235 tests ran: 229 passed, 6 skipped. CPU copies synchronize execution and may mask a race; NPU execution and cause of repeat divergence remain unverified. Draft MoME ownership uses the native drafter.attn_layer_names set rather than assuming a draft_model name prefix; regression coverage uses unprefixed draft layer names. Boundary hooks are armed after add_request and before the first step with the returned internal request ID, preserving native ID randomization; the integration test exercises distinct external/internal IDs through real baseline.request and checks cleanup on failure. Incomplete traces report hook counts and observed batch request IDs."
   }
 }

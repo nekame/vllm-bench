@@ -88,3 +88,9 @@ workspaces и восстановление registry на stand-ins.
 [forward context](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/forward_context.py),
 [LogitsProcessor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/model_executor/layers/logits_processor.py),
 [MambaBase](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/model_executor/layers/mamba/abstract.py).
+
+`LLMEngine.add_request()` возвращает внутренний request ID после
+`InputProcessor.assign_request_id()`: к внешнему ID может добавляться
+случайный суффикс. Boundary trace активируется по возвращённому ID до
+первого `step()`, без отключения штатной рандомизации IDs.
+См. [InputProcessor](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/v1/engine/input_processor.py).

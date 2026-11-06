@@ -111,13 +111,18 @@ class BoundaryRecorder:
             raise RuntimeError("Previous boundary trace request has not finished")
         self.active = {"request_id": request_id, "prompt_key": prompt_key, "record": record}
         self.events, self.target_calls, self.draft_calls, self.start = [], 0, 0, None
+        self.hook_calls, self.hook_request_ids = {"target": 0, "mtp": 0}, {}
 
-    def owns_request(self, output):
+    def owns_request(self, output, kind):
+        if self.active is not None:
+            self.hook_calls[kind] += 1
+            if kind not in self.hook_request_ids:
+                self.hook_request_ids[kind] = list(self.runner.input_batch.req_id_to_index)
         return (self.active is not None and output is not None and output.numel() > 0
                 and self.active["request_id"] in self.runner.input_batch.req_id_to_index)
 
     def target(self, module, args, output):
-        if not self.owns_request(output) or self.target_calls >= 2:
+        if not self.owns_request(output, "target") or self.target_calls >= 2:
             return
         if self.target_calls == 0:
             batch = self.runner.input_batch
@@ -132,7 +137,7 @@ class BoundaryRecorder:
         self.target_calls += 1
 
     def draft(self, module, args, output):
-        if not self.owns_request(output) or self.target_calls != 1 or self.draft_calls >= self.depth:
+        if not self.owns_request(output, "mtp") or self.target_calls != 1 or self.draft_calls >= self.depth:
             return
         self.events.append(self.snapshot(f"mtp_{self.draft_calls}", args[1], output))
         self.draft_calls += 1
@@ -194,7 +199,9 @@ class BoundaryRecorder:
         import torch
 
         if self.target_calls != 2 or self.draft_calls != self.depth:
-            raise RuntimeError(f"Incomplete boundary trace: target={self.target_calls}, mtp={self.draft_calls}")
+            raise RuntimeError(f"Incomplete boundary trace: target={self.target_calls}, mtp={self.draft_calls}, "
+                               f"request_id={self.active['request_id']}, hooks={self.hook_calls}, "
+                               f"hook_request_ids={self.hook_request_ids}")
         record, prompt_key = self.active["record"], self.active["prompt_key"]
         torch.save({**self.active, "rank": self.rank, "events": self.events},
                    self.directory / f"record-{record:05d}.pt")

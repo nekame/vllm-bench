@@ -498,8 +498,10 @@ chunked prefill, async scheduling и compile/ACL остаются прежним
 
 После прогрева на каждом worker устанавливаются штатные hooks у target
 `logits_processor` и draft `model.logits_processor`. Они вызываются вне
-captured model forward, поэтому фиксируют и ACL replay. Перед каждым
-измеряемым запросом hooks активируются для его request ID и сохраняют:
+captured model forward, поэтому фиксируют и ACL replay. После добавления
+измеряемого запроса, до первого `engine.step()`, hooks активируются для
+внутреннего ID, возвращённого `LLMEngine.add_request()`. Внешний ID может
+отличаться: vLLM добавляет случайный суффикс. Hooks сохраняют:
 
 - `initial_target`: последний prefill-вызов, который завершает prompt;
   logits промежуточных prefill-чанков пропускаются;
@@ -541,6 +543,8 @@ decode-вызова при full graphs и допустимой batch capacity. �
 Сводка всех ranks сохраняется в `mtp-boundary/report.json` и
 `details.mtp_boundary_reports`. Неполное окно вызывает явную ошибку;
 hooks снимаются при завершении и при исключении.
+В ошибке неполного окна выводятся ожидаемый внутренний ID, число вызовов
+hooks и IDs первого наблюдавшегося batch для target и MTP.
 
 CPU copies синхронизируют вычисления и могут скрыть гонку. Результат
 помечается `diagnostic` и не используется для speedup. Обязательно проверяйте

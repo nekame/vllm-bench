@@ -189,7 +189,7 @@ class TextPromptTests(unittest.TestCase):
         path.write_text(json.dumps(plan))
         for fail in (False, True):
             with self.subTest(fail=fail):
-                events, current = [], {}
+                events, current, execution = [], {}, {}
                 state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
                          "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU"}
                 def rpc(method, args=()):
@@ -200,22 +200,33 @@ class TextPromptTests(unittest.TestCase):
                         Path(args[0]).mkdir(parents=True, exist_ok=True)
                     elif method is boundary_trace.arm:
                         current["request_id"], current["prompt"], current["record"] = args
+                        self.assertEqual(current["request_id"], execution["internal_id"])
+                        self.assertEqual(execution["steps"], 0)
                     elif method is boundary_trace.finish:
-                        return [{"record": current["record"], "first_difference": None}]
+                        return [{"record": current["record"], "first_compute_difference": None}]
                     return []
-                def request(engine, plan, request_id, *args, **kwargs):
-                    if request_id.startswith("measure-"):
-                        self.assertEqual(current["request_id"], request_id)
+                def add_request(request_id, prompt, params):
+                    execution.update(external_id=request_id, internal_id=request_id + "-a1b2c3d4",
+                                     steps=0, active=True)
+                    return execution["internal_id"]
+                def step():
+                    if execution["external_id"].startswith("measure-"):
+                        self.assertEqual(current["request_id"], execution["internal_id"])
                         if fail:
                             raise RuntimeError("request failed")
-                    return {"decode_seconds": .1, "token_ids": [10, 11]}
-                engine = SimpleNamespace(collective_rpc=rpc)
-                modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
+                    execution["steps"] += 1
+                    tokens = [10] if execution["steps"] == 1 else [10, 11]
+                    execution["active"] = execution["steps"] == 1
+                    return [SimpleNamespace(request_id=execution["external_id"],
+                                            outputs=[SimpleNamespace(token_ids=tokens)])]
+                engine = SimpleNamespace(collective_rpc=rpc, add_request=add_request, step=step,
+                                         has_unfinished_requests=lambda: execution["active"])
+                modules = {"vllm": SimpleNamespace(SamplingParams=lambda **kwargs: kwargs),
+                    "vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
                     "vllm.engine.arg_utils": SimpleNamespace(EngineArgs=lambda **kwargs: kwargs),
                     "vllm.v1.engine.llm_engine": SimpleNamespace(
                         LLMEngine=SimpleNamespace(from_engine_args=lambda *args: engine))}
                 with patch.dict("sys.modules", modules), patch.object(baseline, "require_npu_platform"), \
-                        patch.object(baseline, "request", side_effect=request), \
                         patch.object(baseline, "versions", return_value={}), patch.object(baseline, "save_result") as save:
                     if fail:
                         with self.assertRaisesRegex(RuntimeError, "request failed"):
@@ -224,7 +235,7 @@ class TextPromptTests(unittest.TestCase):
                     else:
                         baseline.main(["--plan", str(path)])
                         self.assertEqual(len(save.call_args.args[4]["mtp_boundary_reports"]), 4)
-                self.assertEqual(events[0], "install")
+                self.assertIn("install", events)
                 self.assertEqual(events[-1], "close")
                 self.assertEqual(events.count("arm"), 1 if fail else 4)
 

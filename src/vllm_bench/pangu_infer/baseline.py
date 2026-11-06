@@ -55,7 +55,7 @@ def worker_state(worker):
             "hardware": torch.npu.get_device_name()}
 
 
-def request(engine, plan, request_id, limit, *, prompt_ids=None):
+def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
     from vllm import SamplingParams
 
     a = plan["options"]
@@ -65,7 +65,13 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None):
         seed=a["seed"], max_tokens=limit, ignore_eos=not a["respect_eos"], detokenize=False)
     engine.collective_rpc(synchronize_worker)
     start = time.perf_counter()
-    engine.add_request(request_id, {"prompt_token_ids": plan["prompt_ids"] if prompt_ids is None else prompt_ids}, params)
+    internal_request_id = engine.add_request(
+        request_id, {"prompt_token_ids": plan["prompt_ids"] if prompt_ids is None else prompt_ids}, params)
+    if boundary is not None:
+        from vllm_bench.pangu_infer import boundary_trace
+        if not isinstance(internal_request_id, str) or not internal_request_id:
+            raise RuntimeError("Boundary trace requires LLMEngine.add_request to return the internal request ID")
+        engine.collective_rpc(boundary_trace.arm, args=(internal_request_id, *boundary))
     first_time, first_count, first_cycle, tokens, cycles = None, 0, 0, [], 0
     cached_prompt_tokens = None
     accepted_drafts = []
@@ -182,9 +188,11 @@ def main(argv=None):
             prompt_ids = None if prompt is None else prompt["prompt_ids"]
             for repeat in range(1, a["repeats"] + 1):
                 request_id = f"measure-{len(records)}"
+                diagnostic = {}
                 if a.get("trace_mtp_boundary", False):
-                    engine.collective_rpc(boundary_trace.arm, args=(request_id, str(prompt_index), len(records)))
-                record = request(engine, plan, request_id, a["max_new_tokens"], prompt_ids=prompt_ids)
+                    diagnostic["boundary"] = (str(prompt_index), len(records))
+                record = request(engine, plan, request_id, a["max_new_tokens"],
+                                 prompt_ids=prompt_ids, **diagnostic)
                 if a.get("trace_mtp_boundary", False):
                     reports = engine.collective_rpc(boundary_trace.finish)
                     boundary_reports.append(reports)
