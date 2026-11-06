@@ -47,13 +47,25 @@ capture/replay и исполнение MTP; target-группы восстана
 последовательный single-thread runtime PoC, без конкурентных model forwards;
 зависимость от внутренних имён групп привязана к указанной версии Omni/vLLM.
 
-Изменения в OmniInfer не требуются. Зависимости на его startup-регистрации
+Для базового запуска PoC изменения в OmniInfer не требуются. Зависимости на его startup-регистрации
 остаются: NPU platform, linear/quantization/custom operators, cache specs,
 static sinks и необходимые vLLM adaptations загружаются обычными плагинами
 `omni-npu,omni_npu_patches,omni_custom_models` с `OMNI_VLLM_PATCHES_DIR=high_throughout`.
 Плагин `omni-npu` обязателен и в allow-list `VLLM_PLUGINS`: vLLM применяет
 этот фильтр к platform entry points, а не только к general plugins.
 Это штатные patches установленного OmniInfer, а не новые подмены PoC.
+
+Отдельная корректировка по результатам repeat-диагностики сохранена в
+`patches/omniinfer/mome-target-prefill-state.patch`. Она меняет исходный
+`NPUMomeAttentionMetadataBuilder.build`: non-PD target на границе
+`computed == prompt` читает prefill-tail с accepted=`num_spec + 1`.
+Draft-вызовы явно помечаются через `build_for_drafting`, их offsets сохранены;
+последующий target decode и PD не меняются. Патч включает regression tests
+для глубин 3/7, последующего decode, draft, PD и смешанного batch.
+Checkout OmniInfer в этой рабочей папке не изменяется: патч применяется
+пользователем на сервере, если он решит проверить исправление исходного
+builder. Локально проверены применение к временной копии, обратимость и
+синтаксис; torch/NPU validation требует серверного запуска.
 
 Только определения нейросети в `model/` требуют ML-пакетов уже при импорте,
 как исходные классы OmniInfer. Они импортируются внутри `load_models` NPU worker;

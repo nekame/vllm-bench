@@ -572,6 +572,42 @@ CPU copies синхронизируют вычисления и могут ск�
 имеют разную диагностическую ценность. Методы модели/runner, параметры
 численной точности и содержимое кеша инструмент не изменяет.
 
+### Корректировка первого target decode после prefill
+
+При context 8192, MoME block size 128 и depth 7 диагностика показала:
+prefill и первый MTP proposal совпадают, но первая target-проверка расходится.
+Metadata выбирает initial block 64 и accepted=1. Перед проверкой блок 63
+совпадает полностью, а строки 0 и 1 блока 64 имеют огромные различия
+(до 1.36e35). Это указывает на выбор неактуального состояния после prefill.
+Причинность нужно подтвердить повтором с корректировкой.
+
+`patches/omniinfer/mome-target-prefill-state.patch` содержит явную правку
+исходного MoME builder и regression tests. Для non-PD target при
+`computed == prompt` accepted нормализуется до `depth + 1`: для этого случая
+получаются initial block 63 и accepted=8, то есть хвост prefill-состояния.
+`build_for_drafting()` явно передаёт `for_drafting=True`, сохраняя прежние
+draft offsets. При `computed > prompt` и в PD сохраняется прежнее поведение.
+Счётчики sampler/runner и содержимое кеша не изменяются.
+
+Локальный checkout `omniinfer` остаётся read-only. На сервере патч можно
+применить к checkout, из которого импортируется установленный `omni_npu`.
+Команды ниже выполняются из `vllm-bench` при соседнем каталоге `omniinfer`:
+
+```bash
+git -C ../omniinfer apply --check ../vllm-bench/patches/omniinfer/mome-target-prefill-state.patch
+git -C ../omniinfer apply ../vllm-bench/patches/omniinfer/mome-target-prefill-state.patch
+python ../omniinfer/tests/unit/attention/backends/test_mome_num_prompt_tokens.py
+```
+
+Это явное изменение установленного Omni, а не runtime-подмена методов PoC.
+После применения нужен новый процесс и повтор прежнего запуска с
+`--trace-mtp-boundary`: ожидаются `repeat-check.matches=true`, initial block 63
+и accepted=8 в metadata первой target-проверки. После подтверждения чисел
+TPOT измеряется отдельно без диагностики. Патч проверен на применение к
+временной копии исходников и синтаксис Python; его torch-тесты и выполнение
+на NPU локально недоступны. Если `apply --check` не проходит, нужен просмотр
+различий с серверной версией; принудительное применение не предусмотрено.
+
 ## Диагностика расхождений target: запись Omni и replay в direct
 
 Этот режим сравнивает основную модель на одинаковых входных окнах. Он нужен,

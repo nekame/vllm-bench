@@ -1,0 +1,144 @@
+--- a/omni/attention/backends/mome.py
++++ b/omni/attention/backends/mome.py
+@@ -426,6 +426,7 @@
+         num_prompt_tokens: torch.Tensor | None = None,
+         allow_runner_num_prompt_tokens: bool = True,
+         draft_step0: bool = False,
++        for_drafting: bool = False,
+     ) -> NPUMomeAttentionMetadata:
+         """
+         Build Mome attention metadata from common attention metadata.
+@@ -455,8 +456,10 @@
+             num_accepted_tokens = torch.full_like(num_computed_tokens, self.fake_num_spec + 1)
+         elif num_prompt_tokens is not None:  # For graph capture, num_prompt_tokens is None
+             num_accepted_tokens = num_accepted_tokens.clone()
+-            # if the previous schedule is prefill (computed <= prompt), we reset num_accepted_tokens = num_spec + 1
+-            # so the MoME kernel reads the last few tokens from the cache.
++            # A target at computed == prompt follows prefill and must read
++            # its committed tail. Drafting has a separate state layout and
++            # must retain its authored count at that boundary. Keep the PD
++            # protocol unchanged; its state transfer needs separate validation.
+             # NOTE: skip this reset for the synthesized draft step0.  Its 8-token
+             # full-window forward always reads the committed tail at state[1..2]
+             # (num_accepted_tokens = K - 1, see build_for_drafting); masking it
+@@ -464,7 +467,11 @@
+             # would point the read at the stale draft tail of the previous
+             # iteration instead of the committed history.
+             if not draft_step0:
+-                num_accepted_tokens.masked_fill_(num_computed_tokens < num_prompt_tokens, self.fake_num_spec + 1)
++                if for_drafting or self.is_pd_disagg:
++                    prefill_mask = num_computed_tokens < num_prompt_tokens
++                else:
++                    prefill_mask = num_computed_tokens <= num_prompt_tokens
++                num_accepted_tokens.masked_fill_(prefill_mask, self.fake_num_spec + 1)
+ 
+         # if the current schedule is the recompute of the last prompt,
+         # we reset num_accepted_tokens = fake_num_spec to let the kernel read the [-3:-1] tokens from the cache
+@@ -685,6 +692,7 @@
+             fast_build=True,
+             num_prompt_tokens=num_prompt_tokens,
+             draft_step0=draft_step0_synthesized,
++            for_drafting=True,
+         )
+ 
+     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
+--- a/tests/unit/attention/backends/test_mome_num_prompt_tokens.py
++++ b/tests/unit/attention/backends/test_mome_num_prompt_tokens.py
+@@ -650,11 +650,8 @@
+ class TestAcceptedCountResetBoundary(unittest.TestCase):
+     """``build()``'s in-place reset of the accepted count vs prompt length.
+ 
+-    The reset (num_accepted_tokens -> fake_num_spec + 1) fires only when
+-    computed < prompt.  On the first decode round (computed == prompt) the
+-    count produced by the previous MTP schedule must survive: masking it
+-    back there points the kernel read at the stale draft tail of the
+-    previous iteration instead of the committed history.
++    A target at computed == prompt follows prefill, so it must select
++    the committed tail. Draft counts at that boundary remain separate.
+     """
+ 
+     def _build(self, *, seq_len, query_len, prompt, accepted):
+@@ -676,10 +673,10 @@
+         )
+         return seen["num_accepted_tokens"]
+ 
+-    def test_computed_equals_prompt_keeps_accepted_count(self):
+-        # First decode round after a full prefill: computed == prompt.
++    def test_target_computed_equals_prompt_selects_prefill_tail(self):
++        # First target decode round after a full prefill: computed == prompt.
+         self.assertEqual(self._build(seq_len=10, query_len=2, prompt=8,
+-                                     accepted=5).tolist(), [5])
++                                     accepted=5).tolist(), [3])
+ 
+     def test_computed_below_prompt_resets_accepted_count(self):
+         # Chunked prefill continuation: computed 7 < prompt 8.
+@@ -720,5 +717,69 @@
+         self.assertEqual(seen["num_accepted_tokens"].tolist(), [4, 4, 2])
+ 
+ 
++
++class TestTargetPrefillStateTransition(unittest.TestCase):
++    """Real build paths for the aligned 8192-token prefill boundary."""
++
++    def _build(self, *, depth=7, computed=8192, draft_index=None, is_decode_node=False):
++        builder = make_builder(num_spec=depth, is_decode_node=is_decode_node)
++        builder.mome_block_size = 128
++        builder.kv_cache_spec.block_size = 128
++        common = FakeCommonAttentionMetadata(
++            seq_lens=[computed + depth + 1], query_lens=[depth + 1]
++        )
++        accepted = torch.tensor([1], dtype=torch.int32)
++        prompt = torch.tensor([8192], dtype=torch.int32)
++        if draft_index is None:
++            metadata = builder.build(0, common, num_accepted_tokens=accepted,
++                                     num_prompt_tokens=prompt)
++        else:
++            metadata = builder.build_for_drafting(
++                common, draft_index=draft_index, num_accepted_tokens=accepted,
++                num_prompt_tokens=prompt,
++            )
++        return metadata, accepted
++
++    def test_initial_target_reads_block63_tail_for_depth3_and_depth7(self):
++        for depth in (3, 7):
++            with self.subTest(depth=depth):
++                metadata, original = self._build(depth=depth)
++                self.assertEqual(metadata.num_accepted_tokens.tolist(), [depth + 1])
++                self.assertEqual(metadata.block_idx_last_computed_token.tolist(), [63])
++                self.assertEqual(metadata.block_idx_first_scheduled_token.tolist(), [64])
++                self.assertEqual(metadata.block_idx_last_scheduled_token.tolist(), [64])
++                self.assertEqual(original.tolist(), [1])
++
++    def test_later_target_preserves_verification_count(self):
++        metadata, _ = self._build(computed=8193)
++        self.assertEqual(metadata.num_accepted_tokens.tolist(), [1])
++        self.assertEqual(metadata.block_idx_last_computed_token.tolist(), [64])
++
++    def test_draft_counts_at_prompt_boundary_are_unchanged(self):
++        for draft_index in (0, 1):
++            with self.subTest(draft_index=draft_index):
++                metadata, _ = self._build(draft_index=draft_index)
++                self.assertEqual(metadata.num_accepted_tokens.tolist(), [1])
++                self.assertEqual(metadata.block_idx_last_computed_token.tolist(), [64])
++
++    def test_pd_boundary_is_unchanged(self):
++        metadata, _ = self._build(is_decode_node=True)
++        self.assertEqual(metadata.num_accepted_tokens.tolist(), [1])
++        self.assertEqual(metadata.block_idx_last_computed_token.tolist(), [64])
++
++    def test_target_mask_is_per_request(self):
++        builder = make_builder(num_spec=7)
++        builder.mome_block_size = 128
++        common = FakeCommonAttentionMetadata(
++            seq_lens=[8199, 8200, 8201], query_lens=[8, 8, 8]
++        )
++        metadata = builder.build(
++            0, common, num_accepted_tokens=torch.tensor([1, 1, 1], dtype=torch.int32),
++            num_prompt_tokens=torch.tensor([8192, 8192, 8192], dtype=torch.int32),
++        )
++        self.assertEqual(metadata.num_accepted_tokens.tolist(), [8, 8, 1])
++        self.assertEqual(metadata.block_idx_last_computed_token.tolist(), [63, 63, 64])
++
++
+ if __name__ == "__main__":
+     unittest.main(verbosity=2)

@@ -1,0 +1,2 @@
+# Empty source lines in unified-diff context contain one space.
+patches/**/*.patch -whitespace
