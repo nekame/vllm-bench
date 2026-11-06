@@ -105,6 +105,8 @@ def parser():
                    help="Direct only: log NPU memory at startup, first model calls, compilation and graph capture")
     p.add_argument("--model-timing", action="store_true",
                    help="Direct-only diagnostic: synchronized decode forward + LM head times, logged after each request")
+    p.add_argument("--trace-mtp-boundary", action="store_true",
+                   help="Omni greedy diagnostic: snapshot initial target, first MTP proposal and first verification across repeats")
     trace = p.add_mutually_exclusive_group()
     trace.add_argument("--trace-target", action="store_true",
                        help="Record Omni target inputs, metadata and logits for one eager request")
@@ -150,6 +152,10 @@ def make_plan(a):
     if a.mtp_no_static_kernels and (a.engine != "direct" or not a.depth or "compile" not in a.mode):
         raise ValueError("--mtp-no-static-kernels requires direct, positive depth and a compile mode")
     diagnostic_trace = a.trace_target or a.replay_target is not None
+    if a.trace_mtp_boundary and (a.engine != "omni" or not a.depth or a.temperature != 0):
+        raise ValueError("--trace-mtp-boundary requires --engine omni, positive depth and temperature=0")
+    if a.trace_mtp_boundary and (diagnostic_trace or a.profile):
+        raise ValueError("--trace-mtp-boundary cannot be combined with target trace/replay or profiling")
     if a.enable_prefix_caching and diagnostic_trace:
         raise ValueError("Target trace/replay requires disabled prefix caching")
     if a.async_scheduling and diagnostic_trace:

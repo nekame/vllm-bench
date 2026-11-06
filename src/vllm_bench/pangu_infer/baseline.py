@@ -8,6 +8,7 @@ import time
 
 from vllm_bench.pangu_infer.runtime import engine_options, config_json, require_npu_platform
 from vllm_bench.pangu_infer.results import save_result, versions
+from vllm_bench.pangu_infer.run import write_json
 
 
 def synchronize_worker(worker):
@@ -170,16 +171,30 @@ def main(argv=None):
     if a.get("trace_target", False):
         from vllm_bench.pangu_infer.target_trace import install_target_trace, finish_target_trace
         engine.collective_rpc(install_target_trace, args=(str(trace_directory), plan["trace_layers"]))
+    boundary_reports = []
+    if a.get("trace_mtp_boundary", False):
+        from vllm_bench.pangu_infer import boundary_trace
+        engine.collective_rpc(boundary_trace.install,
+                              args=(str(output / "mtp-boundary"), a["context_length"], a["depth"]))
     try:
         records = []
-        for prompt in plan.get("prompts", [None]):
+        for prompt_index, prompt in enumerate(plan.get("prompts", [None])):
             prompt_ids = None if prompt is None else prompt["prompt_ids"]
             for repeat in range(1, a["repeats"] + 1):
-                record = request(engine, plan, f"measure-{len(records)}", a["max_new_tokens"], prompt_ids=prompt_ids)
+                request_id = f"measure-{len(records)}"
+                if a.get("trace_mtp_boundary", False):
+                    engine.collective_rpc(boundary_trace.arm, args=(request_id, str(prompt_index), len(records)))
+                record = request(engine, plan, request_id, a["max_new_tokens"], prompt_ids=prompt_ids)
+                if a.get("trace_mtp_boundary", False):
+                    reports = engine.collective_rpc(boundary_trace.finish)
+                    boundary_reports.append(reports)
+                    print("[mtp-boundary] " + json.dumps(reports), flush=True)
                 if prompt is not None:
                     record.update(id=prompt["id"], repeat=repeat)
                 records.append(record)
     finally:
+        if a.get("trace_mtp_boundary", False):
+            engine.collective_rpc(boundary_trace.close)
         if a.get("trace_target", False):
             counts = engine.collective_rpc(finish_target_trace)
             if len(set(counts)) != 1 or min(counts) < 2:
@@ -206,6 +221,9 @@ def main(argv=None):
         "timing_boundary": ("offline first-to-final host-visible outputs; final device drain excluded; no HTTP"
                             if requested_async else
                             "offline device-complete first-to-final outputs, including final synchronization; no HTTP")}
+    if a.get("trace_mtp_boundary", False):
+        details["mtp_boundary_reports"] = boundary_reports
+        write_json(output / "mtp-boundary" / "report.json", boundary_reports)
     save_result(output, plan, records, effective, details)
     if a.get("trace_target", False):
         from vllm_bench.pangu_infer.target_trace import write_manifest

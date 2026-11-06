@@ -30,6 +30,13 @@ layers из плана. При рекуррентном использовани
 последовательный цикл batch 1. Новых monkey patches, import hooks,
 `sitecustomize` и динамической генерации исходников в runtime нет.
 
+`boundary_trace.py` использует штатные `register_forward_hook` на target и draft
+logits processors, установленные через `collective_rpc` после прогрева.
+Исходные model/runner methods не заменяются. Доступ к буферам, группам кеша
+и builder fields привязан к текущим NPUModelRunner/Eagle/MoME API.
+Hooks работают вне captured model forward; CPU snapshots синхронизируют
+исполнение и требуют отдельной NPU-проверки. Это диагностика, не benchmark.
+
 `mtp_parallel.py` использует штатный `patch_tensor_parallel_group` из
 `omni/vllm_patches/patches/common/patch_parallel_state.py`. Его протокол
 scoped state заимствован для явного переключения `_EP` и `_MOE_DISPATCH_EP`:

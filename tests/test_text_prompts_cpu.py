@@ -181,6 +181,53 @@ class TextPromptTests(unittest.TestCase):
                         self.assertTrue(save.call_args.args[3]["async_scheduling"])
                         self.assertIn("host-visible", save.call_args.args[4]["timing_boundary"])
 
+    def test_boundary_trace_is_armed_per_measured_request_and_closed_on_failure(self):
+        from vllm_bench.pangu_infer import boundary_trace
+        plan = self.plan("--engine", "omni", "--trace-mtp-boundary", "--temperature", "0",
+                         "--warmup", "1", "--repeats", "2")
+        path = self.root / "boundary-plan.json"
+        path.write_text(json.dumps(plan))
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                events, current = [], {}
+                state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
+                         "compilation": 0, "cudagraph": "NONE", "compile_counter": {}, "hardware": "NPU"}
+                def rpc(method, args=()):
+                    if method is baseline.worker_state:
+                        return [state]
+                    events.append(method.__name__)
+                    if method is boundary_trace.install:
+                        Path(args[0]).mkdir(parents=True, exist_ok=True)
+                    elif method is boundary_trace.arm:
+                        current["request_id"], current["prompt"], current["record"] = args
+                    elif method is boundary_trace.finish:
+                        return [{"record": current["record"], "first_difference": None}]
+                    return []
+                def request(engine, plan, request_id, *args, **kwargs):
+                    if request_id.startswith("measure-"):
+                        self.assertEqual(current["request_id"], request_id)
+                        if fail:
+                            raise RuntimeError("request failed")
+                    return {"decode_seconds": .1, "token_ids": [10, 11]}
+                engine = SimpleNamespace(collective_rpc=rpc)
+                modules = {"vllm.plugins": SimpleNamespace(load_general_plugins=Mock()),
+                    "vllm.engine.arg_utils": SimpleNamespace(EngineArgs=lambda **kwargs: kwargs),
+                    "vllm.v1.engine.llm_engine": SimpleNamespace(
+                        LLMEngine=SimpleNamespace(from_engine_args=lambda *args: engine))}
+                with patch.dict("sys.modules", modules), patch.object(baseline, "require_npu_platform"), \
+                        patch.object(baseline, "request", side_effect=request), \
+                        patch.object(baseline, "versions", return_value={}), patch.object(baseline, "save_result") as save:
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "request failed"):
+                            baseline.main(["--plan", str(path)])
+                        save.assert_not_called()
+                    else:
+                        baseline.main(["--plan", str(path)])
+                        self.assertEqual(len(save.call_args.args[4]["mtp_boundary_reports"]), 4)
+                self.assertEqual(events[0], "install")
+                self.assertEqual(events[-1], "close")
+                self.assertEqual(events.count("arm"), 1 if fail else 4)
+
 
 if __name__ == "__main__":
     unittest.main()

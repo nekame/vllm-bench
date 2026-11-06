@@ -487,6 +487,65 @@ Python overhead.
 MTP флаг не затрагивает. Для matrix используйте `engines: ["direct"]`, если
 передаёте `--mtp-pad-to-8` в общем списке options.
 
+## Диагностика первого MTP-окна между повторами Omni
+
+Если greedy-повторы расходятся только с MTP, добавьте к прежней команде
+`--trace-mtp-boundary`, сохраните `--depth 7 --temperature 0 --repeats 3`
+и укажите новый `--output`. Настройки prefix cache, HIF8, размеров блоков,
+chunked prefill, async scheduling и compile/ACL остаются прежними.
+Диагностика разрешена только для Omni с положительной depth и temperature=0;
+она несовместима с `--trace-target`, replay и profiling.
+
+После прогрева на каждом worker устанавливаются штатные hooks у target
+`logits_processor` и draft `model.logits_processor`. Они вызываются вне
+captured model forward, поэтому фиксируют и ACL replay. Перед каждым
+измеряемым запросом hooks активируются для его request ID и сохраняют:
+
+- `initial_target`: последний prefill-вызов, который завершает prompt;
+  logits промежуточных prefill-чанков пропускаются;
+- `mtp_0` … `mtp_6` при depth 7: первый proposal;
+- `first_verification`: первый следующий вызов основной модели.
+
+Снимки содержат вход LM head, полные logits, argmax и accepted/computed
+counts. Для target также сохраняются фактические input IDs и positions;
+512 prefill-токенов не путаются с единственной строкой logits.
+Вход LM head draft уже прошёл shared-head normalization.
+
+Сохраняются выбранные состояния первого MoME-слоя target и первого MoME-слоя
+draft. Логические блоки выбираются около начала последнего prefill-чанка
+и конца prompt. Для текущего случая 7680 + 512 токенов при block size 128
+это блоки 59, 63, 64. Физические IDs проверяются по GPU block table и
+выделенным блокам запроса; null/PAD и недоступные блоки не читаются.
+Постоянные metadata buffers builder читаются только для соответствующего
+decode-вызова при full graphs и допустимой batch capacity. На prefill
+и в eager они помечаются как неактуальные и не читаются.
+
+В `mtp-boundary/rank-N/record-XXXXX.pt` записываются CPU tensors и обычные
+контейнеры, пригодные для `torch.load(weights_only=True)`. Это снимки только
+первого окна, а не всей генерации. JSON рядом и строка `[mtp-boundary]`
+сравнивают каждый повтор с первым запросом того же prompt:
+
+- `first_compute_difference`: первое отличие входа LM head, logits или argmax;
+- `first_input_difference`: первое отличие target IDs/positions или GPU accepted counts;
+- `first_state_difference`: первое отличие снимков MoME/metadata;
+- `target_state_changes_during_mtp`: изменения выбранных target-состояний
+  между prefill и drafting при неизменном физическом размещении блока.
+
+Номера физических блоков между повторами не сравниваются. Выделенный блок
+ещё не обязательно содержит актуальное состояние: старые байты будущего
+блока 64 или draft-блока до его первого вызова не доказывают ошибку.
+Поэтому различия вычисленных выходов и сырых состояний разделены.
+`reference_record=null` обозначает первый запрос данного prompt.
+Сводка всех ranks сохраняется в `mtp-boundary/report.json` и
+`details.mtp_boundary_reports`. Неполное окно вызывает явную ошибку;
+hooks снимаются при завершении и при исключении.
+
+CPU copies синхронизируют вычисления и могут скрыть гонку. Результат
+помечается `diagnostic` и не используется для speedup. Обязательно проверяйте
+`[repeat-check]`: сохранение расхождения со снимками и его исчезновение
+имеют разную диагностическую ценность. Методы модели/runner, параметры
+численной точности и содержимое кеша инструмент не изменяет.
+
 ## Диагностика расхождений target: запись Omni и replay в direct
 
 Этот режим сравнивает основную модель на одинаковых входных окнах. Он нужен,
