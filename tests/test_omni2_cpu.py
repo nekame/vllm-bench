@@ -90,7 +90,7 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         self.assertNotIn("--async-scheduling", argv)
         self.assertNotIn("--no-async-scheduling", argv)
         graph = json.loads(argv[argv.index("--compilation-config") + 1])
-        self.assertEqual(graph, {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8]})
+        self.assertEqual(graph, {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8]})
         identities = [plan["comparison_sha256"]]
         for flag, expected, opposite in (("--async-scheduling", True, "--no-async-scheduling"),
                                          ("--no-async-scheduling", False, "--async-scheduling")):
@@ -114,6 +114,16 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
                       ("--engine", "direct", "--mode", "compile-acl", "--cudagraph-mode", "FULL")):
             with self.assertRaises(ValueError):
                 self.plan(*flags)
+
+    def test_compile_mode_is_explicit_with_and_without_graph_flags(self):
+        for flags in ((), ("--cudagraph-mode", "FULL_DECODE_ONLY", "--cudagraph-capture-sizes", "8"),
+                      ("--cudagraph-mode", "FULL", "--cudagraph-capture-sizes", "1", "8")):
+            for async_flags in ((), ("--async-scheduling",), ("--no-async-scheduling",)):
+                with self.subTest(flags=flags, async_flags=async_flags):
+                    plan = self.plan("--mode", "compile-acl", *flags, *async_flags)
+                    argv = plan["omni2_server_argv"]
+                    config = json.loads(argv[argv.index("--compilation-config") + 1])
+                    self.assertEqual(config["mode"], 3)
 
     def test_server_extras_are_frozen_and_cannot_replace_model_worker_or_axes(self):
         path = self.root / "server.json"
@@ -170,6 +180,12 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         omni2.check_workers(plan, [state])
         native = self.plan("--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128")
         omni2.check_workers(native, [{**state, "async_scheduling": True}])
+        compiled = self.plan("--mode", "compile-acl", "--enable-prefix-caching",
+                             "--block-size", "128", "--mamba-block-size", "128")
+        omni2.check_settings(compiled, {**state, "compilation": 3})
+        for mode in (0, 1, 2, 4):
+            with self.subTest(compilation=mode), self.assertRaisesRegex(RuntimeError, "compilation mode"):
+                omni2.check_settings(compiled, {**state, "compilation": mode})
         for key, value in (("cache_dtype", "bfloat16"), ("mome_prefill_state_fix", True),
                            ("block_size", 256), ("compilation", 3), ("async_scheduling", True)):
             bad = {**state, key: value}

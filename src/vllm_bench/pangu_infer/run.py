@@ -347,6 +347,8 @@ def make_plan(a):
         match["async_scheduling"] = True
     if a.engine == "omni2":
         match["omni2_async_scheduling"] = "native" if a.async_scheduling is None else a.async_scheduling
+        if a.mode == "compile-acl":
+            match["omni2_compilation_mode"] = 3
     if a.cudagraph_mode is not None and a.cudagraph_mode != "FULL":
         match["cudagraph_mode"] = a.cudagraph_mode
     if a.omni_cache_history != "reuse":

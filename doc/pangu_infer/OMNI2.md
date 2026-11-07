@@ -51,9 +51,11 @@ vLLM. Явные `--async-scheduling` и `--no-async-scheduling` задают Tr
 В `[execution]` выводится фактическое разрешённое значение из VllmConfig.
 
 В ACL-режимах default omni2 — `FULL_DECODE_ONLY`, capture size — `depth+1`
-(для depth7 это `[8]`). В `compile-acl` compilation JSON содержит только
-эти graph-поля: compilation mode выбирает native vLLM. Фактический mode
-записывается в результат; при аудите проверяется реальная компиляция/capture.
+(для depth7 это `[8]`). В `compile-acl` compilation JSON также явно задаёт
+`mode: 3` (`VLLM_COMPILE`), как до коммита `5ca1807`. Удаление этого поля
+в `5ca1807` отменено: выбор graph policy не должен неявно менять compilation mode.
+Фактический mode строго проверяется и записывается в результат;
+при аудите дополнительно проверяется реальная компиляция/capture.
 `acl` и `eager` явно задают compilation mode 0. Точное имя graph mode
 проверяется после создания движка: наличие любого full graph недостаточно.
 Для прежних `omni`/`direct` defaults не изменены: async off,

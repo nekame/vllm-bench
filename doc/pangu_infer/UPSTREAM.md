@@ -309,3 +309,13 @@ max_new_tokens, явные request fields включая top_k=0. Native protoco
 сохраняет requested/default/resolved параметры до InputProcessor/GPU;
 worker методы не подменяются. Предупреждение о model defaults temperature=1
 не считалось доказательством изменения явно переданной temperature=0.
+
+После сообщения о выводе из одних `!` пересмотрен полный diff `5ca1807`.
+Помимо graph/async defaults этот коммит удалял явный compilation mode 3
+и ослаблял его проверку для omni2 compile-acl. Это изменение отменено:
+mode 3 снова передаётся явно и строго проверяется независимо от graph/async
+флагов. В upstream NPUModelRunner.__init__ от VLLM_COMPILE зависит настройка
+MTP graph state. Это подтверждает значимость изменения, но не доказывает
+причину некорректного текста на NPU. Graph/async defaults пока сохранены;
+удаление только graph CLI-флагов по-прежнему не возвращает старые defaults.
+OmniInfer не изменён; новых NPU-прогонов для этой проверки не запрашивали.

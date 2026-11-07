@@ -24,9 +24,6 @@ def server_argv(plan):
     options.pop("skip_tokenizer_init")
     if plan["options"].get("async_scheduling") is None:
         options.pop("async_scheduling")
-    if plan["options"]["mode"] == "compile-acl":
-        # HTTP leaves compilation mode to native vLLM; only graph policy is explicit.
-        options["compilation_config"].pop("mode")
     if "speculative_config" in options:
         options["speculative_config"] = {"method": "mtp", "num_speculative_tokens": plan["options"]["depth"]}
     if plan["options"].get("tokenizer"):
@@ -179,7 +176,7 @@ def check_settings(plan, state):
         if a.get(key) is not None and state[key] != a[key]:
             raise RuntimeError(f"Native server {key} differs from the requested setting")
     settings = state["execution_settings"]
-    if a["mode"] != "compile-acl" and state["compilation"] != 0:
+    if state["compilation"] != (3 if a["mode"] == "compile-acl" else 0):
         raise RuntimeError("Native server compilation mode differs from the plan")
     if settings["dtype"] != "torch.bfloat16":
         raise RuntimeError("Native server dtype differs from the planned bfloat16")
