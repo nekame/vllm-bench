@@ -36,6 +36,30 @@ output-каталог. Уберите `--fix-mome-prefill-state`, `--trace-mtp-b
 
 Сохраните прежние значения model/operator/additional config, TP, depth,
 контекста/выхода, mode, dtype кеша, block sizes, chunk size и sampling.
+
+Для подтверждённой конфигурации HTTP с async и decode-only графами:
+
+```bash
+--engine omni2 --mode compile-acl --async-scheduling \
+  --cudagraph-mode FULL_DECODE_ONLY --cudagraph-capture-sizes 8
+```
+
+В `omni2` неуказанный async больше не превращается в
+`--no-async-scheduling`: флаг опускается, решение оставляется установленному
+vLLM. Явные `--async-scheduling` и `--no-async-scheduling` задают True/False.
+Для сравнения с данным HTTP используйте явно включённый async, как выше.
+В `[execution]` выводится фактическое разрешённое значение из VllmConfig.
+
+В ACL-режимах default omni2 — `FULL_DECODE_ONLY`, capture size — `depth+1`
+(для depth7 это `[8]`). В `compile-acl` compilation JSON содержит только
+эти graph-поля: compilation mode выбирает native vLLM. Фактический mode
+записывается в результат; при аудите проверяется реальная компиляция/capture.
+`acl` и `eager` явно задают compilation mode 0. Точное имя graph mode
+проверяется после создания движка: наличие любого full graph недостаточно.
+Для прежних `omni`/`direct` defaults не изменены: async off,
+graph `FULL`, capture sizes `[1, depth+1]`. Новый `--cudagraph-mode`
+разрешён только stock engines в ACL-режиме и участвует в comparison identity.
+
 Поддерживаются полные/урезанные Ultra checkpoint, TP1/2/4/8, depth0/3/7,
 eager, acl, compile-acl и текстовые JSON-входы существующего инструмента.
 Compile-only отклоняется, как в старом omni: native decorator его обходит.
@@ -164,3 +188,9 @@ coalesced first frame и исключение trailing usage из decode. Отд
 устраняют конкретные отличия bootstrap, но пока не доказаны как
 исправление этого расхождения. Параметры компиляции, cudagraph и sampling
 при этом не менялись.
+
+В запуске `2733c88` пользователь также получил разные ответы. Затем он
+обнаружил реальные отличия argv: `--no-async-scheduling` и graph `FULL`
+вместо HTTP `FULL_DECODE_ONLY`, sizes `[8]`. Defaults исправлены, как описано
+выше. Эти отличия возникли в нашем launcher; они не являются изменением
+пользовательских настроек. Их устранение ещё требует проверки выходов на NPU.

@@ -16,6 +16,11 @@ def server_argv(plan):
     """Use the server's parser/defaults, including native speculative defaults."""
     options = engine_options(plan, direct=False)
     options.pop("skip_tokenizer_init")
+    if plan["options"].get("async_scheduling") is None:
+        options.pop("async_scheduling")
+    if plan["options"]["mode"] == "compile-acl":
+        # HTTP leaves compilation mode to native vLLM; only graph policy is explicit.
+        options["compilation_config"].pop("mode")
     if "speculative_config" in options:
         options["speculative_config"] = {"method": "mtp", "num_speculative_tokens": plan["options"]["depth"]}
     if plan["options"].get("tokenizer"):
@@ -28,7 +33,7 @@ def server_argv(plan):
         options["profiler_config"] = {"profiler": "torch", "ignore_frontend": True,
                                       "torch_profiler_dir": str(Path(plan["options"]["output"]) / "traces")}
     extra = plan.get("omni2_server_args", [])
-    protected = set(options) | {"model_tag", "worker_cls", "worker_extension_cls", "tokenizer", "skip_tokenizer_init", "config",
+    protected = set(options) | {"async_scheduling", "model_tag", "worker_cls", "worker_extension_cls", "tokenizer", "skip_tokenizer_init", "config",
                                 "headless", "api_server_count", "grpc", "pipeline_parallel_size",
                                 "revision", "code_revision", "tokenizer_revision", "quantization",
                                 "load_format", "model_impl", "enable_lora", "lora_modules",
@@ -133,9 +138,10 @@ async def request(serving, plan, model, prompt_ids, limit):
 
 def check_settings(plan, state):
     a = plan["options"]
-    expected = {"async_scheduling": a.get("async_scheduling", False),
-                "enable_prefix_caching": a.get("enable_prefix_caching", False),
+    expected = {"enable_prefix_caching": a.get("enable_prefix_caching", False),
                 "cache_dtype": a.get("kv_cache_dtype", "auto")}
+    if a.get("async_scheduling") is not None:
+        expected["async_scheduling"] = a["async_scheduling"]
     if state.get("mome_prefill_state_fix", False):
         raise RuntimeError("omni2 requires the unmodified native MoME builder")
     for key, value in expected.items():
@@ -145,7 +151,7 @@ def check_settings(plan, state):
         if a.get(key) is not None and state[key] != a[key]:
             raise RuntimeError(f"Native server {key} differs from the requested setting")
     settings = state["execution_settings"]
-    if state["compilation"] != (3 if "compile" in a["mode"] else 0):
+    if a["mode"] != "compile-acl" and state["compilation"] != 0:
         raise RuntimeError("Native server compilation mode differs from the plan")
     if settings["dtype"] != "torch.bfloat16":
         raise RuntimeError("Native server dtype differs from the planned bfloat16")
@@ -199,7 +205,8 @@ async def run_session(plan, args, engine, app, startup):
     spec = cfg.speculative_config
     if (0 if spec is None else spec.num_speculative_tokens) != a["depth"]:
         raise RuntimeError("Native server MTP depth differs from the plan")
-    if cfg.compilation_config.cudagraph_mode.has_full_cudagraphs() != ("acl" in a["mode"]):
+    expected_graph = a.get("cudagraph_mode") or ("FULL_DECODE_ONLY" if "acl" in a["mode"] else "NONE")
+    if cfg.compilation_config.cudagraph_mode.name != expected_graph:
         raise RuntimeError("Native server graph mode differs from the plan")
     frontend = frontend_state(cfg)
     check_settings(plan, frontend)
@@ -216,7 +223,8 @@ async def run_session(plan, args, engine, app, startup):
     history = a.get("omni_cache_history", "reuse")
     print(f"[execution] engine=omni2 client={type(engine).__name__} core={type(engine.engine_core).__name__} "
           f"native_lifespan=true worker_audit={str(audit).lower()} "
-          f"mome_prefill_state_fix=false async_scheduling={a.get('async_scheduling', False)}", flush=True)
+          f"mome_prefill_state_fix=false async_scheduling={frontend['async_scheduling']} "
+          f"cudagraph_mode={cfg.compilation_config.cudagraph_mode.name}", flush=True)
     records = []
     if a["profile"]:
         await engine.start_profile()

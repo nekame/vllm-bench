@@ -32,7 +32,7 @@ def engine_options(plan, *, direct):
     a = plan["options"]
     compile_enabled = "compile" in a["mode"]
     graph_enabled = "acl" in a["mode"]
-    capture_sizes = {1, a["depth"] + 1}
+    capture_sizes = {a["depth"] + 1} if a.get("engine") == "omni2" else {1, a["depth"] + 1}
     if a.get("cudagraph_capture_sizes") is not None:
         capture_sizes = set(a["cudagraph_capture_sizes"])
     if direct and a.get("mtp_pad_to_8", False):
@@ -51,7 +51,7 @@ def engine_options(plan, *, direct):
         async_scheduling=a.get("async_scheduling", False) if not direct else False,
         gpu_memory_utilization=a["gpu_memory_utilization"], seed=a["seed"],
         compilation_config={"mode": 0 if direct or not compile_enabled else 3,
-                            "cudagraph_mode": "FULL" if graph_enabled else "NONE",
+                            "cudagraph_mode": (a.get("cudagraph_mode") or "FULL") if graph_enabled else "NONE",
                             "cudagraph_capture_sizes": sorted(capture_sizes)},
         additional_config=plan["additional_config"])
     if not direct:

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from vllm_bench.pangu_infer import omni2, run
 from vllm_bench.pangu_infer.results import save_result
+from vllm_bench.pangu_infer.runtime import engine_options
 
 
 class PlanningFixture:
@@ -77,6 +78,38 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
             self.assertEqual(old["VLLM_USE_AOT_COMPILE"], "0")
             self.assertEqual(old["OMNI_DRAFT_TOP_K"], "-1")
 
+    def test_native_async_defaults_and_exact_http_decode_graph_configuration(self):
+        plan = self.plan("--mode", "compile-acl")
+        argv = plan["omni2_server_argv"]
+        self.assertIsNone(plan["options"]["async_scheduling"])
+        self.assertNotIn("--async-scheduling", argv)
+        self.assertNotIn("--no-async-scheduling", argv)
+        graph = json.loads(argv[argv.index("--compilation-config") + 1])
+        self.assertEqual(graph, {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8]})
+        identities = [plan["comparison_sha256"]]
+        for flag, expected, opposite in (("--async-scheduling", True, "--no-async-scheduling"),
+                                         ("--no-async-scheduling", False, "--async-scheduling")):
+            item = self.plan("--mode", "compile-acl", flag)
+            self.assertIs(item["options"]["async_scheduling"], expected)
+            self.assertIn(flag, item["omni2_server_argv"])
+            self.assertNotIn(opposite, item["omni2_server_argv"])
+            identities.append(item["comparison_sha256"])
+        self.assertEqual(len(set(identities)), 3)
+        changed = self.plan("--mode", "compile-acl", "--cudagraph-mode", "FULL")
+        self.assertNotEqual(changed["comparison_sha256"], plan["comparison_sha256"])
+        self.assertEqual(self.plan("--mode", "compile-acl", "--cudagraph-capture-sizes", "8")["comparison_sha256"],
+                         plan["comparison_sha256"])
+        for engine in ("direct", "omni"):
+            old = self.plan("--engine", engine, "--mode", "compile-acl")
+            self.assertFalse(old["options"]["async_scheduling"])
+            options = engine_options(old, direct=engine == "direct")
+            self.assertEqual(options["compilation_config"]["cudagraph_mode"], "FULL")
+            self.assertEqual(options["compilation_config"]["cudagraph_capture_sizes"], [1, 8])
+        for flags in (("--cudagraph-mode", "FULL_DECODE_ONLY"),
+                      ("--engine", "direct", "--mode", "compile-acl", "--cudagraph-mode", "FULL")):
+            with self.assertRaises(ValueError):
+                self.plan(*flags)
+
     def test_server_extras_are_frozen_and_cannot_replace_model_worker_or_axes(self):
         path = self.root / "server.json"
         extra = ["--generation-config", "vllm"]
@@ -121,13 +154,16 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         self.assertEqual((self.root / "output/runtime.log").read_text(), "native launch\n")
 
     def test_worker_audit_rejects_silent_execution_changes(self):
-        plan = self.plan("--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128")
+        plan = self.plan("--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128",
+                         "--no-async-scheduling")
         state = {"async_scheduling": False, "enable_prefix_caching": True, "cache_dtype": "auto",
                  "block_size": 128, "mamba_block_size": 128, "compilation": 0, "compile_counter": {},
                  "execution_settings": {"max_model_len": plan["max_model_len"], "max_num_seqs": 1,
                     "max_num_batched_tokens": plan["max_model_len"], "enable_chunked_prefill": False,
                     "dtype": "torch.bfloat16"}}
         omni2.check_workers(plan, [state])
+        native = self.plan("--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128")
+        omni2.check_workers(native, [{**state, "async_scheduling": True}])
         for key, value in (("cache_dtype", "bfloat16"), ("mome_prefill_state_fix", True),
                            ("block_size", 256), ("compilation", 3), ("async_scheduling", True)):
             bad = {**state, key: value}
@@ -237,14 +273,14 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
             await omni2.request(SimpleNamespace(create_completion=AsyncMock(return_value={"error": "bad"})),
                                 plan, "model", plan["prompt_ids"], 16)
 
-    async def execute(self, *, fail=False, audit=False):
+    async def execute(self, *, fail=False, audit=False, native_async=False):
         plan = self.plan(*(["--omni2-audit"] if audit else []))
         (self.root / "output").mkdir(exist_ok=True)
         settings = {"max_model_len": plan["max_model_len"], "max_num_seqs": 1,
                     "max_num_batched_tokens": plan["max_model_len"], "enable_chunked_prefill": False,
                     "dtype": "torch.bfloat16"}
         state = {"operator": {}, "parallel": {}, "block_size": 128, "mamba_block_size": 128,
-                 "cache_dtype": "auto", "mamba_cache_mode": "all", "async_scheduling": False,
+                 "cache_dtype": "auto", "mamba_cache_mode": "all", "async_scheduling": native_async,
                  "enable_prefix_caching": False, "execution_settings": settings, "compile_counter": {},
                  "compilation": 0, "cudagraph": "NONE", "hardware": "NPU"}
         class GraphMode(IntEnum):
@@ -259,7 +295,7 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
                               speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=7),
                               compilation_config=SimpleNamespace(mode=0, cudagraph_mode=GraphMode.NONE,
                                   cudagraph_capture_sizes=[1, 8], max_cudagraph_capture_size=8),
-                              scheduler_config=SimpleNamespace(async_scheduling=False, enable_chunked_prefill=False,
+                              scheduler_config=SimpleNamespace(async_scheduling=native_async, enable_chunked_prefill=False,
                                   max_num_seqs=1, max_num_batched_tokens=plan["max_model_len"]),
                               cache_config=SimpleNamespace(block_size=128, mamba_block_size=128, cache_dtype="auto",
                                   mamba_cache_mode="all", mamba_page_size_padded=None, enable_prefix_caching=False),
@@ -326,6 +362,7 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
                 await omni2.run(plan, args)
                 self.assertEqual(len(save.call_args.args[2]), 2)
                 self.assertFalse(save.call_args.args[3]["mome_prefill_state_fix"])
+                self.assertEqual(save.call_args.args[3]["async_scheduling"], native_async)
                 self.assertEqual(save.call_args.args[4]["frontend"], "SimpleNamespace")
                 self.assertEqual(save.call_args.args[4]["worker_audit"], audit)
                 self.assertTrue(save.call_args.args[4]["native_lifespan"])
@@ -346,7 +383,9 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(call.args == ("pangu_bench_worker_state",) for call in engine.collective_rpc.call_args_list))
 
     async def test_native_server_context_initializes_serving_and_cleans_up(self):
-        await self.execute()
+        for native_async in (False, True):
+            with self.subTest(native_async=native_async):
+                await self.execute(native_async=native_async)
 
     async def test_native_server_context_cleans_up_after_stream_failure(self):
         await self.execute(fail=True)

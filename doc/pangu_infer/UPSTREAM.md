@@ -70,6 +70,13 @@ extension и audit RPC нет. Явный `--omni2-audit` включает read-
 lifespan выполняет штатные periodic stats и GC setup, затем очищает app state
 перед shutdown движка. Детали и ограничения: [OMNI2.md](OMNI2.md).
 
+После сверки фактического argv исправлены две ошибки переноса defaults:
+omni2 больше не принуждает async=False при отсутствии аргумента, а для ACL
+использует `FULL_DECODE_ONLY` и capture `[depth+1]` (depth7 → `[8]`).
+В compile-acl mode выбирается штатным vLLM, graph-поля передаются явно.
+Для известного HTTP async=True задаётся `--async-scheduling`; исходный
+omni/direct сохраняют defaults. Новые MoME/state patches не добавлены.
+
 Корректировка MoME prefill-state реализована локально в `mome_prefill.py`
 под явным флагом `--fix-mome-prefill-state`. Класс наследует исходный
 `NPUMomeAttentionMetadataBuilder`: для non-PD target на границе

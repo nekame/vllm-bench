@@ -65,8 +65,8 @@ def parser():
                    help="Omni2 only: JSON array of additional native vllm serve arguments")
     p.add_argument("--omni2-audit", action="store_true",
                    help="Omni2 only: install read-only worker audit RPCs; default native path performs no audit RPC")
-    p.add_argument("--async-scheduling", action="store_true",
-                   help="Omni only: enable async scheduling and time decode between host-visible outputs")
+    p.add_argument("--async-scheduling", action=argparse.BooleanOptionalAction,
+                   help="Stock engines: enable/disable async scheduling; omni2 default: native vLLM, omni: disabled")
     p.add_argument("--omni-multiprocessing", action="store_true",
                    help="Omni only: run EngineCore in its native background process, as in the HTTP server")
     p.add_argument("--omni-cache-history", choices=("reuse", "cold-first", "cold-each"), default="reuse",
@@ -85,7 +85,9 @@ def parser():
     p.add_argument("--max-model-len", type=int,
                    help="Override engine context capacity; default: context-length + generation reserve")
     p.add_argument("--cudagraph-capture-sizes", type=int, nargs="+",
-                   help="Omni only: explicit graph capture sizes, e.g. 8; default: 1 and depth+1")
+                   help="Stock ACL engines: capture sizes, e.g. 8; omni2 default: depth+1, omni: 1 and depth+1")
+    p.add_argument("--cudagraph-mode", choices=("FULL", "FULL_DECODE_ONLY"),
+                   help="Stock ACL engines: omni2 default FULL_DECODE_ONLY; omni default FULL")
     p.add_argument("--tp", type=int, choices=(1, 2, 4, 8), default=1)
     p.add_argument("--mtp-tp", type=int, choices=(1, 2, 4, 8),
                    help="Direct only: MTP TP size on the first N ranks, for prefill and decode; default: target TP")
@@ -143,6 +145,12 @@ def parser():
 def make_plan(a):
     if a.warmup is None:
         a.warmup = 0 if a.engine == "omni2" else 2
+    if a.async_scheduling is None and a.engine != "omni2":
+        a.async_scheduling = False
+    if a.cudagraph_mode is not None and (a.engine == "direct" or "acl" not in a.mode):
+        raise ValueError("--cudagraph-mode requires a stock engine and an ACL mode")
+    if "acl" in a.mode:
+        a.cudagraph_mode = a.cudagraph_mode or ("FULL_DECODE_ONLY" if a.engine == "omni2" else "FULL")
     options = {key: str(value.resolve()) if isinstance(value, Path) else value
                for key, value in vars(a).items()}
     stock_engine = a.engine in ("omni", "omni2")
@@ -337,6 +345,10 @@ def make_plan(a):
         match["fix_mome_prefill_state"] = True
     if a.async_scheduling:
         match["async_scheduling"] = True
+    if a.engine == "omni2":
+        match["omni2_async_scheduling"] = "native" if a.async_scheduling is None else a.async_scheduling
+    if a.cudagraph_mode is not None and a.cudagraph_mode != "FULL":
+        match["cudagraph_mode"] = a.cudagraph_mode
     if a.omni_cache_history != "reuse":
         match["omni_cache_history"] = a.omni_cache_history
     if a.warmup != 2:
@@ -359,7 +371,8 @@ def make_plan(a):
     if max_len != required_len:
         match["max_model_len"] = max_len
     if options["cudagraph_capture_sizes"] is not None:
-        if options["cudagraph_capture_sizes"] != sorted({1, a.depth + 1}):
+        default_sizes = {a.depth + 1} if a.engine == "omni2" else {1, a.depth + 1}
+        if options["cudagraph_capture_sizes"] != sorted(default_sizes):
             match["cudagraph_capture_sizes"] = options["cudagraph_capture_sizes"]
     plan = {"format": "pangu-direct-plan-v1", "options": options, "config": config,
             "hf_overrides": hf_overrides,
