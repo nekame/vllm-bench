@@ -83,14 +83,14 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
             self.assertEqual(old["VLLM_USE_AOT_COMPILE"], "0")
             self.assertEqual(old["OMNI_DRAFT_TOP_K"], "-1")
 
-    def test_native_async_defaults_and_exact_http_decode_graph_configuration(self):
+    def test_previous_defaults_and_explicit_http_decode_graph_configuration(self):
         plan = self.plan("--mode", "compile-acl")
         argv = plan["omni2_server_argv"]
-        self.assertIsNone(plan["options"]["async_scheduling"])
+        self.assertFalse(plan["options"]["async_scheduling"])
         self.assertNotIn("--async-scheduling", argv)
-        self.assertNotIn("--no-async-scheduling", argv)
+        self.assertIn("--no-async-scheduling", argv)
         graph = json.loads(argv[argv.index("--compilation-config") + 1])
-        self.assertEqual(graph, {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8]})
+        self.assertEqual(graph, {"mode": 3, "cudagraph_mode": "FULL", "cudagraph_capture_sizes": [1, 8]})
         identities = [plan["comparison_sha256"]]
         for flag, expected, opposite in (("--async-scheduling", True, "--no-async-scheduling"),
                                          ("--no-async-scheduling", False, "--async-scheduling")):
@@ -99,10 +99,16 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
             self.assertIn(flag, item["omni2_server_argv"])
             self.assertNotIn(opposite, item["omni2_server_argv"])
             identities.append(item["comparison_sha256"])
-        self.assertEqual(len(set(identities)), 3)
-        changed = self.plan("--mode", "compile-acl", "--cudagraph-mode", "FULL")
+        self.assertEqual(len(set(identities)), 2)
+        changed = self.plan("--mode", "compile-acl", "--async-scheduling",
+                            "--cudagraph-mode", "FULL_DECODE_ONLY", "--cudagraph-capture-sizes", "8")
+        changed_argv = changed["omni2_server_argv"]
+        self.assertIn("--async-scheduling", changed_argv)
+        self.assertEqual(json.loads(changed_argv[changed_argv.index("--compilation-config") + 1]),
+                         {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8]})
         self.assertNotEqual(changed["comparison_sha256"], plan["comparison_sha256"])
-        self.assertEqual(self.plan("--mode", "compile-acl", "--cudagraph-capture-sizes", "8")["comparison_sha256"],
+        self.assertEqual(self.plan("--mode", "compile-acl", "--no-async-scheduling", "--cudagraph-mode", "FULL",
+                                   "--cudagraph-capture-sizes", "1", "8")["comparison_sha256"],
                          plan["comparison_sha256"])
         for engine in ("direct", "omni"):
             old = self.plan("--engine", engine, "--mode", "compile-acl")
@@ -178,7 +184,8 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
                     "max_num_batched_tokens": plan["max_model_len"], "enable_chunked_prefill": False,
                     "dtype": "torch.bfloat16"}}
         omni2.check_workers(plan, [state])
-        native = self.plan("--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128")
+        native = self.plan("--enable-prefix-caching", "--block-size", "128", "--mamba-block-size", "128",
+                           "--async-scheduling")
         omni2.check_workers(native, [{**state, "async_scheduling": True}])
         compiled = self.plan("--mode", "compile-acl", "--enable-prefix-caching",
                              "--block-size", "128", "--mamba-block-size", "128")
@@ -343,7 +350,8 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
                                 plan, "model", plan["prompt_ids"], 16)
 
     async def execute(self, *, fail=False, audit=False, native_async=False):
-        plan = self.plan(*(["--omni2-audit"] if audit else []))
+        plan = self.plan(*(["--omni2-audit"] if audit else []),
+                         *( ["--async-scheduling"] if native_async else []))
         (self.root / "output").mkdir(exist_ok=True)
         settings = {"max_model_len": plan["max_model_len"], "max_num_seqs": 1,
                     "max_num_batched_tokens": plan["max_model_len"], "enable_chunked_prefill": False,

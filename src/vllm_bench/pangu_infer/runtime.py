@@ -32,7 +32,7 @@ def engine_options(plan, *, direct):
     a = plan["options"]
     compile_enabled = "compile" in a["mode"]
     graph_enabled = "acl" in a["mode"]
-    capture_sizes = {a["depth"] + 1} if a.get("engine") == "omni2" else {1, a["depth"] + 1}
+    capture_sizes = {1, a["depth"] + 1}
     if a.get("cudagraph_capture_sizes") is not None:
         capture_sizes = set(a["cudagraph_capture_sizes"])
     if direct and a.get("mtp_pad_to_8", False):

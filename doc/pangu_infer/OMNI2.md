@@ -44,14 +44,14 @@ output-каталог. Уберите `--fix-mome-prefill-state`, `--trace-mtp-b
   --cudagraph-mode FULL_DECODE_ONLY --cudagraph-capture-sizes 8
 ```
 
-В `omni2` неуказанный async больше не превращается в
-`--no-async-scheduling`: флаг опускается, решение оставляется установленному
-vLLM. Явные `--async-scheduling` и `--no-async-scheduling` задают True/False.
-Для сравнения с данным HTTP используйте явно включённый async, как выше.
+Без явных флагов сохранены defaults до `5ca1807`: async выключен,
+graph mode `FULL`, capture sizes `[1, depth+1]` (для depth7 `[1, 8]`).
+Для сравнения с данным HTTP задавайте async и graph policy явно, как выше.
+Удаление этих флагов возвращает прежнюю политику запуска; параметры не
+сохраняются между запусками. Явный `--no-async-scheduling` эквивалентен default.
 В `[execution]` выводится фактическое разрешённое значение из VllmConfig.
 
-В ACL-режимах default omni2 — `FULL_DECODE_ONLY`, capture size — `depth+1`
-(для depth7 это `[8]`). В `compile-acl` compilation JSON также явно задаёт
+В `compile-acl` compilation JSON также явно задаёт
 `mode: 3` (`VLLM_COMPILE`), как до коммита `5ca1807`. Удаление этого поля
 в `5ca1807` отменено: выбор graph policy не должен неявно менять compilation mode.
 Фактический mode строго проверяется и записывается в результат;
@@ -229,6 +229,28 @@ coalesced first frame и исключение trailing usage из decode. Отд
 
 В запуске `2733c88` пользователь также получил разные ответы. Затем он
 обнаружил реальные отличия argv: `--no-async-scheduling` и graph `FULL`
-вместо HTTP `FULL_DECODE_ONLY`, sizes `[8]`. Defaults исправлены, как описано
-выше. Эти отличия возникли в нашем launcher; они не являются изменением
-пользовательских настроек. Их устранение ещё требует проверки выходов на NPU.
+вместо HTTP `FULL_DECODE_ONLY`, sizes `[8]`. В `5ca1807` добавлены явные
+graph-флаги, но одновременно изменены defaults и удалён явный mode=3.
+Пользователь сообщил вывод из одних `!` и с новыми флагами, и после их
+удаления. Причина этого вывода пока не установлена. Изменение defaults
+отменено, явные новые флаги сохранены; mode=3 также восстановлен.
+
+При проверке без ML-пакетов исходники launcher до `5ca1807` извлечены во
+временную папку и сравнены с текущим launcher на одном CPU fixture:
+в 18 вариантах depth0/3/7, eager/acl/compile-acl и async off/on native argv совпадает, кроме
+двух намеренно добавленных sampling-параметров (`generation-config` и
+`override-generation-config`). Это подтверждает восстановление прежних
+аргументов запуска, но не доказывает эквивалентность вычислений на NPU.
+
+По vLLM v0.25.1 при стандартном O2 mode=None разрешается в VLLM_COMPILE=3
+до применения зависимых optimization defaults; NPUPlatform не переопределяет
+apply_config_platform_defaults. По этому пути явное и автоматическое значение
+3 совпадают. Считать удаление поля установленной причиной `!` нельзя.
+FULL и FULL_DECODE_ONLY проходят has_full_cudagraphs/has_mode(FULL), поэтому
+ветка обёрток target/MTP включена в обоих случаях. Однако decode-only меняет
+dispatch смешанных batch; proposer берёт runtime mode и padding descriptor
+из target runner. Это реальное отличие выполнения, но оно также используется
+в рабочем HTTP, поэтому само по себе не объясняет регрессию omni2.
+
+Источники native defaults: [VllmConfig v0.25.1](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/config/vllm.py#L1088),
+[CUDAGraphMode v0.25.1](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/config/compilation.py#L48).

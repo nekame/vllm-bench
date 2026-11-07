@@ -319,3 +319,15 @@ MTP graph state. Это подтверждает значимость измен
 причину некорректного текста на NPU. Graph/async defaults пока сохранены;
 удаление только graph CLI-флагов по-прежнему не возвращает старые defaults.
 OmniInfer не изменён; новых NPU-прогонов для этой проверки не запрашивали.
+
+Продолжение аудита: по native vLLM v0.25.1 стандартный O2 разрешает mode=None
+в VLLM_COMPILE=3 до зависимых optimization defaults; NPUPlatform не меняет
+platform defaults. Гипотеза о фактической смене compilation mode не подтверждена.
+Подтверждено изменение defaults в 5ca1807: удаление новых CLI-флагов оставляло
+decode-only/[8] и native auto-async вместо прежних FULL/[1,8]/async=false.
+Прежние defaults восстановлены, явные новые graph/async флаги сохранены.
+Два launcher из исходников до 5ca1807 и текущих исходников запущены только
+до построения argv на CPU fixture: теперь native argv совпадает, кроме
+generation-config/override-generation-config из отдельного sampling-коммита.
+Причина некорректных вычислений на NPU не установлена; это исправление
+совместимости аргументов, а не заявленное численное исправление.

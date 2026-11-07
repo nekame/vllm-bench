@@ -230,7 +230,7 @@ async def run_session(plan, args, engine, app, startup):
     spec = cfg.speculative_config
     if (0 if spec is None else spec.num_speculative_tokens) != a["depth"]:
         raise RuntimeError("Native server MTP depth differs from the plan")
-    expected_graph = a.get("cudagraph_mode") or ("FULL_DECODE_ONLY" if "acl" in a["mode"] else "NONE")
+    expected_graph = a.get("cudagraph_mode") or ("FULL" if "acl" in a["mode"] else "NONE")
     if cfg.compilation_config.cudagraph_mode.name != expected_graph:
         raise RuntimeError("Native server graph mode differs from the plan")
     frontend = frontend_state(cfg)
