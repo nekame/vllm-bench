@@ -148,6 +148,17 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
             "post_request_cleanup_seconds": cleanup_seconds}
 
 
+def reset_prefix_cache(engine, request_id):
+    """Invalidate prefix entries between requests; leave model/graphs intact."""
+    if engine.has_unfinished_requests():
+        raise RuntimeError("Cannot reset prefix cache while requests are unfinished")
+    started = time.perf_counter()
+    if not engine.reset_prefix_cache():
+        raise RuntimeError("Omni refused to reset prefix cache")
+    print("[prefix-cache-reset] " + json.dumps({"before_request": request_id,
+          "seconds": time.perf_counter() - started}), flush=True)
+
+
 def create_engine(plan, options):
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.engine.llm_engine import LLMEngine
@@ -194,8 +205,9 @@ def main(argv=None):
     engine = create_engine(plan, options)
     startup_seconds = time.perf_counter() - started
     warmup_start = time.perf_counter()
+    warmup_tokens = a.get("omni_warmup_tokens") or max(2 * (a["depth"] + 1) + 1, 17)
     for i in range(a["warmup"]):
-        request(engine, plan, f"warmup-{i}", max(2 * (a["depth"] + 1) + 1, 17))
+        request(engine, plan, f"warmup-{i}", warmup_tokens)
     warmup_seconds = time.perf_counter() - warmup_start
     states_before = engine.collective_rpc(state_method)
     requested_async = a.get("async_scheduling", False)
@@ -225,6 +237,10 @@ def main(argv=None):
           f"engine_core={core_mode} "
           f"mome_prefill_state_fix={str(requested_fix).lower()} "
           f"timing_boundary={'host_outputs' if host_timing else 'device_complete'}", flush=True)
+    history = a.get("omni_cache_history", "reuse")
+    print("[request-history] " + json.dumps({"prefix_cache": history,
+          "warmup_requests": a["warmup"], "warmup_max_tokens": warmup_tokens,
+          "cold_start_diagnostic": a["warmup"] == 0}), flush=True)
     cache_state = states_before[0]
     print(f"[cache] cache_dtype={cache_state.get('cache_dtype', 'auto')} "
           f"enable_prefix_caching={str(requested_prefix).lower()} "
@@ -255,11 +271,18 @@ def main(argv=None):
             prompt_ids = None if prompt is None else prompt["prompt_ids"]
             for repeat in range(1, a["repeats"] + 1):
                 request_id = f"measure-{len(records)}"
+                cache_reset = history == "cold-each" or (history == "cold-first" and not records)
+                if cache_reset:
+                    reset_prefix_cache(engine, request_id)
                 diagnostic = {}
                 if a.get("trace_mtp_boundary", False):
                     diagnostic["boundary"] = (str(prompt_index), len(records))
                 record = request(engine, plan, request_id, a["max_new_tokens"],
                                  prompt_ids=prompt_ids, **diagnostic)
+                record["prefix_cache_reset"] = cache_reset
+                print("[request-result] " + json.dumps({"request_id": request_id,
+                      "cached_prompt_tokens": record.get("cached_prompt_tokens"),
+                      "prefix_cache_reset": cache_reset}), flush=True)
                 if a.get("trace_mtp_boundary", False):
                     reports = engine.collective_rpc(boundary_trace.finish)
                     boundary_reports.append(reports)
@@ -277,9 +300,12 @@ def main(argv=None):
     if a["profile"]:
         engine.stop_profile()
     states_after = engine.collective_rpc(state_method)
-    if any(before["compile_counter"] != after["compile_counter"]
-           for before, after in zip(states_before, states_after)):
-        raise RuntimeError("Stock engine compiled/captured during measurement; increase warmup")
+    compiled_during_measurement = any(before["compile_counter"] != after["compile_counter"]
+                                     for before, after in zip(states_before, states_after))
+    if compiled_during_measurement:
+        if a["warmup"]:
+            raise RuntimeError("Stock engine compiled/captured during measurement; increase warmup")
+        print("[cold-start] Compiled/captured during diagnostic measurement; timings include this work", flush=True)
     first = states_after[0]
     if any(any(state[key] != first[key] for key in ("operator", "parallel", "block_size", "mamba_block_size"))
            for state in states_after):
@@ -291,11 +317,13 @@ def main(argv=None):
     effective["cache_dtype"] = first.get("cache_dtype", "auto")
     effective["engine_core_mode"] = core_mode
     effective["mome_prefill_state_fix"] = first.get("mome_prefill_state_fix", False)
+    effective["omni_cache_history"] = history
     if "execution_settings" in first:
         effective["execution_settings"] = first["execution_settings"]
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}
     details = {
         "startup_seconds": startup_seconds, "warmup_seconds": warmup_seconds, "workers_before": states_before,
+        "warmup_max_tokens": warmup_tokens, "compiled_during_measurement": compiled_during_measurement,
         "workers_after": states_after, "versions": versions(), "hardware": first["hardware"],
         "timing_boundary": ("offline first-to-final host-visible outputs; final device drain excluded; no HTTP"
                             if host_timing else

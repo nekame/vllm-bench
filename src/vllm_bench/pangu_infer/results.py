@@ -42,6 +42,31 @@ def versions():
     return result
 
 
+def prefix_cache_groups(records, depth, *, greedy):
+    """Report actual hit/miss groups without mixing cold and warm requests."""
+    groups = {}
+    for index, record in enumerate(records):
+        cached = record.get("cached_prompt_tokens")
+        name = "unknown" if cached is None else "hit" if cached > 0 else "miss"
+        groups.setdefault(name, []).append(index)
+    result = {}
+    for name, indices in groups.items():
+        selected = [records[index] for index in indices]
+        tpot = [r["decode_seconds"] * 1000 / r["decode_tokens"] for r in selected if r["decode_tokens"]]
+        accepted = [n for r in selected for n in r.get("accepted_drafts", [])]
+        item = {"record_indices": indices, "requests": len(indices),
+                "median_tpot_ms": statistics.median(tpot) if tpot else None,
+                "acceptance_rate": sum(accepted) / (len(accepted) * depth) if accepted and depth else None}
+        if greedy:
+            check = repeat_consistency(selected)
+            for difference in check["first_differences"]:
+                for key in ("reference_record", "candidate_record"):
+                    difference[key] = indices[difference[key]]
+            item["repeat_consistency"] = check
+        result[name] = item
+    return result
+
+
 def save_result(output, plan, records, effective, details):
     if not records or any(r["decode_seconds"] < 0 or r["decode_tokens"] < 0 for r in records):
         raise ValueError("Invalid decode measurements")
@@ -50,8 +75,11 @@ def save_result(output, plan, records, effective, details):
     seconds = sum(r["decode_seconds"] for r in records)
     tokens = sum(r["decode_tokens"] for r in records)
     accepted = [n for r in records for n in r.get("accepted_drafts", [])]
+    diagnostic = any((a["profile"], a.get("model_timing", False), a.get("trace_target", False),
+                      a.get("memory_diagnostics", False), a.get("trace_mtp_boundary", False),
+                      a["engine"] == "omni" and a.get("warmup", 2) == 0))
     summary = {"format": "pangu-direct-result-v1", "engine": a["engine"],
-               "measurement": "diagnostic" if a["profile"] or a.get("model_timing", False) or a.get("trace_target", False) or a.get("memory_diagnostics", False) or a.get("trace_mtp_boundary", False) else "benchmark",
+               "measurement": "diagnostic" if diagnostic else "benchmark",
                "comparison_sha256": plan["comparison_sha256"],
                "prompt_sha256": plan["prompt_sha256"], "model_scope": plan["model_scope"],
                "checkpoint_identity": plan["checkpoint_identity"],
@@ -69,6 +97,9 @@ def save_result(output, plan, records, effective, details):
     if a.get("temperature", 1) == 0:
         summary["repeat_consistency"] = repeat_consistency(records)
         print("[repeat-check] " + json.dumps(summary["repeat_consistency"]), flush=True)
+    if a["engine"] == "omni" and a.get("enable_prefix_caching", False):
+        summary["prefix_cache_groups"] = prefix_cache_groups(records, a["depth"], greedy=a.get("temperature", 1) == 0)
+        print("[prefix-cache-groups] " + json.dumps(summary["prefix_cache_groups"]), flush=True)
     write_json(Path(output) / "result.json", summary)
     with (Path(output) / "summary.csv").open("w", newline="") as handle:
         fields = ["engine", "measurement", "model_scope", "decode_tokens_per_second", "median_tpot_ms", "acceptance_rate"]

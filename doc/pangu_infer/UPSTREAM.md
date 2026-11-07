@@ -85,6 +85,15 @@ checkout или установленному OmniInfer не нужно. Оба �
 Фактическая идентичность серверных исходников и аргументов оператора
 не установлена; HTTP не объявляется доказанно неправильным.
 
+Для проверки истории HTTP-запросов baseline поддерживает
+`--omni-cache-history reuse|cold-first|cold-each`, `--omni-warmup-tokens`
+и диагностический `--warmup 0`. Сброс prefix cache делается публичным
+`LLMEngine.reset_prefix_cache()` между завершёнными запросами и вне таймера.
+Модель, metadata builders и NPU buffers этим не подменяются/не обнуляются.
+Без прогрева результаты помечаются diagnostic, изменения compile counters
+сохраняются; обычный benchmark по-прежнему требует стабильных counters.
+Статистика hit/miss строится по фактическому RequestOutput.num_cached_tokens.
+
 Определения нейросети в `model/` и явные subclasses в `mome_prefill.py` /
 `omni_worker.py` требуют ML-пакетов уже при импорте,
 как исходные классы OmniInfer. Они загружаются только в исполняющем worker;

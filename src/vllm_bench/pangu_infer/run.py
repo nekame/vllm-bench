@@ -65,6 +65,10 @@ def parser():
                    help="Omni only: enable async scheduling and time decode between host-visible outputs")
     p.add_argument("--omni-multiprocessing", action="store_true",
                    help="Omni only: run EngineCore in its native background process, as in the HTTP server")
+    p.add_argument("--omni-cache-history", choices=("reuse", "cold-first", "cold-each"), default="reuse",
+                   help="Omni APC: retain warmup prefixes, reset before first measured request, or reset before each request")
+    p.add_argument("--omni-warmup-tokens", type=int,
+                   help="Omni only: output token limit for warmup requests; default: max(2*(depth+1)+1, 17)")
     p.add_argument("--fix-mome-prefill-state", action="store_true",
                    help="Use a local metadata adapter for the first target decode after prefill; Omni source stays unchanged")
     p.add_argument("--enable-prefix-caching", action="store_true",
@@ -105,7 +109,8 @@ def parser():
     p.add_argument("--top-k", type=int, default=0)
     p.add_argument("--top-p", type=float, default=1)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--warmup", type=int, default=2, help="Complete warmup requests")
+    p.add_argument("--warmup", type=int, default=2,
+                   help="Complete warmup requests; Omni permits 0 for a diagnostic cold-start run")
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--respect-eos", action="store_true", help="Default: ignore EOS for fixed-length benchmarks")
     p.add_argument("--profile", action="store_true", help="Diagnostic CPU/NPU traces; not benchmark timings")
@@ -145,6 +150,11 @@ def make_plan(a):
         raise ValueError("--compact-kv-cache requires --engine direct")
     if a.async_scheduling and a.engine != "omni":
         raise ValueError("--async-scheduling requires --engine omni")
+    if a.omni_cache_history != "reuse" and (a.engine != "omni" or not a.enable_prefix_caching):
+        raise ValueError("--omni-cache-history requires --engine omni and --enable-prefix-caching")
+    if a.omni_warmup_tokens is not None:
+        if a.engine != "omni" or a.omni_warmup_tokens < 2 or a.warmup == 0:
+            raise ValueError("--omni-warmup-tokens requires --engine omni, positive warmup and at least 2 tokens")
     if a.engine != "omni" and (a.enable_prefix_caching or a.block_size is not None or a.mamba_block_size is not None):
         raise ValueError("--enable-prefix-caching, --block-size and --mamba-block-size require --engine omni")
     if any(value is not None and value <= 0 for value in (a.block_size, a.mamba_block_size)):
@@ -197,8 +207,9 @@ def make_plan(a):
         raise ValueError("--trace-layers requires target trace or replay")
     if a.engine == "omni" and a.mode == "compile":
         raise ValueError("Stock OmniInfer bypasses compile-only without FULL graphs; use a direct run or another baseline mode")
-    if min(a.context_length, a.repeats, a.warmup) < 1 or a.max_new_tokens < 2:
-        raise ValueError("Context, warmup and repeats must be positive; max-new-tokens must be >= 2")
+    if (min(a.context_length, a.repeats) < 1 or a.warmup < 0
+            or (a.warmup == 0 and a.engine != "omni") or a.max_new_tokens < 2):
+        raise ValueError("Context/repeats must be positive, warmup positive (Omni permits 0), max-new-tokens >= 2")
     if a.prefill_chunk_size:
         if a.prefill_chunk_size <= a.depth + 1:
             raise ValueError("prefill-chunk-size must exceed the decode verification window (depth + 1)")
@@ -283,7 +294,7 @@ def make_plan(a):
     # Reserve the largest supported verification window in every run. Besides
     # allowing warmup of short benchmarks, this keeps APC-off MoME block sizes
     # identical for target-only and MTP correctness comparisons.
-    required_len = a.context_length + max(a.max_new_tokens, 17) + 8
+    required_len = a.context_length + max(a.max_new_tokens, 17, a.omni_warmup_tokens or 0) + 8
     max_len = required_len if a.max_model_len is None else a.max_model_len
     if max_len < required_len:
         raise ValueError(f"max-model-len must be at least {required_len}, including generation reserve")
@@ -312,6 +323,12 @@ def make_plan(a):
         match["fix_mome_prefill_state"] = True
     if a.async_scheduling:
         match["async_scheduling"] = True
+    if a.omni_cache_history != "reuse":
+        match["omni_cache_history"] = a.omni_cache_history
+    if a.warmup != 2:
+        match["warmup_requests"] = a.warmup
+    if a.omni_warmup_tokens is not None and a.omni_warmup_tokens != max(2 * (a.depth + 1) + 1, 17):
+        match["omni_warmup_tokens"] = a.omni_warmup_tokens
     if a.enable_prefix_caching:
         match["enable_prefix_caching"] = True
     if a.kv_cache_dtype != "auto":
