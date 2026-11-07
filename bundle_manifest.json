@@ -11,8 +11,9 @@
     "doc/layer_profile/README.md": "55d1abf26e703d853bbe3a3b074959dbb717efff92fb83ac8b968f284624222e",
     "doc/mtp_debug/README.md": "5b0b5f24acfaf8c6688fac3b0678d02a49b67dc4c4537813a4f975ed4f056bc0",
     "doc/mtp_profile/README.md": "7e8f28879945d10204269ec9254c4acd17bc42e9d51a16be290dd9af7905fda6",
-    "doc/pangu_infer/README.md": "d6f2d211435ceac43be851be116032a3446ea8b7ddae90cc5a5b5ac400bc949b",
-    "doc/pangu_infer/UPSTREAM.md": "9ac2555268c293ff65ce5568f1c8508c44d154d801ce0dd1e246b26786d3ba70",
+    "doc/pangu_infer/HTTP_EQUIVALENCE_REVIEW.md": "f3b2837c9abc2084f06a3abb1e2b6a1e510d488ccd5f9cad64249da3a5a30774",
+    "doc/pangu_infer/README.md": "4e6462ba3dba395b571300edd056a794bfd0f09a1f8d02ffccfe48833227fb54",
+    "doc/pangu_infer/UPSTREAM.md": "150504d0ec27ccefeb7718a44ba26907ca1b959a531b8b2fa3075b0f372d56e8",
     "doc/reference/COMPILATION_EAGER_RU.md": "93623f5505259216fe7a61db4f2685da50d8c95654812118e9a154c8eea21318",
     "doc/reference/NPU_STREAMS_RU.md": "2cb48f42007fe6b57ca68e2abcfcb94cf11051d0a9d3b2b12fd7fa437f216920",
     "doc/reference/PANGU_505B_RU.md": "3105fd8bf9ae2510d3a3931b04aa29905dad2b7cde2a34ea7a4e3dfbbcc0ec1e",
@@ -52,7 +53,7 @@
     "src/vllm_bench/mtp_profile/record_mtp.py": "bbfc207f01c78f49787f1ea14df5c73932f667eb8304b1a457fe6aad9549811a",
     "src/vllm_bench/mtp_profile/verify_mtp_checkpoint.py": "25c235d89abc293930991a22da4355e887c77192f119b281ebe63ef736e69157",
     "src/vllm_bench/pangu_infer/__init__.py": "1e9ddf67fce354fe8cf498e533e9af8efc379719aadda785f8d7f4a0a5807463",
-    "src/vllm_bench/pangu_infer/audit.py": "eafbf271ad1269bfa102fafae581622507d6205a912aec715ea52b367140dabb",
+    "src/vllm_bench/pangu_infer/audit.py": "984c0c595a8b3252f5151d1e434ca1cef084825fa6549db5cd4a14dfa8510f6c",
     "src/vllm_bench/pangu_infer/baseline.py": "94c18002ebc57a3a6bf71b9af7e4eb7315ce56a8190674c9d5944aa215c01174",
     "src/vllm_bench/pangu_infer/boundary_trace.py": "71c8eb1d18c8048d1e0027b227faa5e6ee53f180190c0d3cf76f06a187c069ee",
     "src/vllm_bench/pangu_infer/cache.py": "e53673735c6347d05b176be4b57261f9ddb7ad53c40adf5144b53266debcbcc4",
@@ -165,6 +166,7 @@
     "pangu_infer_mome_cpu_numerical_tests_executed": false,
     "pangu_infer_mome_cpu_test_harness_validation": "Added 9 real-PyTorch CPU tests loading the original full MoME builder and causal_conv1d_ref source modules with import-only framework/hardware stand-ins. Candidate patch is applied only to a temporary copy; original/reference bytes preserved, upstream bytecode writes disabled. Tests cover depth3/7, context8192 and adjacent boundaries, APC on/off, float32/BF16, future-page poison sensitivity versus uninterrupted reference, target-only/chunked-prefill controls, draft/later-target/PD metadata and persistent CPU buffer aliasing. Standalone runner disables backend autoload, reports timing/RSS/source hashes, and refuses success with skipped/missing tests. Astra fixed-reviewed reference tuple unpacking and read-only loader behavior. Infrastructure tests verify module/flag restoration, temporary patch isolation and exit2 without torch. 260 tests ran: 245 passed, 15 skipped (9 new numerical plus 6 existing torch tests). Actual numerical suite NOT executed: torch absent, pip download blocked by DNS, no cached wheel found. No model weights, NPU execution or OmniInfer edits.",
     "pangu_infer_mome_local_adapter_validation": "Explicit --fix-mome-prefill-state selects a local MoME metadata subclass in both direct and Omni; default path retains the original factory/builders. Omni selects its local NPUWorker after native config creation, installs local builders after KV initialization before warmup, preserves original kv_cache_spec and bound prompt buffer, and refreshes native proposer references. Worker markers/count are checked and recorded; policy changes comparison identity. CPU protocol tests cover default/corrected factory and MP paths, named extension propagation, accepted-input isolation, draft/PD guards, worker installation and direct lane selection. Astra source review found no runtime defects. 269 tests ran: 253 passed, 16 skipped (10 MoME numerical and 6 other torch tests). Updated numerical suite exercises the actual local adapter and compares it with the temporary-patch control; not executed locally because torch is unavailable. User reported all 9 previous temporary-patch numerical tests passed. NPU behavior and HTTP token equality remain unverified. No OmniInfer checkout or installed-package edits are needed or performed.",
-    "pangu_infer_mome_cpu_numerical_user_report": "Previous suite: 9 tests passed in 0.333 seconds, as reported by the user. This predates local adapter integration and the tenth equivalence test; updated suite not yet numerically verified."
+    "pangu_infer_mome_cpu_numerical_user_report": "Previous suite: 9 tests passed in 0.333 seconds, as reported by the user. This predates local adapter integration and the tenth equivalence test; updated suite not yet numerically verified.",
+    "pangu_infer_http_after_mome_fix_review": "User reported repeat stability with the local MoME adapter, but HTTP still diverges around output token 2-3. Two independent Astra read-only reviews found no additional proven adapter/proposer/engine-construction defects. Source review of local Omni and official vLLM v0.25.1 predicts native first verification accepted1/block64 versus corrected accepted8/block63 at context8192, depth7, block128; remote HTTP source/version/kernel arguments remain unknown, so a server defect is not declared proven. Preserved first single-token draft boundary is a separate unconfirmed shared-path hypothesis; no speculative draft fix applied. Added review report and source fingerprints for InputBatch, spec-decode utils and LLMEngine. Four audit CPU tests passed. No new NPU runs or inference policy changes; OmniInfer remains read-only."
   }
 }

@@ -11,6 +11,9 @@ import sys
 
 SOURCES = {
     "vllm.v1.worker.gpu_model_runner": ("vllm", "v1/worker/gpu_model_runner.py"),
+    "vllm.v1.worker.gpu_input_batch": ("vllm", "v1/worker/gpu_input_batch.py"),
+    "vllm.v1.spec_decode.utils": ("vllm", "v1/spec_decode/utils.py"),
+    "vllm.v1.engine.llm_engine": ("vllm", "v1/engine/llm_engine.py"),
     "vllm.v1.core.single_type_kv_cache_manager": ("vllm", "v1/core/single_type_kv_cache_manager.py"),
     "omni_npu.worker.npu_model_runner": ("omni_npu", "worker/npu_model_runner.py"),
     "omni_npu.attention.backends.mome": ("omni_npu", "attention/backends/mome.py"),
