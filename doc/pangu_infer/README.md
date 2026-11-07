@@ -99,7 +99,12 @@ decode уже может исполняться. Финальная синхро
 По умолчанию сохраняется `VLLM_ENABLE_V1_MULTIPROCESSING=0`, в том числе
 при async scheduling. Это offline LLMEngine с in-process EngineCore.
 
-Для проверки различий со штатным HTTP-запуском добавьте
+Отдельный `--engine omni2` использует штатные HTTP server helpers,
+AsyncLLM/AsyncMPClient и CompletionRequest без HTTP listener. Он сохраняет
+native tokenizer/sampling/MTP и запрещает локальную MoME-корректировку.
+Инструкция и отличия измерений: [OMNI2.md](OMNI2.md).
+
+Для проверки процессного core в прежнем `--engine omni` добавьте
 `--omni-multiprocessing`: launcher устанавливает
 `VLLM_ENABLE_V1_MULTIPROCESSING=1`, а `LLMEngine.from_engine_args()` вызывается
 с `enable_multiprocessing=True`. EngineCore работает в штатном фоновом

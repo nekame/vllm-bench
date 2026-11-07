@@ -60,7 +60,9 @@ def parser():
                    help="Force PanguUltraMoEForCausalLM regardless of config.architectures; retain all other config fields")
     p.add_argument("--operator-config", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--engine", choices=("direct", "omni"), default="direct")
+    p.add_argument("--engine", choices=("direct", "omni", "omni2"), default="direct")
+    p.add_argument("--omni2-server-args", type=Path,
+                   help="Omni2 only: JSON array of additional native vllm serve arguments")
     p.add_argument("--async-scheduling", action="store_true",
                    help="Omni only: enable async scheduling and time decode between host-visible outputs")
     p.add_argument("--omni-multiprocessing", action="store_true",
@@ -100,7 +102,8 @@ def parser():
     prompt = p.add_mutually_exclusive_group()
     prompt.add_argument("--prompt-ids", type=Path, help="JSON array of exactly context-length token IDs")
     prompt.add_argument("--prompts", type=Path, help="JSON array of {id, input} text prompts")
-    p.add_argument("--tokenizer", type=Path, help="Tokenizer directory for --prompts; default: model directory")
+    p.add_argument("--tokenizer", type=Path,
+                   help="Tokenizer directory for --prompts or native omni2; default: model directory")
     p.add_argument("--context-length", type=int, default=8192)
     p.add_argument("--prefill-chunk-size", type=int, default=0,
                    help="Prefill token budget for both engines; 0 disables chunking, e.g. 2048 for context 8192")
@@ -109,8 +112,8 @@ def parser():
     p.add_argument("--top-k", type=int, default=0)
     p.add_argument("--top-p", type=float, default=1)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--warmup", type=int, default=2,
-                   help="Complete warmup requests; Omni permits 0 for a diagnostic cold-start run")
+    p.add_argument("--warmup", type=int,
+                   help="Complete warmup requests; defaults: direct/omni=2, omni2=0; stock engines permit 0")
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--respect-eos", action="store_true", help="Default: ignore EOS for fixed-length benchmarks")
     p.add_argument("--profile", action="store_true", help="Diagnostic CPU/NPU traces; not benchmark timings")
@@ -136,26 +139,33 @@ def parser():
 
 
 def make_plan(a):
+    if a.warmup is None:
+        a.warmup = 0 if a.engine == "omni2" else 2
     options = {key: str(value.resolve()) if isinstance(value, Path) else value
                for key, value in vars(a).items()}
+    stock_engine = a.engine in ("omni", "omni2")
+    if a.omni2_server_args is not None and a.engine != "omni2":
+        raise ValueError("--omni2-server-args requires --engine omni2")
+    if a.engine == "omni2" and (a.fix_mome_prefill_state or a.trace_target or a.trace_mtp_boundary):
+        raise ValueError("omni2 uses the native HTTP worker; omit local MoME correction and trace flags")
     if not a.kv_cache_dtype.strip():
         raise ValueError("--kv-cache-dtype must not be empty")
     if a.cudagraph_capture_sizes is not None:
-        if a.engine != "omni" or "acl" not in a.mode:
+        if not stock_engine or "acl" not in a.mode:
             raise ValueError("--cudagraph-capture-sizes requires --engine omni and an ACL mode")
         if min(a.cudagraph_capture_sizes) < 1 or max(a.cudagraph_capture_sizes) < a.depth + 1:
             raise ValueError("Capture sizes must be positive and cover the target verification window")
         options["cudagraph_capture_sizes"] = sorted(set(a.cudagraph_capture_sizes))
     if a.compact_kv_cache and a.engine != "direct":
         raise ValueError("--compact-kv-cache requires --engine direct")
-    if a.async_scheduling and a.engine != "omni":
+    if a.async_scheduling and not stock_engine:
         raise ValueError("--async-scheduling requires --engine omni")
-    if a.omni_cache_history != "reuse" and (a.engine != "omni" or not a.enable_prefix_caching):
+    if a.omni_cache_history != "reuse" and (not stock_engine or not a.enable_prefix_caching):
         raise ValueError("--omni-cache-history requires --engine omni and --enable-prefix-caching")
     if a.omni_warmup_tokens is not None:
-        if a.engine != "omni" or a.omni_warmup_tokens < 2 or a.warmup == 0:
+        if not stock_engine or a.omni_warmup_tokens < 2 or a.warmup == 0:
             raise ValueError("--omni-warmup-tokens requires --engine omni, positive warmup and at least 2 tokens")
-    if a.engine != "omni" and (a.enable_prefix_caching or a.block_size is not None or a.mamba_block_size is not None):
+    if not stock_engine and (a.enable_prefix_caching or a.block_size is not None or a.mamba_block_size is not None):
         raise ValueError("--enable-prefix-caching, --block-size and --mamba-block-size require --engine omni")
     if any(value is not None and value <= 0 for value in (a.block_size, a.mamba_block_size)):
         raise ValueError("Cache block sizes must be positive")
@@ -178,7 +188,7 @@ def make_plan(a):
     if a.fix_mome_prefill_state and not a.depth:
         raise ValueError("--fix-mome-prefill-state requires positive MTP depth")
     diagnostic_trace = a.trace_target or a.replay_target is not None
-    if a.omni_multiprocessing and a.engine != "omni":
+    if a.omni_multiprocessing and not stock_engine:
         raise ValueError("--omni-multiprocessing requires --engine omni")
     if a.omni_multiprocessing and (diagnostic_trace or a.trace_mtp_boundary):
         raise ValueError("Target and MTP boundary traces require the in-process engine; omit --omni-multiprocessing")
@@ -190,7 +200,7 @@ def make_plan(a):
         raise ValueError("Target trace/replay requires disabled prefix caching")
     if a.async_scheduling and diagnostic_trace:
         raise ValueError("Target trace/replay requires synchronous scheduling")
-    if a.tokenizer and not a.prompts:
+    if a.tokenizer and not a.prompts and a.engine != "omni2":
         raise ValueError("--tokenizer requires --prompts")
     if a.prompts and diagnostic_trace:
         raise ValueError("Text prompt batches cannot be combined with target trace/replay; use --prompt-ids")
@@ -205,10 +215,10 @@ def make_plan(a):
             raise ValueError("Use --trace-target with omni and --replay-target with direct")
     elif a.trace_layers:
         raise ValueError("--trace-layers requires target trace or replay")
-    if a.engine == "omni" and a.mode == "compile":
+    if stock_engine and a.mode == "compile":
         raise ValueError("Stock OmniInfer bypasses compile-only without FULL graphs; use a direct run or another baseline mode")
     if (min(a.context_length, a.repeats) < 1 or a.warmup < 0
-            or (a.warmup == 0 and a.engine != "omni") or a.max_new_tokens < 2):
+            or (a.warmup == 0 and not stock_engine) or a.max_new_tokens < 2):
         raise ValueError("Context/repeats must be positive, warmup positive (Omni permits 0), max-new-tokens >= 2")
     if a.prefill_chunk_size:
         if a.prefill_chunk_size <= a.depth + 1:
@@ -329,6 +339,8 @@ def make_plan(a):
         match["warmup_requests"] = a.warmup
     if a.omni_warmup_tokens is not None and a.omni_warmup_tokens != max(2 * (a.depth + 1) + 1, 17):
         match["omni_warmup_tokens"] = a.omni_warmup_tokens
+    if a.engine == "omni2":
+        match["request_defaults"] = "native-openai-completion"
     if a.enable_prefix_caching:
         match["enable_prefix_caching"] = True
     if a.kv_cache_dtype != "auto":
@@ -352,6 +364,16 @@ def make_plan(a):
             "quantization": quantization, "model_scope": scope,
             "predictor_layers": predictor_sequence(config, a.depth) if a.depth else [],
             "upstream_commit": UPSTREAM, "validation": "NPU execution not yet performed"}
+    if a.omni2_server_args is not None:
+        server_args = json.loads(a.omni2_server_args.read_text())
+        if not isinstance(server_args, list) or not all(isinstance(value, str) for value in server_args):
+            raise ValueError("omni2-server-args must contain a JSON array of CLI strings")
+        plan["omni2_server_args"] = server_args
+        match["omni2_server_args"] = server_args
+        plan["comparison_sha256"] = fingerprint(match)
+    if a.engine == "omni2":
+        from vllm_bench.pangu_infer.omni2 import server_argv
+        plan["omni2_server_argv"] = server_argv(plan)
     if prompts is not None:
         plan["prompts"] = prompts
     if diagnostic_trace:
@@ -365,14 +387,23 @@ def make_plan(a):
 def child_environment(plan):
     env = os.environ.copy()
     env["PYTHONPATH"] = instrumentation_pythonpath(env, None)
-    for name in RESET_ENV:
-        env.pop(name, None)
+    native_server = plan["options"]["engine"] == "omni2"
+    if not native_server:
+        for name in RESET_ENV:
+            env.pop(name, None)
     env.update(OMNI_CUSTOM_MODEL_CONFIG_PATH=plan["options"]["operator_config"],
                OMNI_VLLM_PATCHES_DIR="high_throughout", OMNI_PANGU_V2_HIGH_THROUGHOUT="1",
-               VLLM_USE_V2_MODEL_RUNNER="0", VLLM_USE_AOT_COMPILE="0", OMNI_DRAFT_TOP_K="-1",
                PYTHONUNBUFFERED="1")
+    if native_server:
+        for name in ("OMNI_VLLM_PATCHES_DIR", "OMNI_PANGU_V2_HIGH_THROUGHOUT"):
+            if name in os.environ:
+                env[name] = os.environ[name]
+    else:
+        env.update(VLLM_USE_V2_MODEL_RUNNER="0", VLLM_USE_AOT_COMPILE="0", OMNI_DRAFT_TOP_K="-1")
     if plan["options"]["engine"] == "omni":
         env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1" if plan["options"].get("omni_multiprocessing", False) else "0"
+    elif native_server and plan["options"].get("omni_multiprocessing", False):
+        env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
     plugins = [name for name in env.get("VLLM_PLUGINS", "").split(",") if name]
     # vLLM applies this allow-list to platform plugins as well as general
     # plugins. Omitting omni-npu leaves current_platform.device_type empty.
@@ -395,7 +426,8 @@ def launch(plan):
     output.mkdir(parents=True)
     plan_path = output / "launch_plan.json"
     write_json(plan_path, plan)
-    module = "vllm_bench.pangu_infer.runtime" if plan["options"]["engine"] == "direct" else "vllm_bench.pangu_infer.baseline"
+    modules = {"direct": "runtime", "omni": "baseline", "omni2": "omni2"}
+    module = "vllm_bench.pangu_infer." + modules[plan["options"]["engine"]]
     if plan["options"]["engine"] == "direct":
         command = [sys.executable, "-m", "torch.distributed.run", "--standalone",
                    f"--nproc-per-node={plan['options']['tp']}", "--module", module, "--plan", str(plan_path)]

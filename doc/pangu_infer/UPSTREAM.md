@@ -55,6 +55,18 @@ static sinks и необходимые vLLM adaptations загружаются �
 этот фильтр к platform entry points, а не только к general plugins.
 Это штатные patches установленного OmniInfer, а не новые подмены PoC.
 
+`omni2.py` использует сам установленный HTTP frontend vLLM без listener:
+native CLI parser и environment setup, `build_async_engine_client`,
+`init_app_state`, `OpenAIServingCompletion.create_completion`.
+Это AsyncLLM/AsyncMPClient с OpenAI server UsageContext, OnlineRenderer,
+tokenizer и штатным преобразованием CompletionRequest. Входы — token IDs,
+выход — native SSE stream, который читается локально. Код серверных методов
+не копируется и не переопределяется. API сверены по vLLM v0.25.1; worker
+и source fingerprints записываются на исполняющей машине. MoME-корректировка
+и boundary hooks в omni2 запрещены. Дополнительный worker extension даёт
+только read-only audit RPC на границах серии; внутри запросов RPC sync/drain
+не выполняются. Детали и ограничения: [OMNI2.md](OMNI2.md).
+
 Корректировка MoME prefill-state реализована локально в `mome_prefill.py`
 под явным флагом `--fix-mome-prefill-state`. Класс наследует исходный
 `NPUMomeAttentionMetadataBuilder`: для non-PD target на границе

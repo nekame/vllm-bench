@@ -77,7 +77,7 @@ def save_result(output, plan, records, effective, details):
     accepted = [n for r in records for n in r.get("accepted_drafts", [])]
     diagnostic = any((a["profile"], a.get("model_timing", False), a.get("trace_target", False),
                       a.get("memory_diagnostics", False), a.get("trace_mtp_boundary", False),
-                      a["engine"] == "omni" and a.get("warmup", 2) == 0))
+                      a["engine"] in ("omni", "omni2") and a.get("warmup", 2) == 0))
     summary = {"format": "pangu-direct-result-v1", "engine": a["engine"],
                "measurement": "diagnostic" if diagnostic else "benchmark",
                "comparison_sha256": plan["comparison_sha256"],
@@ -97,7 +97,7 @@ def save_result(output, plan, records, effective, details):
     if a.get("temperature", 1) == 0:
         summary["repeat_consistency"] = repeat_consistency(records)
         print("[repeat-check] " + json.dumps(summary["repeat_consistency"]), flush=True)
-    if a["engine"] == "omni" and a.get("enable_prefix_caching", False):
+    if a["engine"] in ("omni", "omni2") and a.get("enable_prefix_caching", False):
         summary["prefix_cache_groups"] = prefix_cache_groups(records, a["depth"], greedy=a.get("temperature", 1) == 0)
         print("[prefix-cache-groups] " + json.dumps(summary["prefix_cache_groups"]), flush=True)
     write_json(Path(output) / "result.json", summary)
@@ -108,13 +108,15 @@ def save_result(output, plan, records, effective, details):
         writer.writerow({key: summary[key] for key in fields})
     if plan.get("prompts"):
         from vllm_bench.pangu_infer.prompts import load_tokenizer
-        tokenizer = load_tokenizer(a.get("tokenizer") or a["model"])
+        tokenizer = (load_tokenizer(a.get("tokenizer") or a["model"])
+                     if any("text" not in record for record in records) else None)
         with (Path(output) / "generations.csv").open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=["id", "text", "tpot"])
             writer.writeheader()
             for record in records:
                 writer.writerow({"id": record["id"],
-                                 "text": tokenizer.decode(record["token_ids"], skip_special_tokens=True),
+                                 "text": record["text"] if "text" in record else tokenizer.decode(
+                                     record["token_ids"], skip_special_tokens=True),
                                  "tpot": record["decode_seconds"] * 1000 / record["decode_tokens"]
                                  if record["decode_tokens"] else None})
     return summary

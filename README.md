@@ -7,7 +7,7 @@
 | `layer_profile` | Сокращённый checkpoint на 12 слоях (также 6/9) с опциональным сохранением MTP, полная модель; HTTP benchmark и NPU traces | [Профилирование слоёв](doc/layer_profile/README.md) |
 | `mtp_profile` | MTP checkpoint, synthetic profiling, запись и replay реальных входов без target model | [Профилирование MTP](doc/mtp_profile/README.md) |
 | `mtp_debug` | Проверка greedy acceptance, rejection windows и состояния MoME в полном запуске | [Отладка MTP](doc/mtp_debug/README.md) |
-| `pangu_infer` | Прямой batch-one Pangu Ultra runtime: TP1/2/4/8, MTP3/7, compile/ACL и offline comparison | [PoC инференса](doc/pangu_infer/README.md) |
+| `pangu_infer` | Прямой Pangu Ultra runtime, baseline omni и серверный omni2 без HTTP: TP1/2/4/8, MTP3/7, compile/ACL | [PoC инференса](doc/pangu_infer/README.md) |
 
 ## Начало работы
 

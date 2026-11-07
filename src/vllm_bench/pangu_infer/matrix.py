@@ -29,7 +29,7 @@ def plans(spec, root):
             for depth in spec.get("depths", [3, 7]):
                 for mode in spec.get("modes", list(MODES)):
                     for engine in spec.get("engines", ["omni", "direct"]):
-                        if engine == "omni" and mode == "compile":
+                        if engine in ("omni", "omni2") and mode == "compile":
                             continue  # Stock decorator explicitly bypasses this mode.
                         directory = output / f"model-{i}-tp{tp}-mtp{depth}-{mode}-{engine}"
                         args = run_parser().parse_args([
