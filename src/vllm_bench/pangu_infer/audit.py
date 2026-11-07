@@ -16,6 +16,8 @@ SOURCES = {
     "vllm.v1.engine.llm_engine": ("vllm", "v1/engine/llm_engine.py"),
     "vllm.v1.engine.async_llm": ("vllm", "v1/engine/async_llm.py"),
     "vllm.entrypoints.openai.api_server": ("vllm", "entrypoints/openai/api_server.py"),
+    "vllm.entrypoints.serve.utils.server_utils": ("vllm", "entrypoints/serve/utils/server_utils.py"),
+    "vllm.utils.gc_utils": ("vllm", "utils/gc_utils.py"),
     "vllm.entrypoints.openai.completion.serving": ("vllm", "entrypoints/openai/completion/serving.py"),
     "vllm.entrypoints.openai.completion.protocol": ("vllm", "entrypoints/openai/completion/protocol.py"),
     "vllm.v1.core.single_type_kv_cache_manager": ("vllm", "v1/core/single_type_kv_cache_manager.py"),

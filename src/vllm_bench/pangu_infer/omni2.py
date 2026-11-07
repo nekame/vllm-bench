@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 import time
 
-from vllm_bench.pangu_infer.runtime import engine_options
-from vllm_bench.pangu_infer.audit import runtime_manifest
+from vllm_bench.pangu_infer.runtime import config_json, engine_options
+from vllm_bench.pangu_infer.audit import execution_settings, runtime_manifest
 from vllm_bench.pangu_infer.results import save_result, versions
 from vllm_bench.pangu_infer.run import write_json
 
@@ -20,16 +20,15 @@ def server_argv(plan):
         options["speculative_config"] = {"method": "mtp", "num_speculative_tokens": plan["options"]["depth"]}
     if plan["options"].get("tokenizer"):
         options["tokenizer"] = plan["options"]["tokenizer"]
-    # This extension only exposes read-only audit RPCs; it has no constructor
-    # or overrides of model/worker methods. There are no per-request RPCs.
-    options["worker_extension_cls"] = "vllm_bench.pangu_infer.baseline.OmniBaselineWorkerExtension"
+    if plan["options"].get("omni2_audit", False):
+        options["worker_extension_cls"] = "vllm_bench.pangu_infer.baseline.OmniBaselineWorkerExtension"
     options["served_model_name"] = "pangu-omni2"
     options["enable_prompt_tokens_details"] = True
     if plan["options"]["profile"]:
         options["profiler_config"] = {"profiler": "torch", "ignore_frontend": True,
                                       "torch_profiler_dir": str(Path(plan["options"]["output"]) / "traces")}
     extra = plan.get("omni2_server_args", [])
-    protected = set(options) | {"model_tag", "worker_cls", "tokenizer", "skip_tokenizer_init", "config",
+    protected = set(options) | {"model_tag", "worker_cls", "worker_extension_cls", "tokenizer", "skip_tokenizer_init", "config",
                                 "headless", "api_server_count", "grpc", "pipeline_parallel_size",
                                 "revision", "code_revision", "tokenizer_revision", "quantization",
                                 "load_format", "model_impl", "enable_lora", "lora_modules",
@@ -132,35 +131,40 @@ async def request(serving, plan, model, prompt_ids, limit):
             "stream_tail_seconds": ended - last_time}
 
 
-def check_workers(plan, states):
-    if not states:
-        raise RuntimeError("Native server returned no worker audit state")
+def check_settings(plan, state):
     a = plan["options"]
     expected = {"async_scheduling": a.get("async_scheduling", False),
                 "enable_prefix_caching": a.get("enable_prefix_caching", False),
                 "cache_dtype": a.get("kv_cache_dtype", "auto")}
+    if state.get("mome_prefill_state_fix", False):
+        raise RuntimeError("omni2 requires the unmodified native MoME builder")
+    for key, value in expected.items():
+        if state.get(key) != value:
+            raise RuntimeError(f"Native server {key} differs from the requested setting")
+    for key in ("block_size", "mamba_block_size"):
+        if a.get(key) is not None and state[key] != a[key]:
+            raise RuntimeError(f"Native server {key} differs from the requested setting")
+    settings = state["execution_settings"]
+    if state["compilation"] != (3 if "compile" in a["mode"] else 0):
+        raise RuntimeError("Native server compilation mode differs from the plan")
+    if settings["dtype"] != "torch.bfloat16":
+        raise RuntimeError("Native server dtype differs from the planned bfloat16")
+    for key, value in (("max_model_len", plan["max_model_len"]), ("max_num_seqs", 1),
+                       ("max_num_batched_tokens", a.get("prefill_chunk_size", 0) or plan["max_model_len"])):
+        if settings[key] != value:
+            raise RuntimeError(f"Native server {key} differs; align run.py and omni2-server-args")
+    if settings["enable_chunked_prefill"] != bool(a.get("prefill_chunk_size", 0)):
+        raise RuntimeError("Native server chunked prefill differs from the requested setting")
+    if a.get("cudagraph_capture_sizes") is not None and sorted(settings["cudagraph_capture_sizes"]) != a["cudagraph_capture_sizes"]:
+        raise RuntimeError("Native server capture sizes differ from the requested setting")
+
+
+def check_workers(plan, states):
+    if not states:
+        raise RuntimeError("Native server returned no worker audit state")
+    a = plan["options"]
     for state in states:
-        if state.get("mome_prefill_state_fix", False):
-            raise RuntimeError("omni2 requires the unmodified native MoME builder")
-        for key, value in expected.items():
-            if state.get(key) != value:
-                raise RuntimeError(f"Native server {key} differs from the requested setting")
-        for key in ("block_size", "mamba_block_size"):
-            if a.get(key) is not None and state[key] != a[key]:
-                raise RuntimeError(f"Native server {key} differs from the requested setting")
-        settings = state["execution_settings"]
-        if state["compilation"] != (3 if "compile" in a["mode"] else 0):
-            raise RuntimeError("Native server compilation mode differs from the plan")
-        if settings["dtype"] != "torch.bfloat16":
-            raise RuntimeError("Native server dtype differs from the planned bfloat16")
-        for key, value in (("max_model_len", plan["max_model_len"]), ("max_num_seqs", 1),
-                           ("max_num_batched_tokens", a.get("prefill_chunk_size", 0) or plan["max_model_len"])):
-            if settings[key] != value:
-                raise RuntimeError(f"Native server {key} differs; align run.py and omni2-server-args")
-        if settings["enable_chunked_prefill"] != bool(a.get("prefill_chunk_size", 0)):
-            raise RuntimeError("Native server chunked prefill differs from the requested setting")
-        if a.get("cudagraph_capture_sizes") is not None and sorted(settings["cudagraph_capture_sizes"]) != a["cudagraph_capture_sizes"]:
-            raise RuntimeError("Native server capture sizes differ from the requested setting")
+        check_settings(plan, state)
         if "acl" in a["mode"] and not state["compile_counter"].get("num_cudagraph_captured", 0):
             raise RuntimeError("Native server did not capture ACL graphs")
         if "compile" in a["mode"] and not (state["compile_counter"].get("num_graphs_seen", 0)
@@ -168,94 +172,120 @@ def check_workers(plan, states):
             raise RuntimeError("Native server did not trace a compiled model")
 
 
-async def run(plan, args):
-    from starlette.datastructures import State
-    from vllm.entrypoints.openai.api_server import build_async_engine_client, init_app_state
+def frontend_state(cfg):
+    """Only frontend-known settings; no claims about worker-local state."""
+    cache = cfg.cache_config
+    return {"operator": None, "parallel": None, "hardware": None,
+            "block_size": cache.block_size, "mamba_block_size": cache.mamba_block_size,
+            "cache_dtype": cache.cache_dtype, "mamba_cache_mode": config_json(cache.mamba_cache_mode),
+            "async_scheduling": bool(cfg.scheduler_config.async_scheduling),
+            "enable_prefix_caching": bool(cache.enable_prefix_caching),
+            "compilation": config_json(cfg.compilation_config.mode),
+            "cudagraph": config_json(cfg.compilation_config.cudagraph_mode),
+            "execution_settings": config_json(execution_settings(cfg))}
 
+
+async def run_session(plan, args, engine, app, startup):
     a, output = plan["options"], Path(plan["options"]["output"])
+    serving = app.state.openai_serving_completion
+    if serving is None:
+        raise RuntimeError("Native server did not initialize completion serving")
+    cfg = engine.vllm_config
+    if (cfg.parallel_config.tensor_parallel_size != a["tp"] or cfg.parallel_config.data_parallel_size != 1
+            or cfg.parallel_config.pipeline_parallel_size != 1 or cfg.parallel_config.enable_expert_parallel):
+        raise RuntimeError("Native server parallel configuration differs from the planned pure TP")
+    if cfg.model_config.model != a["model"] or cfg.model_config.hf_config.architectures != ["PanguUltraMoEForCausalLM"]:
+        raise RuntimeError("Native server model differs from the planned Ultra checkpoint")
+    spec = cfg.speculative_config
+    if (0 if spec is None else spec.num_speculative_tokens) != a["depth"]:
+        raise RuntimeError("Native server MTP depth differs from the plan")
+    if cfg.compilation_config.cudagraph_mode.has_full_cudagraphs() != ("acl" in a["mode"]):
+        raise RuntimeError("Native server graph mode differs from the plan")
+    frontend = frontend_state(cfg)
+    check_settings(plan, frontend)
+    model = args.served_model_name[0] if args.served_model_name else args.model
+    warmup_tokens = a.get("omni_warmup_tokens") or max(2 * (a["depth"] + 1) + 1, 17)
     started = time.perf_counter()
-    async with build_async_engine_client(args) as engine:
-        state = State()
-        tasks = await engine.get_supported_tasks()
-        await init_app_state(engine, state, args, tasks)
-        serving = state.openai_serving_completion
-        if serving is None:
-            raise RuntimeError("Native server did not initialize completion serving")
-        cfg = engine.vllm_config
-        if (cfg.parallel_config.tensor_parallel_size != a["tp"] or cfg.parallel_config.data_parallel_size != 1
-                or cfg.parallel_config.pipeline_parallel_size != 1 or cfg.parallel_config.enable_expert_parallel):
-            raise RuntimeError("Native server parallel configuration differs from the planned pure TP")
-        if cfg.model_config.model != a["model"] or cfg.model_config.hf_config.architectures != ["PanguUltraMoEForCausalLM"]:
-            raise RuntimeError("Native server model differs from the planned Ultra checkpoint")
-        spec = cfg.speculative_config
-        if (0 if spec is None else spec.num_speculative_tokens) != a["depth"]:
-            raise RuntimeError("Native server MTP depth differs from the plan")
-        if cfg.compilation_config.cudagraph_mode.has_full_cudagraphs() != ("acl" in a["mode"]):
-            raise RuntimeError("Native server graph mode differs from the plan")
-        startup = time.perf_counter() - started
-        model = args.served_model_name[0] if args.served_model_name else args.model
-        warmup_tokens = a.get("omni_warmup_tokens") or max(2 * (a["depth"] + 1) + 1, 17)
-        started = time.perf_counter()
-        for _ in range(a["warmup"]):
-            await request(serving, plan, model, plan["prompt_ids"], warmup_tokens)
-        warmup = time.perf_counter() - started
-        before = await engine.collective_rpc("pangu_bench_worker_state")
+    for _ in range(a["warmup"]):
+        await request(serving, plan, model, plan["prompt_ids"], warmup_tokens)
+    warmup = time.perf_counter() - started
+    audit = a.get("omni2_audit", False)
+    before = await engine.collective_rpc("pangu_bench_worker_state") if audit else None
+    if audit:
         check_workers(plan, before)
-        history = a.get("omni_cache_history", "reuse")
-        print(f"[execution] engine=omni2 client={type(engine).__name__} core={type(engine.engine_core).__name__} "
-              f"mome_prefill_state_fix=false async_scheduling={a.get('async_scheduling', False)}", flush=True)
-        records = []
+    history = a.get("omni_cache_history", "reuse")
+    print(f"[execution] engine=omni2 client={type(engine).__name__} core={type(engine.engine_core).__name__} "
+          f"native_lifespan=true worker_audit={str(audit).lower()} "
+          f"mome_prefill_state_fix=false async_scheduling={a.get('async_scheduling', False)}", flush=True)
+    records = []
+    if a["profile"]:
+        await engine.start_profile()
+    try:
+        for prompt in plan.get("prompts", [None]):
+            ids = plan["prompt_ids"] if prompt is None else prompt["prompt_ids"]
+            for repeat in range(1, a["repeats"] + 1):
+                reset = history == "cold-each" or (history == "cold-first" and not records)
+                if reset:
+                    if not await engine.reset_prefix_cache():
+                        raise RuntimeError("Native server refused prefix-cache reset")
+                    print(f"[prefix-cache-reset] before_record={len(records)}", flush=True)
+                record = await request(serving, plan, model, ids, a["max_new_tokens"])
+                record.update(repeat=repeat, prefix_cache_reset=reset)
+                if prompt is not None:
+                    record["id"] = prompt["id"]
+                records.append(record)
+                print("[request-result] " + json.dumps({"record": len(records) - 1,
+                      "cached_prompt_tokens": record["cached_prompt_tokens"],
+                      "first_output_tokens": record["first_output_tokens"]}), flush=True)
+    finally:
         if a["profile"]:
-            await engine.start_profile()
-        try:
-            for prompt in plan.get("prompts", [None]):
-                ids = plan["prompt_ids"] if prompt is None else prompt["prompt_ids"]
-                for repeat in range(1, a["repeats"] + 1):
-                    reset = history == "cold-each" or (history == "cold-first" and not records)
-                    if reset:
-                        if not await engine.reset_prefix_cache():
-                            raise RuntimeError("Native server refused prefix-cache reset")
-                        print(f"[prefix-cache-reset] before_record={len(records)}", flush=True)
-                    record = await request(serving, plan, model, ids, a["max_new_tokens"])
-                    record.update(repeat=repeat, prefix_cache_reset=reset)
-                    if prompt is not None:
-                        record["id"] = prompt["id"]
-                    records.append(record)
-                    print("[request-result] " + json.dumps({"record": len(records) - 1,
-                          "cached_prompt_tokens": record["cached_prompt_tokens"],
-                          "first_output_tokens": record["first_output_tokens"]}), flush=True)
-        finally:
-            if a["profile"]:
-                await engine.stop_profile()
-        after = await engine.collective_rpc("pangu_bench_worker_state")
+            await engine.stop_profile()
+    after = await engine.collective_rpc("pangu_bench_worker_state") if audit else None
+    changed = None
+    if audit:
         check_workers(plan, after)
+        if len(before) != len(after):
+            raise RuntimeError("Native server worker audit rank count changed")
         changed = any(left["compile_counter"] != right["compile_counter"] for left, right in zip(before, after))
         if changed and a["warmup"]:
             raise RuntimeError("Native server compiled/captured during measurement; increase warmup")
-        first = after[0]
-        keys = ("operator", "parallel", "block_size", "mamba_block_size", "cache_dtype",
-                "mamba_cache_mode", "async_scheduling", "enable_prefix_caching", "execution_settings")
-        if any(any(item[key] != first[key] for key in keys) for item in after):
-            raise RuntimeError("Native server workers disagree on effective settings")
-        effective = {key: first[key] for key in keys}
-        effective.update(engine_core_mode="async-process", mome_prefill_state_fix=False,
-                         omni_cache_history=history, compilation={"mode": a["mode"],
-                         "vllm": first["compilation"], "cudagraph": first["cudagraph"]})
-        details = {"startup_seconds": startup, "warmup_seconds": warmup, "warmup_max_tokens": warmup_tokens,
-                   "workers_before": before, "workers_after": after, "versions": versions(),
-                   "hardware": first["hardware"], "compiled_during_measurement": changed,
-                   "server_argv": server_argv(plan), "frontend": type(engine).__name__,
-                   "frontend_runtime_manifest": runtime_manifest(),
-                   "engine_client": type(engine.engine_core).__name__,
-                   "timing_boundary": "native completion first-to-last token-bearing SSE frame; no network or per-request NPU sync"}
-        spec = cfg.speculative_config
-        write_json(output / "native_server_config.json", {
-            "worker_cls": cfg.parallel_config.worker_cls, "effective": effective,
-            "speculative": {"method": spec.method, "num_speculative_tokens": spec.num_speculative_tokens}
-            if spec is not None else None, "generation_config": args.generation_config,
-            "default_sampling_params": repr(serving.default_sampling_params)})
-        await engine.do_log_stats()
-        save_result(output, plan, records, effective, details)
+    first = after[0] if audit else frontend
+    keys = ("operator", "parallel", "block_size", "mamba_block_size", "cache_dtype",
+            "mamba_cache_mode", "async_scheduling", "enable_prefix_caching", "execution_settings")
+    if audit and any(any(item[key] != first[key] for key in keys) for item in after):
+        raise RuntimeError("Native server workers disagree on effective settings")
+    effective = {key: first[key] for key in keys}
+    effective.update(engine_core_mode="async-process", mome_prefill_state_fix=False,
+                     settings_source="worker_audit" if audit else "frontend_vllm_config",
+                     omni_cache_history=history, compilation={"mode": a["mode"],
+                     "vllm": first["compilation"], "cudagraph": first["cudagraph"]})
+    details = {"startup_seconds": startup, "warmup_seconds": warmup, "warmup_max_tokens": warmup_tokens,
+               "workers_before": before, "workers_after": after, "worker_audit": audit,
+               "native_lifespan": True, "versions": versions(),
+               "hardware": first["hardware"], "compiled_during_measurement": changed,
+               "server_argv": server_argv(plan), "frontend": type(engine).__name__,
+               "frontend_runtime_manifest": runtime_manifest(),
+               "engine_client": type(engine.engine_core).__name__,
+               "timing_boundary": "native completion first-to-last token-bearing SSE frame; no network or per-request NPU sync"}
+    spec = cfg.speculative_config
+    write_json(output / "native_server_config.json", {
+        "worker_cls": cfg.parallel_config.worker_cls, "effective": effective,
+        "speculative": {"method": spec.method, "num_speculative_tokens": spec.num_speculative_tokens}
+        if spec is not None else None, "generation_config": args.generation_config,
+        "default_sampling_params": repr(serving.default_sampling_params)})
+    save_result(output, plan, records, effective, details)
+
+
+async def run(plan, args):
+    from vllm.entrypoints.openai.api_server import build_app, build_async_engine_client, init_app_state
+
+    started = time.perf_counter()
+    async with build_async_engine_client(args) as engine:
+        tasks = await engine.get_supported_tasks()
+        app = build_app(args, tasks, engine.model_config)
+        await init_app_state(engine, app.state, args, tasks)
+        async with app.router.lifespan_context(app):
+            await run_session(plan, args, engine, app, time.perf_counter() - started)
 
 
 def main(argv=None):

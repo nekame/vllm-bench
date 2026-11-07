@@ -5,14 +5,18 @@
 
 1. Штатные `cli_env_setup`, `make_arg_parser`, `validate_parsed_serve_args`.
 2. `build_async_engine_client(args)` с серверным UsageContext.
-3. Штатные `get_supported_tasks` и `init_app_state`.
-4. `openai_serving_completion.create_completion(CompletionRequest(...))`.
-5. Чтение полученного completion-stream непосредственно в процессе.
+3. Штатные `get_supported_tasks`, `build_app` и `init_app_state`.
+4. `app.router.lifespan_context(app)` вокруг прогрева и всех запросов.
+5. `openai_serving_completion.create_completion(CompletionRequest(...))`
+   и чтение completion-stream непосредственно в процессе.
 
 Сохраняются AsyncLLM/AsyncMPClient, tokenizer, OnlineRenderer, преобразование
 HTTP sampling defaults, native request IDs и MTP proposal policy. Запускается
-`uvloop`, как в штатном сервере. Сокет HTTP, uvicorn и FastAPI middleware
-не запускаются. Engine IPC и коммуникации NPU остаются штатными.
+`uvloop`, как в штатном сервере. Native lifespan сам запускает периодическую
+статистику и `freeze_gc_heap`; при выходе освобождает app state до shutdown
+движка. FastAPI app создаётся штатно, но HTTP listener/uvicorn не запускаются.
+Запросы вызывают completion handler напрямую, без ASGI request wrappers
+и сетевого планирования задач. Engine IPC и коммуникации NPU остаются штатными.
 Это путь **`/v1/completions`**, не chat endpoint с chat template.
 
 Реализация вызывает установленный серверный код, не копирует и не патчит его.
@@ -46,8 +50,10 @@ Compile-only отклоняется, как в старом omni: native decorat
 инициализация/компиляция/прогрев движка остаются. Для direct/omni default
 по-прежнему два дополнительных запроса. Явные `--warmup`,
 `--omni-warmup-tokens`, `--omni-cache-history` также поддерживаются.
-Без нашего прогрева результат отмечается diagnostic; изменения compile
-counters сохраняются. С прогревом компиляция во время замера отклоняется.
+По умолчанию worker audit выключен: результат diagnostic, а изменение
+worker compile counters неизвестно (`null`). При включённом аудите без
+нашего прогрева результат также diagnostic, counters сохраняются.
+При аудите с прогревом компиляция во время замера отклоняется.
 
 `--omni-multiprocessing` не требуется: используется native AsyncMPClient.
 Если флаг указан, env VLLM_ENABLE_V1_MULTIPROCESSING явно становится 1.
@@ -92,7 +98,8 @@ Launcher-only опции, требующие отдельного frontend/пл�
 - `native_server_config.json`: effective config snapshot, worker class,
   speculative depth, generation_config и native sampling defaults.
 - `result.json`: token IDs, native текст, cache hits, finish reason,
-  requested/actual output lengths, effective worker config и source hashes.
+  requested/actual output lengths, frontend config и source hashes;
+  worker config добавляется только с `--omni2-audit`.
 - `generations.csv`: прежние `id,text,tpot`, с текстом native completion.
 
 Native CompletionRequest получает уже подготовленные token IDs, stream=true,
@@ -113,23 +120,47 @@ Async output может объединять токены в первом frame.
 Не следует приравнивать один SSE frame к одному шагу модели.
 
 `acceptance_rate=null`, `cycles=null`: SSE не предоставляет достоверного
-числа proposals/accepted drafts. После запросов вызывается native
-`do_log_stats()`, чтобы вывести накопленные штатные метрики. Сравнивайте
-acceptance по этой статистике, а не по числу SSE chunks.
+числа proposals/accepted drafts. Native lifespan периодически вызывает
+`do_log_stats()`, как в HTTP. Принудительного вызова после серии нет;
+короткий запуск может завершиться до очередного интервала логирования.
+Сравнивайте acceptance по штатной статистике, а не по числу SSE chunks.
 
-Для аудита зарегистрирован прежний worker extension с именованным read-only
-RPC. Он не имеет constructor или overrides; worker/builder остаются native.
-RPC вызывается до/после серии измерений, не внутри запросов. Проверяются
-effective dtype, token budgets, TP, cache mode, compilation/capture и отсутствие
-локальной MoME-корректировки. Это дополнительная диагностика относительно
-обычного HTTP frontend, не часть его генерации.
+По умолчанию `--omni2-audit` выключен: worker extension не регистрируется,
+никаких дополнительных audit RPC перед/после запросов нет. В логе это
+`native_lifespan=true worker_audit=false`. Native IPC движка сохраняется.
 
-Native OpenAI defaults отмечены отдельной comparison identity. Для сравнения
-token IDs со старым omni/direct используйте `compare --correctness`; speedup
-при разных defaults автоматически не объявляется. Для разбивки холодных и
+При необходимости `--omni2-audit` включает прежний read-only worker extension
+и два audit RPC на границах серии. Он не имеет constructor или overrides;
+внутри запросов дополнительной синхронизации нет. Это диагностическое
+вмешательство относительно штатного HTTP; для проверки повторяемости
+начинайте с обычного запуска **без** этого флага.
+
+Без аудита `effective.settings_source=frontend_vllm_config`:
+operator/parallel/hardware worker и `compiled_during_measurement` неизвестны
+и записаны как `null`; `workers_before/after=null`, `details.worker_audit=false`.
+Исходный operator JSON не выдаётся за эффективный worker config. С аудитором
+сохраняются реальные worker settings и выполняются проверки capture/counters.
+Обычные frontend проверки модели, TP/depth, dtype, бюджетов, cache и
+заданного compilation/graph mode выполняются в обоих режимах.
+
+Native OpenAI defaults/lifecycle отмечены отдельной comparison identity.
+Для сравнения token IDs со старым omni/direct используйте `compare --correctness`.
+При неизвестных worker fields сравнение токенов разрешено с явным
+`unverified_worker_settings`; известные расхождения и разные checkpoint/prompt
+по-прежнему отклоняются. Сравнение speedup требует `--omni2-audit` и прогрева,
+неаудированный результат для него не используется. Для разбивки холодных и
 тёплых запросов сохраняется `prefix_cache_groups`.
 
 CPU tests проверяют routing, native helper lifecycle, parser/env propagation,
 delta token IDs, prompt/usage validation, errors/закрытие stream и engine,
-coalesced first frame и исключение trailing usage из decode. Они не
+coalesced first frame и исключение trailing usage из decode. Отдельно
+проверены native app/lifespan вокруг генерации и сохранения результата,
+удаление app state перед shutdown и отсутствие RPC в обычном режиме. Они не
 загружают модель и не подтверждают равенство NPU-выходов с HTTP.
+
+Первая версия `e092779` была запущена пользователем на NPU: три ответа
+различались между собой и с HTTP. Это не подтверждение численной
+эквивалентности. Последующее добавление lifespan и отключение аудита
+устраняют конкретные отличия bootstrap, но пока не доказаны как
+исправление этого расхождения. Параметры компиляции, cudagraph и sampling
+при этом не менялись.

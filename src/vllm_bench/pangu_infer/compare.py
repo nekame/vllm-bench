@@ -25,6 +25,8 @@ def compare(reference, candidate, *, correctness=False):
             raise ValueError("Unexpected measurement type")
         if not correctness and record["measurement"] != "benchmark":
             raise ValueError("Diagnostic runs cannot be used for benchmark comparison; use --correctness to check tokens")
+        if not correctness and record["details"].get("worker_audit") is False:
+            raise ValueError("Performance comparison requires worker audit; rerun omni2 with --omni2-audit")
         if not correctness and record.get("repeat_consistency", {}).get("matches") is False:
             raise ValueError("Greedy outputs differ between repeats; use --correctness to inspect token differences")
     ra, ca = reference["options"], candidate["options"]
@@ -40,13 +42,19 @@ def compare(reference, candidate, *, correctness=False):
             raise ValueError("Checkpoint changed between runs")
     elif reference["comparison_sha256"] != candidate["comparison_sha256"]:
         raise ValueError("Workloads differ: checkpoint/config/prompt/TP/depth/mode/sampling must match")
+    unverified = []
     for key in ("operator", "parallel", "block_size", "mamba_block_size"):
+        if correctness and any(record["effective"].get(key) is None for record in (reference, candidate)):
+            unverified.append(key)
+            continue
         if reference["effective"].get(key) != candidate["effective"].get(key):
             raise ValueError(f"Effective {key} differs; cannot attribute timing differences to the engine")
     if (not correctness and reference["effective"].get("cache_dtype", "auto")
             != candidate["effective"].get("cache_dtype", "auto")):
         raise ValueError("Effective cache_dtype differs; cannot attribute timing differences to the engine")
-    if reference["details"].get("hardware") != candidate["details"].get("hardware"):
+    if correctness and any(record["details"].get("hardware") is None for record in (reference, candidate)):
+        unverified.append("hardware")
+    elif reference["details"].get("hardware") != candidate["details"].get("hardware"):
         raise ValueError("Different hardware")
     if reference["details"].get("versions") != candidate["details"].get("versions"):
         raise ValueError("Different installed runtime versions")
@@ -60,6 +68,8 @@ def compare(reference, candidate, *, correctness=False):
               "reference_engine": reference["engine"], "candidate_engine": candidate["engine"],
               "reference_tpot_ms": reference["median_tpot_ms"], "candidate_tpot_ms": candidate["median_tpot_ms"],
               "speedup": None, "interpretation": "Correctness comparison only"}
+    if unverified:
+        result["unverified_worker_settings"] = unverified
     if not correctness and greedy_match is not False:
         if not reference["median_tpot_ms"] or not candidate["median_tpot_ms"]:
             raise ValueError("No decode tokens: TPOT/speedup comparison is undefined")

@@ -816,6 +816,20 @@ class LoadingAndBaselineTests(unittest.TestCase):
 
 
 class ResultComparisonTests(unittest.TestCase):
+    def test_unaudited_native_result_allows_only_explicit_token_comparison(self):
+        reference, candidate = self.fixture(), self.fixture()
+        candidate["details"].update(worker_audit=False, hardware=None)
+        candidate["effective"].update(operator=None, parallel=None)
+        with self.assertRaisesRegex(ValueError, "requires worker audit"):
+            compare(reference, candidate)
+        candidate["measurement"] = "diagnostic"
+        result = compare(reference, candidate, correctness=True)
+        self.assertTrue(result["greedy_tokens_match"])
+        self.assertEqual(result["unverified_worker_settings"], ["operator", "parallel", "hardware"])
+        candidate["effective"]["operator"] = {"different": True}
+        with self.assertRaisesRegex(ValueError, "Effective operator differs"):
+            compare(reference, candidate, correctness=True)
+
     def test_repeat_consistency_reports_first_token_difference_and_cache_counts(self):
         from vllm_bench.pangu_infer.results import repeat_consistency
         records = [{"token_ids": [3, 4, 5], "cached_prompt_tokens": 7680},

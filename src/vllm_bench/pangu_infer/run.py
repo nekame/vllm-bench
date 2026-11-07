@@ -63,6 +63,8 @@ def parser():
     p.add_argument("--engine", choices=("direct", "omni", "omni2"), default="direct")
     p.add_argument("--omni2-server-args", type=Path,
                    help="Omni2 only: JSON array of additional native vllm serve arguments")
+    p.add_argument("--omni2-audit", action="store_true",
+                   help="Omni2 only: install read-only worker audit RPCs; default native path performs no audit RPC")
     p.add_argument("--async-scheduling", action="store_true",
                    help="Omni only: enable async scheduling and time decode between host-visible outputs")
     p.add_argument("--omni-multiprocessing", action="store_true",
@@ -146,6 +148,8 @@ def make_plan(a):
     stock_engine = a.engine in ("omni", "omni2")
     if a.omni2_server_args is not None and a.engine != "omni2":
         raise ValueError("--omni2-server-args requires --engine omni2")
+    if a.omni2_audit and a.engine != "omni2":
+        raise ValueError("--omni2-audit requires --engine omni2")
     if a.engine == "omni2" and (a.fix_mome_prefill_state or a.trace_target or a.trace_mtp_boundary):
         raise ValueError("omni2 uses the native HTTP worker; omit local MoME correction and trace flags")
     if not a.kv_cache_dtype.strip():
@@ -340,7 +344,9 @@ def make_plan(a):
     if a.omni_warmup_tokens is not None and a.omni_warmup_tokens != max(2 * (a.depth + 1) + 1, 17):
         match["omni_warmup_tokens"] = a.omni_warmup_tokens
     if a.engine == "omni2":
-        match["request_defaults"] = "native-openai-completion"
+        match["request_defaults"] = "native-openai-completion-lifespan"
+        if a.omni2_audit:
+            match["omni2_worker_audit"] = True
     if a.enable_prefix_caching:
         match["enable_prefix_caching"] = True
     if a.kv_cache_dtype != "auto":

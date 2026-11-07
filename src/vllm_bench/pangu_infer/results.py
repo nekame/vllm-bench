@@ -77,7 +77,8 @@ def save_result(output, plan, records, effective, details):
     accepted = [n for r in records for n in r.get("accepted_drafts", [])]
     diagnostic = any((a["profile"], a.get("model_timing", False), a.get("trace_target", False),
                       a.get("memory_diagnostics", False), a.get("trace_mtp_boundary", False),
-                      a["engine"] in ("omni", "omni2") and a.get("warmup", 2) == 0))
+                      a["engine"] in ("omni", "omni2") and a.get("warmup", 2) == 0,
+                      a["engine"] == "omni2" and not a.get("omni2_audit", False)))
     summary = {"format": "pangu-direct-result-v1", "engine": a["engine"],
                "measurement": "diagnostic" if diagnostic else "benchmark",
                "comparison_sha256": plan["comparison_sha256"],

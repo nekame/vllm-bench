@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from enum import IntEnum
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from vllm_bench.pangu_infer import omni2, run
+from vllm_bench.pangu_infer.results import save_result
 
 
 class PlanningFixture:
@@ -42,6 +44,12 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         self.assertEqual(plan["options"]["warmup"], 0)
         argv = plan["omni2_server_argv"]
         self.assertNotIn("--skip-tokenizer-init", argv)
+        self.assertNotIn("--worker-extension-cls", argv)
+        audited = self.plan("--omni2-audit")
+        self.assertIn("--worker-extension-cls", audited["omni2_server_argv"])
+        self.assertNotEqual(plan["comparison_sha256"], audited["comparison_sha256"])
+        with self.assertRaisesRegex(ValueError, "requires --engine omni2"):
+            self.plan("--engine", "omni", "--omni2-audit")
         spec = json.loads(argv[argv.index("--speculative-config") + 1])
         self.assertEqual(spec, {"method": "mtp", "num_speculative_tokens": 7})
         self.assertEqual(self.plan("--engine", "omni")["options"]["warmup"], 2)
@@ -125,11 +133,21 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
             bad = {**state, key: value}
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 omni2.check_workers(plan, [bad])
+
         for key, value in (("max_num_seqs", 2), ("max_model_len", 999),
                            ("enable_chunked_prefill", True), ("dtype", "torch.float16")):
             bad = {**state, "execution_settings": {**state["execution_settings"], key: value}}
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 omni2.check_workers(plan, [bad])
+
+    def test_unaudited_run_with_warmup_is_still_diagnostic(self):
+        plan = self.plan("--warmup", "2")
+        output = self.root / "output"
+        output.mkdir()
+        records = [{"token_ids": [1, 2], "decode_tokens": 1, "decode_seconds": .01}]
+        with patch("sys.stdout", new_callable=io.StringIO):
+            result = save_result(output, plan, records, {}, {"worker_audit": False})
+        self.assertEqual(result["measurement"], "diagnostic")
 
     def test_main_uses_native_parser_validation_cli_setup_and_uvloop(self):
         plan = self.plan()
@@ -219,8 +237,8 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
             await omni2.request(SimpleNamespace(create_completion=AsyncMock(return_value={"error": "bad"})),
                                 plan, "model", plan["prompt_ids"], 16)
 
-    async def execute(self, *, fail=False):
-        plan = self.plan()
+    async def execute(self, *, fail=False, audit=False):
+        plan = self.plan(*(["--omni2-audit"] if audit else []))
         (self.root / "output").mkdir(exist_ok=True)
         settings = {"max_model_len": plan["max_model_len"], "max_num_seqs": 1,
                     "max_num_batched_tokens": plan["max_model_len"], "enable_chunked_prefill": False,
@@ -229,25 +247,56 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
                  "cache_dtype": "auto", "mamba_cache_mode": "all", "async_scheduling": False,
                  "enable_prefix_caching": False, "execution_settings": settings, "compile_counter": {},
                  "compilation": 0, "cudagraph": "NONE", "hardware": "NPU"}
+        class GraphMode(IntEnum):
+            NONE = 0
+            def has_full_cudagraphs(self):
+                return False
         cfg = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=1, data_parallel_size=1,
                               pipeline_parallel_size=1, enable_expert_parallel=False, worker_cls="native.NPUWorker"),
-                              model_config=SimpleNamespace(model=str(self.model), hf_config=SimpleNamespace(
+                              model_config=SimpleNamespace(model=str(self.model), dtype="torch.bfloat16",
+                                  max_model_len=plan["max_model_len"], hf_config=SimpleNamespace(
                                   architectures=[run.ULTRA_ARCHITECTURE])),
                               speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=7),
-                              compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)))
+                              compilation_config=SimpleNamespace(mode=0, cudagraph_mode=GraphMode.NONE,
+                                  cudagraph_capture_sizes=[1, 8], max_cudagraph_capture_size=8),
+                              scheduler_config=SimpleNamespace(async_scheduling=False, enable_chunked_prefill=False,
+                                  max_num_seqs=1, max_num_batched_tokens=plan["max_model_len"]),
+                              cache_config=SimpleNamespace(block_size=128, mamba_block_size=128, cache_dtype="auto",
+                                  mamba_cache_mode="all", mamba_page_size_padded=None, enable_prefix_caching=False),
+                              additional_config={})
         engine = SimpleNamespace(vllm_config=cfg, engine_core=object(),
+                                 model_config=cfg.model_config,
                                  get_supported_tasks=AsyncMock(return_value=("generate",)),
                                  collective_rpc=AsyncMock(return_value=[state]), do_log_stats=AsyncMock())
-        closed, calls = [], []
+        closed, calls, active = [], [], {"lifespan": False}
         @asynccontextmanager
         async def build(args):
             calls.append("native-build")
             try:
                 yield engine
             finally:
+                calls.append("engine-shutdown")
                 closed.append(True)
+        @asynccontextmanager
+        async def lifespan(app):
+            self.assertIs(app.state.engine_client, engine)
+            calls.append("lifespan-enter")
+            active["lifespan"] = True
+            try:
+                yield
+            finally:
+                calls.append("lifespan-exit")
+                active["lifespan"] = False
+                del app.state
+        app = SimpleNamespace(state=SimpleNamespace(), router=SimpleNamespace(lifespan_context=lifespan))
+        def build_app(args, tasks, model_config):
+            self.assertEqual(tasks, ("generate",))
+            self.assertIs(model_config, engine.model_config)
+            calls.append("native-build-app")
+            return app
         serving = SimpleNamespace(default_sampling_params={})
         async def complete(params, raw_request=None):
+            self.assertTrue(active["lifespan"])
             calls.append("native-completion")
             async def stream():
                 for frame in self.frames(plan, error=fail):
@@ -259,12 +308,15 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(supported_tasks, ("generate",))
             calls.append("native-init-app-state")
             state.openai_serving_completion = serving
+            state.engine_client = engine
         constructor, modules = self.protocol()
-        modules.update({"starlette.datastructures": SimpleNamespace(State=SimpleNamespace),
-                        "vllm.entrypoints.openai.api_server": SimpleNamespace(
-                            build_async_engine_client=build, init_app_state=init)})
+        modules.update({"vllm.entrypoints.openai.api_server": SimpleNamespace(
+                            build_async_engine_client=build, build_app=build_app, init_app_state=init)})
         args = SimpleNamespace(model=str(self.model), served_model_name=["pangu-omni2"], generation_config="auto")
-        with patch.dict(sys.modules, modules), patch.object(omni2, "save_result") as save, \
+        def save_inside_lifespan(*args):
+            self.assertTrue(active["lifespan"])
+            self.assertTrue(hasattr(app, "state"))
+        with patch.dict(sys.modules, modules), patch.object(omni2, "save_result", side_effect=save_inside_lifespan) as save, \
                 patch.object(omni2, "versions", return_value={}), patch("sys.stdout", new_callable=io.StringIO):
             if fail:
                 with self.assertRaises(RuntimeError):
@@ -275,10 +327,22 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(save.call_args.args[2]), 2)
                 self.assertFalse(save.call_args.args[3]["mome_prefill_state_fix"])
                 self.assertEqual(save.call_args.args[4]["frontend"], "SimpleNamespace")
+                self.assertEqual(save.call_args.args[4]["worker_audit"], audit)
+                self.assertTrue(save.call_args.args[4]["native_lifespan"])
+                if not audit:
+                    self.assertIsNone(save.call_args.args[3]["operator"])
+                    self.assertIsNone(save.call_args.args[3]["parallel"])
+                    self.assertIsNone(save.call_args.args[4]["hardware"])
+                    self.assertIsNone(save.call_args.args[4]["compiled_during_measurement"])
+                    self.assertEqual(save.call_args.args[3]["settings_source"], "frontend_vllm_config")
         self.assertEqual(closed, [True])
-        self.assertEqual(calls[:2], ["native-build", "native-init-app-state"])
+        self.assertEqual(calls[:4], ["native-build", "native-build-app", "native-init-app-state", "lifespan-enter"])
+        self.assertEqual(calls[-2:], ["lifespan-exit", "engine-shutdown"])
+        self.assertFalse(hasattr(app, "state"))
         self.assertEqual(calls.count("native-completion"), 1 if fail else 2)
-        # Only audit RPCs at run boundaries. No synchronize RPC or manual step/drain.
+        self.assertEqual(engine.collective_rpc.await_count, (1 if fail else 2) if audit else 0)
+        engine.do_log_stats.assert_not_awaited()
+        # Audit is opt-in; no synchronize RPC or manual step/drain in either path.
         self.assertTrue(all(call.args == ("pangu_bench_worker_state",) for call in engine.collective_rpc.call_args_list))
 
     async def test_native_server_context_initializes_serving_and_cleans_up(self):
@@ -286,6 +350,12 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_native_server_context_cleans_up_after_stream_failure(self):
         await self.execute(fail=True)
+
+    async def test_opt_in_worker_audit_preserves_native_lifecycle(self):
+        await self.execute(audit=True)
+
+    async def test_opt_in_worker_audit_failure_closes_native_lifecycle(self):
+        await self.execute(audit=True, fail=True)
 
 
 if __name__ == "__main__":
