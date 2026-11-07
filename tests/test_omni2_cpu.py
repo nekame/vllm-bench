@@ -46,6 +46,11 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         argv = plan["omni2_server_argv"]
         self.assertNotIn("--skip-tokenizer-init", argv)
         self.assertNotIn("--worker-extension-cls", argv)
+        self.assertEqual(argv[argv.index("--generation-config") + 1], "vllm")
+        overrides = json.loads(argv[argv.index("--override-generation-config") + 1])
+        self.assertEqual(overrides, {"temperature": 0, "top_p": 1, "top_k": 0, "max_new_tokens": 16})
+        warm = self.plan("--warmup", "2")["omni2_server_argv"]
+        self.assertEqual(json.loads(warm[warm.index("--override-generation-config") + 1])["max_new_tokens"], 17)
         audited = self.plan("--omni2-audit")
         self.assertIn("--worker-extension-cls", audited["omni2_server_argv"])
         self.assertNotEqual(plan["comparison_sha256"], audited["comparison_sha256"])
@@ -120,7 +125,8 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         path.write_text('["--generation-config", "auto"]')
         self.assertEqual(omni2.server_argv(plan)[-2:], extra)
         for option in ("--model", "--worker-cls", "--worker-extension-cls", "--speculative-config",
-                       "--compilation-config.mode", "--dtype", "--no-enable-prefix-caching", "--config", "-tp"):
+                       "--compilation-config.mode", "--override-generation-config", "--override-generation-config.temperature",
+                       "--dtype", "--no-enable-prefix-caching", "--config", "-tp"):
             path.write_text(json.dumps([option, "other"]))
             with self.subTest(option=option), self.assertRaises(ValueError):
                 self.plan("--omni2-server-args", str(path))
@@ -140,7 +146,7 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
         self.assertNotIn("min_tokens", fields)
         self.assertNotIn("request_id", fields)
         self.assertNotIn("detokenize", fields)
-        self.assertNotIn("top_k", fields)
+        self.assertEqual(fields["top_k"], 0)
 
     def test_launcher_selects_omni2_module_and_keeps_stdout(self):
         plan = self.plan()
@@ -213,8 +219,55 @@ class Omni2PlanningTests(PlanningFixture, unittest.TestCase):
 
 class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
     def protocol(self):
-        constructor = Mock(side_effect=lambda **fields: SimpleNamespace(**fields))
-        return constructor, {"vllm.entrypoints.openai.completion.protocol": SimpleNamespace(CompletionRequest=constructor)}
+        # Protocol stand-in: records explicit values sent to the native converter,
+        # without loading vLLM or pretending to exercise its sampler.
+        def construct(**fields):
+            request = SimpleNamespace(truncate_prompt_tokens=None, **fields)
+            def convert(limit, defaults):
+                return SimpleNamespace(temperature=fields["temperature"], top_p=fields["top_p"],
+                    top_k=fields["top_k"], seed=fields["seed"], ignore_eos=fields["ignore_eos"],
+                    max_tokens=limit, min_tokens=0, min_p=0, repetition_penalty=1,
+                    presence_penalty=0, frequency_penalty=0)
+            request.to_sampling_params = Mock(side_effect=convert)
+            return request
+        constructor = Mock(side_effect=construct)
+        def max_tokens(max_len, requested, prompt_len, defaults, override, **kwargs):
+            return min(max_len - prompt_len, requested, override if override is not None else requested)
+        return constructor, {
+            "vllm.entrypoints.openai.completion.protocol": SimpleNamespace(CompletionRequest=constructor),
+            "vllm.entrypoints.serve.utils.api_utils": SimpleNamespace(get_max_tokens=Mock(side_effect=max_tokens))}
+
+    async def test_sampling_preview_uses_explicit_values_over_conflicting_defaults(self):
+        constructor, modules = self.protocol()
+        serving = SimpleNamespace(model_config=SimpleNamespace(max_model_len=100), override_max_tokens=9,
+                                  default_sampling_params={"temperature": 1, "top_k": 50, "top_p": .5})
+        with patch.dict(sys.modules, modules):
+            for flags in ((), ("--temperature", ".7", "--top-p", ".9", "--top-k", "23")):
+                plan = self.plan(*flags)
+                report = omni2.sampling_preview(plan, serving, "model")
+                for key in ("temperature", "top_p", "top_k", "seed"):
+                    self.assertEqual(report["resolved"][key], plan["options"][key])
+                self.assertEqual(report["resolved"]["max_tokens"], 9)
+        self.assertEqual(serving.default_sampling_params["temperature"], 1)
+        self.assertNotIn("request_id", constructor.call_args.kwargs)
+
+    async def test_sampling_preview_rejects_conversion_that_loses_greedy_temperature(self):
+        constructor, modules = self.protocol()
+        original = constructor.side_effect
+        def broken(**fields):
+            request = original(**fields)
+            convert = request.to_sampling_params.side_effect
+            def lose_temperature(*args):
+                result = convert(*args)
+                result.temperature = 1
+                return result
+            request.to_sampling_params.side_effect = lose_temperature
+            return request
+        constructor.side_effect = broken
+        serving = SimpleNamespace(model_config=SimpleNamespace(max_model_len=100), override_max_tokens=None,
+                                  default_sampling_params={"temperature": 1})
+        with patch.dict(sys.modules, modules), self.assertRaisesRegex(RuntimeError, "temperature=0"):
+            omni2.sampling_preview(self.plan(), serving, "model")
 
     def frames(self, plan, *, bad_usage=False, error=False, missing_done=False):
         ids = plan["prompt_ids"]
@@ -330,7 +383,7 @@ class Omni2AsyncTests(PlanningFixture, unittest.IsolatedAsyncioTestCase):
             self.assertIs(model_config, engine.model_config)
             calls.append("native-build-app")
             return app
-        serving = SimpleNamespace(default_sampling_params={})
+        serving = SimpleNamespace(default_sampling_params={}, model_config=cfg.model_config, override_max_tokens=None)
         async def complete(params, raw_request=None):
             self.assertTrue(active["lifespan"])
             calls.append("native-completion")

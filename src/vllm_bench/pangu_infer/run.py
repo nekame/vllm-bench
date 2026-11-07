@@ -356,7 +356,7 @@ def make_plan(a):
     if a.omni_warmup_tokens is not None and a.omni_warmup_tokens != max(2 * (a.depth + 1) + 1, 17):
         match["omni_warmup_tokens"] = a.omni_warmup_tokens
     if a.engine == "omni2":
-        match["request_defaults"] = "native-openai-completion-lifespan"
+        match["request_defaults"] = "native-openai-completion-explicit-sampling"
         if a.omni2_audit:
             match["omni2_worker_audit"] = True
     if a.enable_prefix_caching:

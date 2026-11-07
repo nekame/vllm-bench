@@ -302,3 +302,10 @@ corrected path suite использует реальный локальный su
 и нашёл две исправленные ошибки стенда: tuple output reference и возможную
 запись upstream pycache. Stdlib-тесты проверяют изоляцию, временное применение
 патча и отсутствие ложного успешного результата при missing torch.
+
+Sampling policy omni2 уточнена по запросу пользователя: default generation
+source=vllm, controlled native overrides для temperature/top_p/top_k и
+max_new_tokens, явные request fields включая top_k=0. Native protocol preview
+сохраняет requested/default/resolved параметры до InputProcessor/GPU;
+worker методы не подменяются. Предупреждение о model defaults temperature=1
+не считалось доказательством изменения явно переданной temperature=0.

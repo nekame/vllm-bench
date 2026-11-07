@@ -11,7 +11,7 @@
    и чтение completion-stream непосредственно в процессе.
 
 Сохраняются AsyncLLM/AsyncMPClient, tokenizer, OnlineRenderer, преобразование
-HTTP sampling defaults, native request IDs и MTP proposal policy. Запускается
+штатное преобразование sampling-параметров, native request IDs и MTP proposal policy. Запускается
 `uvloop`, как в штатном сервере. Native lifespan сам запускает периодическую
 статистику и `freeze_gc_heap`; при выходе освобождает app state до shutdown
 движка. FastAPI app создаётся штатно, но HTTP listener/uvicorn не запускаются.
@@ -101,11 +101,13 @@ Tokenizer теперь действительно инициализируетс
 `--omni2-server-args server.json` добавляет native аргументы из JSON-массива:
 
 ```json
-["--generation-config", "vllm"]
+["--generation-config", "auto"]
 ```
 
-Пример задаёт generation_config=vllm, **только если так настроен HTTP**.
-Default без этого аргумента остаётся штатным auto. Передаются только
+По умолчанию omni2 задаёт generation_config=vllm, чтобы sampling defaults
+из файла модели не заменяли настройки инструмента. Пример явно разрешает
+model defaults для неуправляемых параметров. Temperature/top_p/top_k и
+верхний предел длины всё равно задаются нашими generation overrides. Передаются только
 дополнительные аргументы, без `vllm serve` и model positional argument.
 Содержимое массива фиксируется в launch plan и comparison hash.
 Используются полные имена `--option`, не короткие aliases.
@@ -116,9 +118,43 @@ Default без этого аргумента остаётся штатным aut
 Launcher-only опции, требующие отдельного frontend/плагина, отклоняются,
 когда их путь не поддержан. Multi-API-server, headless и grpc не поддерживаются.
 
+## Приоритет sampling-параметров
+
+Temperature, top_p и top_k из CLI/плана передаются native серверу через
+`--override-generation-config` и явно в каждом CompletionRequest. Значение
+`top_k=0` теперь также передаётся: отсутствие ключа раньше позволяло
+подставить top_k из generation_config при temperature>0.
+Seed и ignore_eos передаются в запросе. Max_tokens задаётся отдельно для
+измерения и warmup; server-wide max_new_tokens равен максимуму этих лимитов,
+чтобы не обрезать прогрев. Файлы модели не редактируются.
+
+Сообщение vLLM «Default sampling parameters overridden by generation_config»
+описывает серверные defaults, а не доказанную замену явно заданной temperature.
+В [native CompletionRequest](https://github.com/vllm-project/vllm/blob/v0.25.1/vllm/entrypoints/openai/completion/protocol.py#L244)
+значение из файла используется, когда поле запроса равно None. Явный ноль
+сохраняется. Поэтому прежняя строка temperature=1 сама по себе не объясняет
+разные greedy ответы.
+
+Один раз до warmup выполняется native `get_max_tokens` и
+`CompletionRequest.to_sampling_params`. В `[sampling]`,
+`sampling_parameters.json` и `details.sampling` записаны:
+
+- `requested`: наши параметры запроса;
+- `server_defaults`: defaults, полученные от serving class;
+- `resolved`: итог native преобразования в SamplingParams.
+
+Это preview **до InputProcessor, EOS/tokenizer обработки и GPU execution**,
+не снимок worker SamplingMetadata. В каждом запросе сохраняется штатный
+handler; его методы не подменяются. Preview не выполняет RPC или NPU copies.
+Если запрошенная temperature=0 не сохранилась при преобразовании, запуск
+останавливается. При greedy native SamplingParams нормализует top_p=1,
+top_k=0 и min_p=0; seed=-1 и очень малая положительная temperature также
+могут нормализоваться самим vLLM и видны в preview.
+
 ## Что сохраняется и как считается время
 
 - `native_server_argv.json`: фактические аргументы штатного parser.
+- `sampling_parameters.json`: requested/default/resolved sampling preview.
 - `native_server_config.json`: effective config snapshot, worker class,
   speculative depth, generation_config и native sampling defaults.
 - `result.json`: token IDs, native текст, cache hits, finish reason,

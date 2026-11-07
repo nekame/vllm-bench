@@ -101,7 +101,8 @@ decode уже может исполняться. Финальная синхро
 
 Отдельный `--engine omni2` использует штатные HTTP server helpers,
 AsyncLLM/AsyncMPClient и CompletionRequest без HTTP listener. Он сохраняет
-native tokenizer/sampling/MTP и запрещает локальную MoME-корректировку.
+native tokenizer/MTP и sampling pipeline с явными параметрами инструмента;
+локальная MoME-корректировка запрещена.
 Инструкция и отличия измерений: [OMNI2.md](OMNI2.md).
 
 Для проверки процессного core в прежнем `--engine omni` добавьте

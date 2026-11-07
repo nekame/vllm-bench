@@ -15,6 +15,12 @@ from vllm_bench.pangu_infer.run import write_json
 def server_argv(plan):
     """Use the server's parser/defaults, including native speculative defaults."""
     options = engine_options(plan, direct=False)
+    a = plan["options"]
+    warmup_limit = (a.get("omni_warmup_tokens") or max(2 * (a["depth"] + 1) + 1, 17)) if a["warmup"] else 0
+    options["generation_config"] = "vllm"
+    options["override_generation_config"] = {
+        "temperature": a["temperature"], "top_p": a["top_p"], "top_k": a["top_k"],
+        "max_new_tokens": max(a["max_new_tokens"], warmup_limit)}
     options.pop("skip_tokenizer_init")
     if plan["options"].get("async_scheduling") is None:
         options.pop("async_scheduling")
@@ -39,6 +45,8 @@ def server_argv(plan):
                                 "load_format", "model_impl", "enable_lora", "lora_modules",
                                 "tool_parser_plugin", "reasoning_parser_plugin", "profiler_config"}
     protected = {name.replace("_", "-") for name in protected}
+    # An explicit source remains supported; our controlled values still override it.
+    protected.discard("generation-config")
     for token in extra:
         if token.startswith("-") and not token.startswith("--"):
             try:
@@ -63,12 +71,32 @@ def server_argv(plan):
 def completion_fields(plan, prompt_ids, limit):
     a = plan["options"]
     fields = {"prompt": prompt_ids, "max_tokens": limit, "stream": True,
-              "temperature": a["temperature"], "top_p": a["top_p"], "seed": a["seed"],
+              "temperature": a["temperature"], "top_p": a["top_p"], "top_k": a["top_k"], "seed": a["seed"],
               "ignore_eos": not a["respect_eos"], "add_special_tokens": False,
               "return_token_ids": True, "stream_options": {"include_usage": True}}
-    if a["top_k"]:
-        fields["top_k"] = a["top_k"]
     return fields
+
+
+def sampling_preview(plan, serving, model):
+    """Native protocol conversion before engine EOS/tokenizer processing; no GPU calls."""
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+
+    a = plan["options"]
+    params = CompletionRequest(model=model, **completion_fields(plan, plan["prompt_ids"], a["max_new_tokens"]))
+    limit = get_max_tokens(serving.model_config.max_model_len, params.max_tokens, len(plan["prompt_ids"]),
+                           serving.default_sampling_params, serving.override_max_tokens,
+                           truncate_prompt_tokens=params.truncate_prompt_tokens)
+    resolved = params.to_sampling_params(limit, serving.default_sampling_params)
+    controls = {key: getattr(resolved, key) for key in (
+        "temperature", "top_p", "top_k", "min_p", "seed", "ignore_eos", "max_tokens", "min_tokens",
+        "repetition_penalty", "presence_penalty", "frequency_penalty")}
+    if a["temperature"] == 0 and resolved.temperature != 0:
+        raise RuntimeError("Native SamplingParams did not preserve requested temperature=0")
+    return {"stage": "CompletionRequest.to_sampling_params; before engine EOS/tokenizer processing",
+            "requested": {key: getattr(params, key) for key in (
+                "temperature", "top_p", "top_k", "seed", "ignore_eos", "max_tokens")},
+            "server_defaults": dict(serving.default_sampling_params), "resolved": controls}
 
 
 async def request(serving, plan, model, prompt_ids, limit):
@@ -211,6 +239,9 @@ async def run_session(plan, args, engine, app, startup):
     frontend = frontend_state(cfg)
     check_settings(plan, frontend)
     model = args.served_model_name[0] if args.served_model_name else args.model
+    sampling = sampling_preview(plan, serving, model)
+    print("[sampling] " + json.dumps(sampling), flush=True)
+    write_json(output / "sampling_parameters.json", sampling)
     warmup_tokens = a.get("omni_warmup_tokens") or max(2 * (a["depth"] + 1) + 1, 17)
     started = time.perf_counter()
     for _ in range(a["warmup"]):
@@ -273,6 +304,7 @@ async def run_session(plan, args, engine, app, startup):
                "hardware": first["hardware"], "compiled_during_measurement": changed,
                "server_argv": server_argv(plan), "frontend": type(engine).__name__,
                "frontend_runtime_manifest": runtime_manifest(),
+               "sampling": sampling,
                "engine_client": type(engine.engine_core).__name__,
                "timing_boundary": "native completion first-to-last token-bearing SSE frame; no network or per-request NPU sync"}
     spec = cfg.speculative_config
