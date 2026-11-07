@@ -96,6 +96,19 @@ def fixture():
 
 
 class PaddingMetadataTests(unittest.TestCase):
+    def test_local_mome_builder_is_selected_only_for_mome_when_requested(self):
+        class LocalBuilder(Builder):
+            pass
+        for enabled in (False, True):
+            cache, modules = fixture()
+            cache.fix_mome_prefill_state = enabled
+            modules["vllm_bench.pangu_infer.mome_prefill"] = SimpleNamespace(
+                MomePrefillMetadataBuilder=LocalBuilder)
+            with patch.dict(sys.modules, modules):
+                lane = MetadataLane(cache, [group.name for group in cache.groups], 8)
+            for bucket, builder, common in lane.entries:
+                self.assertIs(type(builder), LocalBuilder if enabled and bucket[0].mome else Builder)
+
     def test_mtp_lane_uses_its_own_parallel_config(self):
         cache, modules = fixture()
         draft_cfg = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))

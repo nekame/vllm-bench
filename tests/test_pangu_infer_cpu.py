@@ -23,6 +23,30 @@ from vllm_bench.pangu_infer.sampling import reference_rejection
 
 
 class DirectPlanningTests(unittest.TestCase):
+    def test_local_mome_correction_is_explicit_and_shared_by_both_engines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            def plan(*flags):
+                return run.make_plan(run.parser().parse_args([*args, *flags]))
+            plain = plan()
+            corrected = []
+            for engine in ("direct", "omni"):
+                item = plan("--engine", engine, "--fix-mome-prefill-state")
+                corrected.append(item)
+                self.assertTrue(item["options"]["fix_mome_prefill_state"])
+                self.assertNotEqual(plain["comparison_sha256"], item["comparison_sha256"])
+                self.assertEqual(engine_options(item, direct=engine == "direct"),
+                                 engine_options(plan("--engine", engine), direct=engine == "direct"))
+            self.assertEqual(corrected[0]["comparison_sha256"], corrected[1]["comparison_sha256"])
+            with self.assertRaisesRegex(ValueError, "positive MTP depth"):
+                plan("--fix-mome-prefill-state", "--depth", "0")
+            config_path = Path(tmp) / "full/config.json"
+            config = json.loads(config_path.read_text())
+            config["use_mome"] = False
+            config_path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "use_mome=true"):
+                plan("--fix-mome-prefill-state")
+
     def test_kv_cache_dtype_is_forwarded_to_both_engines_and_changes_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp))
@@ -669,6 +693,7 @@ class LoadingAndBaselineTests(unittest.TestCase):
 
         engine = SimpleNamespace(
             generate=Mock(side_effect=generate), executions={},
+            caches=SimpleNamespace(fix_mome_prefill_state=False),
             counters=lambda: {"compiles": 0, "captures": 0, "replays": 0, "calls": 1})
 
         def create_engine(*args, **kwargs):

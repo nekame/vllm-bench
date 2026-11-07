@@ -55,20 +55,31 @@ static sinks и необходимые vLLM adaptations загружаются �
 этот фильтр к platform entry points, а не только к general plugins.
 Это штатные patches установленного OmniInfer, а не новые подмены PoC.
 
-Отдельная корректировка по результатам repeat-диагностики сохранена в
-`patches/omniinfer/mome-target-prefill-state.patch`. Она меняет исходный
-`NPUMomeAttentionMetadataBuilder.build`: non-PD target на границе
-`computed == prompt` читает prefill-tail с accepted=`num_spec + 1`.
-Draft-вызовы явно помечаются через `build_for_drafting`, их offsets сохранены;
-последующий target decode и PD не меняются. Патч включает regression tests
-для глубин 3/7, последующего decode, draft, PD и смешанного batch.
-Checkout OmniInfer в этой рабочей папке не изменяется: патч применяется
-пользователем на сервере, если он решит проверить исправление исходного
-builder. Локально проверены применение к временной копии, обратимость и
-синтаксис; torch/NPU validation требует серверного запуска.
+Корректировка MoME prefill-state реализована локально в `mome_prefill.py`
+под явным флагом `--fix-mome-prefill-state`. Класс наследует исходный
+`NPUMomeAttentionMetadataBuilder`: для non-PD target на границе
+`computed == prompt` передаётся accepted=`num_spec + 1`. Draft-вызовы помечены
+отдельно; их synthesis/offset policy перенесена из исходного `build_for_drafting`.
+Последующий target decode и PD сохраняют прежнее поведение. Арифметика
+операторов и layout кеша остаются исходными.
 
-Только определения нейросети в `model/` требуют ML-пакетов уже при импорте,
-как исходные классы OmniInfer. Они импортируются внутри `load_models` NPU worker;
+`omni_worker.py` наследует штатный `NPUWorker` и после его
+`initialize_from_config`, до прогрева графов, создаёт локальные MoME builders
+на исходных `kv_cache_spec`, затем обновляет ссылки proposer штатным
+`initialize_attn_backend`. Worker выбирается через публичный
+`parallel_config.worker_cls` после штатного создания VllmConfig: platform
+при создании config сама устанавливает исходный NPUWorker. Без флага
+`LLMEngine.from_engine_args` используется без изменений. Direct выбирает
+тот же локальный builder в MetadataLane. Глобальные методы не подменяются.
+
+`patches/omniinfer/mome-target-prefill-state.patch` сохранён только как
+контрольный источник для CPU-тестов во временном каталоге. Применять его к
+checkout или установленному OmniInfer не нужно. Оба дерева OmniInfer остаются
+неизменными; NPU-проверка локального адаптера ещё требуется.
+
+Определения нейросети в `model/` и явные subclasses в `mome_prefill.py` /
+`omni_worker.py` требуют ML-пакетов уже при импорте,
+как исходные классы OmniInfer. Они загружаются только в исполняющем worker;
 все CLI, `--help`, планирование и служебные модули сохраняют CPU-only import.
 
 В прямом цикле нет Engine, scheduler, NPUModelRunner или EagleProposer.
@@ -245,7 +256,10 @@ Builder constructor обходится fixture-буферами, а history sele
 копии backend; reference копируется без изменений. Bytecode write отключён
 на время загрузки read-only файлов. NPU/operator/ACL semantics этим не доказаны.
 В доступном окружении PyTorch отсутствует и его установка не удалась из-за
-DNS, поэтому численный результат пока не получен. Astra проверил API/формы
+DNS, поэтому обновлённая численная suite локально не выполнена. Пользователь
+выполнил прежние девять тестов временной правки: все прошли. Сейчас основной
+corrected path suite использует реальный локальный subclass; десятый тест
+сравнивает его metadata с временной правкой. Эту версию нужно повторить с torch. Astra проверил API/формы
 и нашёл две исправленные ошибки стенда: tuple output reference и возможную
 запись upstream pycache. Stdlib-тесты проверяют изоляцию, временное применение
 патча и отсутствие ложного успешного результата при missing torch.

@@ -57,6 +57,8 @@ def worker_state(worker):
             "runtime_manifest": runtime_manifest(),
             "model_runner_class": f"{type(worker.model_runner).__module__}.{type(worker.model_runner).__qualname__}",
             "model_class": f"{model_type.__module__}.{model_type.__qualname__}",
+            "mome_prefill_state_fix": bool(getattr(worker, "mome_prefill_state_fix", False)),
+            "mome_prefill_builder_count": getattr(worker, "mome_prefill_builder_count", 0),
             "peak_allocated_bytes": torch.npu.max_memory_allocated(),
             "hardware": torch.npu.get_device_name()}
 
@@ -146,6 +148,26 @@ def request(engine, plan, request_id, limit, *, prompt_ids=None, boundary=None):
             "post_request_cleanup_seconds": cleanup_seconds}
 
 
+def create_engine(plan, options):
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    args = EngineArgs(**options)
+    multiprocessing = plan["options"].get("omni_multiprocessing", False)
+    if not plan["options"].get("fix_mome_prefill_state", False):
+        factory_options = {"enable_multiprocessing": True} if multiprocessing else {}
+        return LLMEngine.from_engine_args(args, **factory_options)
+
+    from vllm.v1.executor import Executor
+
+    cfg = args.create_engine_config()
+    # NPU platform configuration selects its worker during config creation.
+    # Select our explicit subclass afterwards through the public config field.
+    cfg.parallel_config.worker_cls = "vllm_bench.pangu_infer.omni_worker.MomePrefillWorker"
+    return LLMEngine(vllm_config=cfg, executor_class=Executor.get_class(cfg),
+                     log_stats=not args.disable_log_stats, multiprocess_mode=multiprocessing)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--plan", type=Path, required=True)
@@ -154,8 +176,6 @@ def main(argv=None):
     from vllm.plugins import load_general_plugins
     require_npu_platform()
     load_general_plugins()
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.v1.engine.llm_engine import LLMEngine
 
     a, output = plan["options"], Path(plan["options"]["output"])
     if a["mode"] == "compile":
@@ -171,8 +191,7 @@ def main(argv=None):
         options["profiler_config"] = {"profiler": "torch", "torch_profiler_dir": str(output / "traces"),
                                       "ignore_frontend": True, "torch_profiler_with_stack": False}
     started = time.perf_counter()
-    factory_options = {"enable_multiprocessing": True} if a.get("omni_multiprocessing", False) else {}
-    engine = LLMEngine.from_engine_args(EngineArgs(**options), **factory_options)
+    engine = create_engine(plan, options)
     startup_seconds = time.perf_counter() - started
     warmup_start = time.perf_counter()
     for i in range(a["warmup"]):
@@ -182,6 +201,11 @@ def main(argv=None):
     requested_async = a.get("async_scheduling", False)
     host_timing = requested_async or multiprocessing
     core_mode = "process" if multiprocessing else "inproc"
+    requested_fix = a.get("fix_mome_prefill_state", False)
+    if any(s.get("mome_prefill_state_fix", False) != requested_fix for s in states_before):
+        raise RuntimeError("Effective Omni MoME prefill adapter differs from --fix-mome-prefill-state")
+    if requested_fix and any(s.get("mome_prefill_builder_count", 0) < 1 for s in states_before):
+        raise RuntimeError("Omni MoME prefill adapter installed no metadata builders")
     if any(s.get("async_scheduling", False) != requested_async for s in states_before):
         raise RuntimeError("Effective Omni async_scheduling differs from the requested setting")
     requested_prefix = a.get("enable_prefix_caching", False)
@@ -199,6 +223,7 @@ def main(argv=None):
         raise RuntimeError("Effective Omni capture sizes differ from the requested --cudagraph-capture-sizes")
     print(f"[execution] async_scheduling={str(requested_async).lower()} "
           f"engine_core={core_mode} "
+          f"mome_prefill_state_fix={str(requested_fix).lower()} "
           f"timing_boundary={'host_outputs' if host_timing else 'device_complete'}", flush=True)
     cache_state = states_before[0]
     print(f"[cache] cache_dtype={cache_state.get('cache_dtype', 'auto')} "
@@ -265,6 +290,7 @@ def main(argv=None):
     effective["mamba_cache_mode"] = first.get("mamba_cache_mode")
     effective["cache_dtype"] = first.get("cache_dtype", "auto")
     effective["engine_core_mode"] = core_mode
+    effective["mome_prefill_state_fix"] = first.get("mome_prefill_state_fix", False)
     if "execution_settings" in first:
         effective["execution_settings"] = first["execution_settings"]
     effective["compilation"] = {"mode": a["mode"], "vllm": first["compilation"], "cudagraph": first["cudagraph"]}

@@ -65,6 +65,8 @@ def parser():
                    help="Omni only: enable async scheduling and time decode between host-visible outputs")
     p.add_argument("--omni-multiprocessing", action="store_true",
                    help="Omni only: run EngineCore in its native background process, as in the HTTP server")
+    p.add_argument("--fix-mome-prefill-state", action="store_true",
+                   help="Use a local metadata adapter for the first target decode after prefill; Omni source stays unchanged")
     p.add_argument("--enable-prefix-caching", action="store_true",
                    help="Omni only: enable prefix caching, including prompt reuse between warmup and repeats")
     p.add_argument("--block-size", type=int, help="Omni only: override the KV cache block size")
@@ -163,6 +165,8 @@ def make_plan(a):
         raise ValueError("--mtp-pad-to-8 requires --engine direct and positive depth")
     if a.mtp_no_static_kernels and (a.engine != "direct" or not a.depth or "compile" not in a.mode):
         raise ValueError("--mtp-no-static-kernels requires direct, positive depth and a compile mode")
+    if a.fix_mome_prefill_state and not a.depth:
+        raise ValueError("--fix-mome-prefill-state requires positive MTP depth")
     diagnostic_trace = a.trace_target or a.replay_target is not None
     if a.omni_multiprocessing and a.engine != "omni":
         raise ValueError("--omni-multiprocessing requires --engine omni")
@@ -208,6 +212,8 @@ def make_plan(a):
     if not 0 < a.gpu_memory_utilization <= 1:
         raise ValueError("gpu-memory-utilization must be in (0, 1]")
     config = json.loads((a.model / "config.json").read_text())
+    if a.fix_mome_prefill_state and not config.get("use_mome", False):
+        raise ValueError("--fix-mome-prefill-state requires use_mome=true in the model config")
     if not a.ignore_architecture and config.get("architectures") != [ULTRA_ARCHITECTURE]:
         raise ValueError("This tool requires PanguUltraMoEForCausalLM; use --ignore-architecture to force Ultra")
     hf_overrides = {"architectures": [ULTRA_ARCHITECTURE]} if a.ignore_architecture else {}
@@ -302,6 +308,8 @@ def make_plan(a):
         match["mtp_tp"] = a.mtp_tp
     if a.mtp_no_static_kernels:
         match["mtp_no_static_kernels"] = True
+    if a.fix_mome_prefill_state:
+        match["fix_mome_prefill_state"] = True
     if a.async_scheduling:
         match["async_scheduling"] = True
     if a.enable_prefix_caching:

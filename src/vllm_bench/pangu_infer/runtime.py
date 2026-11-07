@@ -248,7 +248,8 @@ class DirectEngine:
         self.model_timings = None
         if plan["config"].get("use_mome"):
             current_platform._align_hybrid_block_size(cfg, None)
-        self.caches = Caches(cfg, device, compact=self.a.get("compact_kv_cache", False))
+        self.caches = Caches(cfg, device, compact=self.a.get("compact_kv_cache", False),
+                             fix_mome_prefill_state=self.a.get("fix_mome_prefill_state", False))
         if self.a.get("compact_kv_cache", False):
             print(f"[cache] rank={rank} compact=true allocated_mib={self.caches.bytes / (1 << 20):.2f}"
                   f" padding_saved_mib={self.caches.padding_saved_bytes / (1 << 20):.2f}", flush=True)
@@ -583,7 +584,8 @@ def main(argv=None):
                                          "cudagraph": config_json(cfg.compilation_config.cudagraph_mode)},
                          "block_size": cfg.cache_config.block_size,
                          "mamba_block_size": cfg.cache_config.mamba_block_size,
-                         "cache_dtype": cfg.cache_config.cache_dtype}
+                         "cache_dtype": cfg.cache_config.cache_dtype,
+                         "mome_prefill_state_fix": getattr(engine.caches, "fix_mome_prefill_state", False)}
             if mtp is not None:
                 effective["mtp_tp"] = mtp.tp
                 effective["mtp_ranks"] = list(range(mtp.tp))

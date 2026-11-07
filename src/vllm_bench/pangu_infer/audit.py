@@ -16,6 +16,8 @@ SOURCES = {
     "omni_npu.attention.backends.mome": ("omni_npu", "attention/backends/mome.py"),
     "omni_npu.layers.mome.mome_rl": ("omni_npu", "layers/mome/mome_rl.py"),
     "omni_npu.compilation.acl_graph": ("omni_npu", "compilation/acl_graph.py"),
+    "vllm_bench.pangu_infer.mome_prefill": ("vllm_bench", "pangu_infer/mome_prefill.py"),
+    "vllm_bench.pangu_infer.omni_worker": ("vllm_bench", "pangu_infer/omni_worker.py"),
     "omni_npu.v1.models.pangu.pangu_ultra_moe": ("omni_npu", "v1/models/pangu/pangu_ultra_moe.py"),
     "omni_npu.v1.models.pangu.pangu_ultra_moe_mtp": ("omni_npu", "v1/models/pangu/pangu_ultra_moe_mtp.py"),
     "omni_npu.model_config.config_loader.loader": ("omni_npu", "model_config/config_loader/loader.py"),
@@ -36,7 +38,7 @@ ENVIRONMENT = (
 
 def package_roots():
     roots = {}
-    for package in ("vllm", "omni_npu"):
+    for package in sorted({package for package, _ in SOURCES.values()}):
         try:
             spec = util.find_spec(package)
         except (ModuleNotFoundError, ValueError):

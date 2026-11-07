@@ -81,7 +81,21 @@ def load_original_methods(source, torch, *, name):
             spec.loader.exec_module(module)
             loaded.append(module)
         yield SimpleNamespace(builder=loaded[0].NPUMomeAttentionMetadataBuilder,
-                              convolution=loaded[1].causal_conv1d_ref)
+                              convolution=loaded[1].causal_conv1d_ref, metadata_module=loaded[0])
+
+
+@contextmanager
+def load_local_methods(original):
+    source = Path(__file__).resolve().parents[1] / "src/vllm_bench/pangu_infer/mome_prefill.py"
+    name = "_pangu_cpu_local_mome_prefill"
+    with patch.dict(sys.modules, {"omni_npu.attention.backends.mome": original.metadata_module}), \
+            patch.object(sys, "dont_write_bytecode", True):
+        spec = importlib.util.spec_from_file_location(name, source)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        yield SimpleNamespace(builder=module.MomePrefillMetadataBuilder,
+                              convolution=original.convolution)
 
 
 def patched_copy(source, destination, fix_patch):

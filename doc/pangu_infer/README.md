@@ -652,36 +652,44 @@ Metadata выбирает initial block 64 и accepted=1. Перед прове�
 Причинность нужно подтвердить повтором с корректировкой.
 
 Это гипотеза о builder, а не доказанное отличие от рабочего HTTP-сервера.
-Сначала следует проверить штатный процессный EngineCore через
-`--omni-multiprocessing` на неизменённом OmniInfer: прежний launcher принудительно
-использовал in-process core. Патч ниже для такой проверки применять не нужно.
-
-`patches/omniinfer/mome-target-prefill-state.patch` содержит явную правку
-исходного MoME builder и regression tests. Для non-PD target при
-`computed == prompt` accepted нормализуется до `depth + 1`: для этого случая
-получаются initial block 63 и accepted=8, то есть хвост prefill-состояния.
-`build_for_drafting()` явно передаёт `for_drafting=True`, сохраняя прежние
-draft offsets. При `computed > prompt` и в PD сохраняется прежнее поведение.
-Счётчики sampler/runner и содержимое кеша не изменяются.
-
-Локальный checkout `omniinfer` остаётся read-only. На сервере патч можно
-применить к checkout, из которого импортируется установленный `omni_npu`.
-Команды ниже выполняются из `vllm-bench` при соседнем каталоге `omniinfer`:
+Корректировка реализована в `vllm-bench`; checkout и установленный пакет
+OmniInfer менять не нужно. Для проверки добавьте к прежней команде:
 
 ```bash
-git -C ../omniinfer apply --check ../vllm-bench/patches/omniinfer/mome-target-prefill-state.patch
-git -C ../omniinfer apply ../vllm-bench/patches/omniinfer/mome-target-prefill-state.patch
-python ../omniinfer/tests/unit/attention/backends/test_mome_num_prompt_tokens.py
+--fix-mome-prefill-state
 ```
 
-Это явное изменение установленного Omni, а не runtime-подмена методов PoC.
-После применения нужен новый процесс и повтор прежнего запуска с
-`--trace-mtp-boundary`: ожидаются `repeat-check.matches=true`, initial block 63
-и accepted=8 в metadata первой target-проверки. После подтверждения чисел
-TPOT измеряется отдельно без диагностики. Патч проверен на применение к
-временной копии исходников и синтаксис Python; его torch-тесты и выполнение
-на NPU локально недоступны. Если `apply --check` не проходит, нужен просмотр
-различий с серверной версией; принудительное применение не предусмотрено.
+Флаг поддерживается с `--engine omni` и `--engine direct`, depth 3/7 и
+`use_mome=true`. Без него используется прежний путь. Численная политика входит
+в `comparison_sha256`: при сравнении скорости обоих движков флаг должен совпадать.
+`--omni-multiprocessing` можно использовать вместе с адаптером; ограничение
+boundary trace на in-process запуск сохраняется.
+
+Локальный `MomePrefillMetadataBuilder` наследует исходный builder. Для non-PD
+**target** при `computed == prompt` accepted нормализуется до `depth + 1`:
+при context 8192, block 128, depth 7 получаются initial block 63 и accepted=8,
+то есть хвост prefill-состояния. Draft offsets, последующий target decode и PD
+сохраняют прежнюю семантику. Счётчики sampler/runner и содержимое кеша не меняются.
+
+В `direct` класс выбирается при создании MoME metadata lane. В `omni` явно
+выбирается локальный подкласс NPUWorker: после штатной инициализации KV-кеша,
+до прогрева/захвата графов, он создаёт локальные MoME builders и обновляет
+ссылки штатного MTP proposer через его initializer. Остальные attention
+builders остаются штатными. Глобальные методы и backend registry не подменяются.
+Рабочий процесс сообщает число установленных builders; launcher проверяет его
+и сохраняет `effective.mome_prefill_state_fix`. В Omni-логе появляется
+`[execution] ... mome_prefill_state_fix=true`.
+
+Для NPU-проверки нужен новый процесс и новый output-каталог с прежними
+параметрами и этим флагом. В диагностическом запуске с `--trace-mtp-boundary`
+ожидаются `repeat-check.matches=true`, initial block 63 и accepted=8 в metadata
+первой target-проверки. Исполнение на NPU ещё требует проверки; совпадение
+с HTTP-сервером не гарантируется одной корректировкой. После проверки чисел
+TPOT измеряется отдельно без trace.
+
+`patches/omniinfer/mome-target-prefill-state.patch` оставлен как контрольный
+вариант для CPU-тестов во временной копии. Для запуска инструмента применять
+его к OmniInfer не требуется.
 
 ## Численные CPU-тесты MoME без модели
 
@@ -710,23 +718,26 @@ python3 -m venv /tmp/pangu-mome-cpu
 Проверяются реальные `build`, `build_for_drafting` и block-index arithmetic
 из `omni/attention/backends/mome.py`, а также `causal_conv1d_ref` из
 `omni/layers/ops/causal_conv1d.py`. Заглушки заменяют только импорты внешних
-framework/hardware dependencies. Сам torch и проверяемые методы исходные.
+framework/hardware dependencies. Сам torch не заменяется; исправленный путь
+исполняет настоящий локальный subclass поверх исходных методов builder.
 Конструктор builder не проверяется: тест создаёт маленькие CPU buffers
 и batch-one metadata. Split-helper поддерживает упорядоченные CPU fixtures;
 SP/TP/HCCL протоколы этим тестом не проверяются.
 
-Девять тестов охватывают:
+Десять тестов охватывают:
 
 - context 8192, depth 3/7, APC on/off, float32/bfloat16;
 - выбор блока 64 / accepted=1 в текущем исходнике и блока 63 / accepted=depth+1
-  в исправленной временной копии;
+  в локальном адаптере;
 - два разных содержимых повторно выделенной будущей страницы при одинаковом
   актуальном prefill-tail;
 - сравнение с исходной reference convolution на непрерывном prompt + query;
 - правильный target-only control и chunked prefill 2048/2048/2048/1536/512;
 - соседние с границей блока длины 8184/8191/8192/8193/8320;
 - сохранение draft/последующего target/PD metadata после кандидата правки;
-- ветку обновления постоянных buffers на CPU, без захвата или replay графа.
+- ветку обновления постоянных buffers на CPU, без захвата или replay графа;
+- совпадение metadata локального адаптера с контрольной временной правкой
+  исходника для target/draft, APC, PD и persistent buffers.
 
 Выбор истории из APC-страницы выполняет явный тестовый адаптер по публичному
 контракту CANN. Сама convolution — исходная PyTorch reference. Разный мусор
@@ -734,7 +745,8 @@ SP/TP/HCCL протоколы этим тестом не проверяются.
 и фактический fused NPU-оператор не исполняются. Поэтому тест проверяет
 предполагаемый механизм, а не воспроизводит полный сервер или модель.
 
-JSON содержит версии, хеши исходного/исправленного builder и reference,
+JSON содержит версии, хеши исходного, локального и временно исправленного
+builder и reference,
 результаты отдельных контрпримеров, время и peak RSS процесса. Успешные
 reproduction assertions означают, что воспроизведена зависимость текущего
 исходника от неактуального состояния. Они не означают, что текущий builder
@@ -742,11 +754,13 @@ reproduction assertions означают, что воспроизведена з
 Тесты закрепляют поведение исходной ревизии 4cd855b2; при другой или уже
 исправленной версии нужно смотреть хеши, ошибки применения патча и ожидания.
 
-Если torch отсутствует, обычный unittest discovery пропускает эти девять
+Если torch отсутствует, обычный unittest discovery пропускает эти десять
 тестов. Явный runner возвращает exit code 2 и не создаёт успешный отчёт.
 Код 0 возможен только при выполненных тестах без failures/errors/skips.
 В текущем локальном окружении torch отсутствует, загрузка пакета недоступна
-из-за DNS; численная часть пока не выполнена. Проверены инфраструктура
+из-за DNS. Пользователь выполнил прежние девять численных тестов временной
+правки: все прошли. Обновлённая suite проверяет уже локальный runtime-класс
+и требует повторного численного запуска. Локально проверены инфраструктура
 изоляции импортов, запрет записи bytecode, применение патча во временной
 копии и корректный отказ runner при отсутствии torch. Для конфигурации
 по умолчанию достаточно одного CPU-потока и нескольких гигабайт RAM;

@@ -42,8 +42,9 @@ class CacheGroup:
 
 
 class Caches:
-    def __init__(self, cfg, device, *, compact=False):
+    def __init__(self, cfg, device, *, compact=False, fix_mome_prefill_state=False):
         self.cfg, self.device = cfg, device
+        self.fix_mome_prefill_state = fix_mome_prefill_state
         self.groups = []
         for name, layer in cfg.compilation_config.static_forward_context.items():
             getter = getattr(layer, "get_kv_cache_spec", None)
@@ -56,6 +57,8 @@ class Caches:
                 self.groups.append(CacheGroup(name, layer, spec, cfg, device, compact=compact))
         if not self.groups:
             raise ValueError("Model did not register any attention/state caches")
+        if fix_mome_prefill_state and not any(group.mome for group in self.groups):
+            raise ValueError("MoME prefill correction requires MoME state caches")
         # Every layer has its own raw allocation, but one batch-one request
         # uses identical logical block IDs in compatible layers.
         for bucket in compatible_groups(self.groups):
@@ -98,7 +101,11 @@ class MetadataLane:
         self.entries = []
         for bucket in compatible_groups(self.groups):
             group = bucket[0]
-            builder = group.backend.get_builder_cls()(
+            builder_class = group.backend.get_builder_cls()
+            if group.mome and getattr(caches, "fix_mome_prefill_state", False):
+                from vllm_bench.pangu_infer.mome_prefill import MomePrefillMetadataBuilder
+                builder_class = MomePrefillMetadataBuilder
+            builder = builder_class(
                 group.spec, [item.name for item in bucket], self.cfg, caches.device)
             slots = torch.empty(size, dtype=torch.int64, device=caches.device)
             common = CommonAttentionMetadata(

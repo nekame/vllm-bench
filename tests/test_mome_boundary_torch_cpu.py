@@ -1,8 +1,8 @@
 """Real Omni builder + reference convolution, tiny CPU tensors, no model weights.
 
 Passing reproduction tests mean that the current-source counterexample was
-reproduced, not that the current builder is correct. The candidate patch is
-applied only to a temporary copy and checked against an uninterrupted oracle.
+reproduced, not that the current builder is correct. The local adapter is
+checked against an uninterrupted oracle and a temporary patched-source control.
 """
 
 from contextlib import ExitStack
@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mome_cpu_support import Fixture, MOME_FILE, REFERENCE_FILE, load_original_methods, patched_copy
+from mome_cpu_support import Fixture, MOME_FILE, REFERENCE_FILE, load_local_methods, load_original_methods, patched_copy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,10 +47,12 @@ class MomeBoundaryTests(unittest.TestCase):
         directory = cls.stack.enter_context(tempfile.TemporaryDirectory(prefix="pangu-mome-cpu-"))
         cls.fixed_source = patched_copy(cls.omni_source, directory, cls.fix_patch)
         cls.source_hashes = {"original_builder": hashlib.sha256((cls.omni_source / MOME_FILE).read_bytes()).hexdigest(),
-                             "corrected_builder": hashlib.sha256((cls.fixed_source / MOME_FILE).read_bytes()).hexdigest(),
+                             "patched_builder": hashlib.sha256((cls.fixed_source / MOME_FILE).read_bytes()).hexdigest(),
+                             "local_builder": hashlib.sha256((ROOT / "src/vllm_bench/pangu_infer/mome_prefill.py").read_bytes()).hexdigest(),
                              "reference_convolution": hashlib.sha256((cls.omni_source / REFERENCE_FILE).read_bytes()).hexdigest(),
                              "candidate_patch": hashlib.sha256(cls.fix_patch.read_bytes()).hexdigest()}
-        cls.corrected = cls.stack.enter_context(load_original_methods(cls.fixed_source, torch, name="corrected"))
+        cls.patched = cls.stack.enter_context(load_original_methods(cls.fixed_source, torch, name="patched"))
+        cls.corrected = cls.stack.enter_context(load_local_methods(cls.original))
 
     def fixture(self, methods=None, **kwargs):
         return Fixture(self.torch, self.original if methods is None else methods, **kwargs)
@@ -184,6 +186,21 @@ class MomeBoundaryTests(unittest.TestCase):
             b = self.fixture(self.corrected, depth=depth, pd=True)
             self.assertEqual(metadata_values(a.metadata(8192, depth + 1)),
                              metadata_values(b.metadata(8192, depth + 1)))
+
+    def test_local_adapter_matches_reviewed_patch_for_target_and_draft_metadata(self):
+        for depth in (3, 7):
+            for apc in (False, True):
+                for persistent in (False, True):
+                    for pd in (False, True):
+                        a = self.fixture(self.patched, depth=depth, apc=apc, persistent=persistent, pd=pd)
+                        b = self.fixture(self.corrected, depth=depth, apc=apc, persistent=persistent, pd=pd)
+                        for start in (0, 7680, 8192, 8193, 8321):
+                            for draft_index, accepted in ((None, 1), (0, None), (1, 1)):
+                                with self.subTest(depth=depth, apc=apc, persistent=persistent, pd=pd,
+                                                  start=start, draft_index=draft_index):
+                                    before = a.metadata(start, depth + 1, accepted=accepted, draft_index=draft_index)
+                                    after = b.metadata(start, depth + 1, accepted=accepted, draft_index=draft_index)
+                                    self.assertEqual(metadata_values(before), metadata_values(after))
 
     def test_cpu_persistent_buffers_are_used_and_metadata_views_alias_them(self):
         fixture = self.fixture(persistent=True)
