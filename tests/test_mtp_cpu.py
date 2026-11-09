@@ -161,7 +161,7 @@ class PlanningTests(unittest.TestCase):
                     run.assert_not_called()
                     self.assertFalse(output.exists())
                     plan = json.loads(stream.getvalue())
-                    self.assertEqual(plan["world_size"], 1 if topology == "tp1" else 8)
+                    self.assertEqual(plan["world_size"], {"tp1": 1, "tp2": 2, "tp8": 8, "dp8-ep8": 8}[topology])
                     self.assertEqual(plan["total_sequences"], 8 if topology == "dp8-ep8" else 1)
                     self.assertEqual(plan["expected_layers"]["7"], [50] * 7)
                     self.assertFalse(plan["target_weights_loaded"])
@@ -371,6 +371,62 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 profile_mtp.main(args)
 
+    def test_tp2_launches_two_workers_for_one_sequence_without_ep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, model, operator = self.prepare(root)
+
+            def launch(command, **kwargs):
+                self.assertIn("--nproc-per-node=2", command)
+                plan = json.loads(Path(command[-1]).read_text())
+                self.assertEqual(plan["topology"], {"tp": 2, "dp": 1, "ep": False})
+                self.assertEqual(plan["world_size"], 2)
+                self.assertEqual(plan["total_sequences"], 1)
+                self.assertEqual(plan["options"]["synthetic_query_length"], 8)
+                row = {"depth": 7, "critical_path_median_s": 0.01,
+                       "total_sequences": 1, "proposed_tokens_per_s": 700}
+                (Path(plan["options"]["output"]) / "summary.json").write_text(json.dumps([row]))
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(subprocess, "run", side_effect=launch) as execute, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(profile_mtp.main([
+                    "--model", str(model), "--operator-config", str(operator), "--topology", "tp2",
+                    "--depths", "7", "--synthetic-query-length", "8", "--execution", "graph", "--execute",
+                    "--output", str(root / "result")]), 0)
+            execute.assert_called_once()
+
+    def test_tp2_replay_requires_two_matching_rank_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg, model, operator = self.prepare(root)
+            folder = root / "capture"
+            meta = {"format": "pangu-mtp-capture-v1", "topology": "tp2", "world_size": 2,
+                    "complete": True, "depth": 7, "config_sha256": mtp_common.digest(cfg),
+                    "versions": {}, "runtime_limits": {}, "additional_config": {},
+                    "input_tokens": 8, "batch_per_dp_rank": 1, "padded_tokens": 8,
+                    "compilation_options": {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"},
+                    "operator_config": json.loads(operator.read_text())}
+            for rank in range(2):
+                path = folder / f"rank-{rank:03d}"
+                path.mkdir(parents=True)
+                (path / "capture.json").write_text(json.dumps({**meta, "rank": rank}))
+            args = ["--model", str(model), "--operator-config", str(operator), "--topology", "tp2",
+                    "--input", "replay", "--capture", str(folder), "--execution", "graph",
+                    "--output", str(root / "result")]
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                profile_mtp.main(args)
+            plan = json.loads(stream.getvalue())
+            self.assertEqual(plan["world_size"], 2)
+            self.assertEqual(plan["options"]["depths"], [7])
+            wrong = folder / "rank-001/capture.json"
+            wrong.write_text(json.dumps({**meta, "rank": 1, "world_size": 8}))
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                profile_mtp.main(args)
+            wrong.unlink()
+            with self.assertRaises(FileNotFoundError):
+                profile_mtp.main(args)
+
     def test_graph_launcher_selects_jit_without_disabling_compilation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -395,7 +451,7 @@ from vllm_bench.mtp_profile import prepare_mtp_checkpoint, profile_mtp, record_m
         for name, settings in mtp_common.TOPOLOGIES.items():
             with self.subTest(topology=name), tempfile.TemporaryDirectory() as tmp:
                 self.assertEqual(mtp_common.topology_name(**settings), name)
-                size = 1 if name == "tp1" else 8
+                size = {"tp1": 1, "tp2": 2, "tp8": 8, "dp8-ep8": 8}[name]
                 root = Path(tmp)
                 for rank in range(size):
                     folder = root / f"rank-{rank:03d}"
@@ -941,11 +997,11 @@ class TraceCycleTests(unittest.TestCase):
         execute.assert_called_once_with("runner", "proposer", {"inputs": 1}, True, "template")
 
     def test_summary_keeps_baseline_and_reports_profiled_critical_path(self):
-        for topology in ("tp1", "dp8-ep8"):
+        for topology in ("tp1", "tp2", "dp8-ep8"):
             with self.subTest(topology=topology), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 settings = mtp_common.TOPOLOGIES[topology]
-                size = 1 if topology == "tp1" else 8
+                size = {"tp1": 1, "tp2": 2, "dp8-ep8": 8}[topology]
                 for rank in range(size):
                     folder = root / f"rank-{rank:03d}"
                     folder.mkdir()

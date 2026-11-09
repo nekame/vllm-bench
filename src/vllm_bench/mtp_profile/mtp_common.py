@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 TOPOLOGIES = {"tp1": {"tp": 1, "dp": 1, "ep": False},
+              "tp2": {"tp": 2, "dp": 1, "ep": False},
               "tp8": {"tp": 8, "dp": 1, "ep": False},
               "dp8-ep8": {"tp": 1, "dp": 8, "ep": True}}
 
