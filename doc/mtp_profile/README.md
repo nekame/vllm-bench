@@ -191,6 +191,17 @@ OmniInfer добавляет в `sampling_metadata.npu_input_batch` обратн
 
 ## Replay без target model
 
+Перед replay можно посмотреть rejection metadata готовой записи, не запуская модель:
+
+```bash
+bash scripts/inspect_mtp_rejection_metadata.sh \
+  /data/mtp-capture/cycle-0000/rank-000/before
+```
+
+Также принимается каталог `rank-000`; параметр `--json` включает JSON-вывод. Модуль можно вызвать напрямую: `python -m vllm_bench.mtp_profile.inspect_rejection_metadata /data/mtp-capture/cycle-0000/rank-000`. Для чтения tensor payloads нужен PyTorch; загрузка выполняется на CPU через `weights_only=True, mmap=True`, без импорта vLLM/OmniInfer или восстановления их объектов. `--help` и импорт модуля не требуют ML-пакетов. Скрипт читает исходные `tree.json`/`tensors.pt`, не меняя capture.
+
+Вывод содержит `num_rejected_tokens_gpu` и `token_indices_to_sample`, например `[4]` и `[3]` для одного запроса с семью предыдущими draft-предложениями и четырьмя отказами. Индекс относится к упакованному входу proposer; для нескольких запросов он не равен числу принятых токенов без учёта смещения запроса. `None` означает отсутствие тензора, а `[0]` — присутствующий тензор с нулевым числом отказов. В regular MTP при depth>1 проверка `num_rejected_tokens_gpu is not None` включает коррекцию длин и инвалидацию CPU shadows даже при нуле отказов. Это позволяет установить наличие отличающейся ветки; само по себе не измеряет её стоимость. Проверку следует повторить для нужных cycle/rank.
+
 ```bash
 python -m vllm_bench.mtp_profile.profile_mtp \
   --model /data/models/pangu505b-mxfp8-mtp \
